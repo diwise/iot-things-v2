@@ -1,0 +1,669 @@
+package catalog
+
+import (
+	"errors"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/diwise/iot-things-v2/internal/application/things"
+)
+
+const (
+	urnDistance = "urn:oma:lwm2m:ext:3330"
+	urnTemp     = "urn:oma:lwm2m:ext:3303"
+	urnHum      = "urn:oma:lwm2m:ext:3304"
+	urnLux      = "urn:oma:lwm2m:ext:3301"
+)
+
+func wastebinTemplate() TemplateSpec {
+	return TemplateSpec{
+		Template: things.Template{
+			ID:           "wastebin",
+			Version:      "v1",
+			Required:     []string{"distance", "level", "fillRate"},
+			RepeatGroups: []string{},
+		},
+		ParamDefaults: map[string]float64{"usableHeight": 1.0, "sensorToBottom": 1.5},
+		Overridable:   []string{"sensorToBottom"},
+		Recipes: []Recipe{
+			{Name: "wastebin-level", Operator: "distanceToLevel", Version: "v1",
+				Inputs: []string{"distance"}, Outputs: []string{"level"},
+				Params: []string{"sensorToBottom"}},
+		},
+	}
+}
+
+func seedBins(t *testing.T, c *Catalog) {
+	t.Helper()
+	if err := c.PutTemplate(wastebinTemplate()); err != nil {
+		t.Fatalf("put wastebin template: %v", err)
+	}
+	for id, h := range map[string]float64{"wastebin-A": 0.8, "wastebin-B": 1.2, "wastebin-C": 1.5, "wastebin-D": 1.8} {
+		if err := c.PutVariant(VariantSpec{Variant: things.Variant{
+			ID: id, Version: "v1",
+			TemplateID: "wastebin", TemplateVersion: "v1",
+			ParamValues: map[string]float64{"usableHeight": h},
+		}}); err != nil {
+			t.Fatalf("put %s: %v", id, err)
+		}
+	}
+}
+
+func TestFourBinsShareRecipe(t *testing.T) {
+	c := New()
+	seedBins(t, c)
+	for id, h := range map[string]float64{"wastebin-A": 0.8, "wastebin-B": 1.2, "wastebin-C": 1.5, "wastebin-D": 1.8} {
+		cfg, err := c.Compile(ObjectSpec{
+			ThingID: "bin-" + id, Tenant: "t", Name: "bin",
+			TemplateID: "wastebin", TemplateVersion: "v1",
+			VariantID: id, VariantVersion: "v1",
+			Properties: map[string]things.Property{
+				"distance": {}, "level": {}, "fillRate": {},
+			},
+			Bindings: []things.Binding{
+				{DeviceID: "milesight:214", Object: urnDistance, Resource: "5700", Input: "distance"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("compile %s: %v", id, err)
+		}
+		if len(cfg.Recipes) != 1 || cfg.Recipes[0].Name != "wastebin-level" {
+			t.Fatalf("%s: expected shared recipe wastebin-level, got %+v", id, cfg.Recipes)
+		}
+		v, src, ok := cfg.ParamValues["usableHeight"], cfg.ParamSources["usableHeight"], true
+		_ = ok
+		if v != h || src != things.ParamSourceVariant {
+			t.Fatalf("%s: usableHeight=%v (%s), want %v (variant)", id, v, src, h)
+		}
+	}
+}
+
+func TestParamPrecedenceWithOrigin(t *testing.T) {
+	c := New()
+	seedBins(t, c)
+	cfg, err := c.Compile(ObjectSpec{
+		ThingID: "bin-42", Tenant: "t",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		VariantID: "wastebin-B", VariantVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance": {}, "level": {}, "fillRate": {},
+		},
+		ParamOverrides: map[string]float64{"sensorToBottom": 1.42},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if cfg.ParamValues["usableHeight"] != 1.2 || cfg.ParamSources["usableHeight"] != things.ParamSourceVariant {
+		t.Fatalf("usableHeight precedence broken: %+v", cfg.ParamValues)
+	}
+	if cfg.ParamValues["sensorToBottom"] != 1.42 || cfg.ParamSources["sensorToBottom"] != things.ParamSourceThing {
+		t.Fatalf("sensorToBottom override broken: %+v", cfg.ParamValues)
+	}
+}
+
+func TestPublishedVersionsImmutable(t *testing.T) {
+	c := New()
+	if err := c.PutTemplate(wastebinTemplate()); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	if err := c.PutTemplate(wastebinTemplate()); err == nil {
+		t.Fatal("republishing identical template version must conflict")
+	}
+	before, err := c.Compile(ObjectSpec{
+		ThingID: "bin-1", Tenant: "t",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance": {}, "level": {}, "fillRate": {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile v1: %v", err)
+	}
+	v2 := wastebinTemplate()
+	v2.Template.Version = "v2"
+	v2.ParamDefaults["usableHeight"] = 2.0
+	if err := c.PutTemplate(v2); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+	after, err := c.Compile(ObjectSpec{
+		ThingID: "bin-1", Tenant: "t",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance": {}, "level": {}, "fillRate": {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile pinned v1 after v2 publish: %v", err)
+	}
+	if before.ParamValues["usableHeight"] != after.ParamValues["usableHeight"] {
+		t.Fatal("published catalog change altered existing pinned object")
+	}
+}
+
+func roomTemplate() TemplateSpec {
+	return TemplateSpec{
+		Template: things.Template{
+			ID:           "room",
+			Version:      "v1",
+			RepeatGroups: []string{"temperature."},
+			Optional:     []string{"humidity", "illuminance", "temperature.average"},
+			Relations: []things.RelationSpec{
+				{Name: "partOf", AllowedTargets: []string{"building"}, Min: 0, Max: 1},
+			},
+		},
+	}
+}
+
+func TestTwoRoomsSameTemplate(t *testing.T) {
+	c := New()
+	if err := c.PutTemplate(roomTemplate()); err != nil {
+		t.Fatalf("put room: %v", err)
+	}
+	a, err := c.Compile(ObjectSpec{
+		ThingID: "room-a", Tenant: "t",
+		TemplateID: "room", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"temperature.window": {}, "temperature.center": {},
+			"temperature.door": {}, "temperature.average": {},
+		},
+		Bindings: []things.Binding{
+			{DeviceID: "s1", Object: urnTemp, Resource: "5700", Input: "temperature.window"},
+			{DeviceID: "s2", Object: urnTemp, Resource: "5700", Input: "temperature.center"},
+			{DeviceID: "s3", Object: urnTemp, Resource: "5700", Input: "temperature.door"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile room-a: %v", err)
+	}
+	b, err := c.Compile(ObjectSpec{
+		ThingID: "room-b", Tenant: "t",
+		TemplateID: "room", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"temperature.window": {}, "temperature.center": {},
+			"humidity": {}, "illuminance": {},
+		},
+		Bindings: []things.Binding{
+			{DeviceID: "s4", Object: urnTemp, Resource: "5700", Input: "temperature.window"},
+			{DeviceID: "s5", Object: urnTemp, Resource: "5700", Input: "temperature.center"},
+			{DeviceID: "s6", Object: urnHum, Resource: "5700", Input: "humidity"},
+			{DeviceID: "s6", Object: urnLux, Resource: "5700", Input: "illuminance"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile room-b without new template: %v", err)
+	}
+	if len(a.Properties) != 4 || len(b.Properties) != 4 {
+		t.Fatalf("unexpected property counts: a=%d b=%d", len(a.Properties), len(b.Properties))
+	}
+}
+
+func TestClosedTemplateRejects(t *testing.T) {
+	c := New()
+	if err := c.PutTemplate(roomTemplate()); err != nil {
+		t.Fatalf("put room: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		props map[string]things.Property
+	}{
+		{"unknown", map[string]things.Property{"co2": {}}},
+		{"bare-prefix", map[string]things.Property{"temperature.": {}}},
+	} {
+		_, err := c.Compile(ObjectSpec{
+			ThingID: "room-x", Tenant: "t",
+			TemplateID: "room", TemplateVersion: "v1",
+			Properties: tc.props,
+		})
+		if err == nil {
+			t.Fatalf("%s: must be rejected", tc.name)
+		}
+	}
+	_, err := c.Compile(ObjectSpec{
+		ThingID: "room-x", Tenant: "t",
+		TemplateID: "room", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"temperature.window": {}},
+		Bindings:   []things.Binding{{Object: urnTemp, Resource: "5700", Input: "temperature.window"}},
+	})
+	if err == nil {
+		t.Fatal("binding without device must be rejected")
+	}
+}
+
+func TestVariantSingleLayerAndPin(t *testing.T) {
+	c := New()
+	if err := c.PutTemplate(wastebinTemplate()); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	bad := VariantSpec{Variant: things.Variant{
+		ID: "bad", Version: "v1",
+		TemplateID: "wastebin", TemplateVersion: "v9",
+		ParamValues: map[string]float64{"usableHeight": 1},
+	}}
+	if err := c.PutVariant(bad); err == nil {
+		t.Fatal("variant pinning unknown template version must fail")
+	}
+	unknown := VariantSpec{Variant: things.Variant{
+		ID: "bad2", Version: "v1",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		ParamValues: map[string]float64{"noSuchParam": 1},
+	}}
+	if err := c.PutVariant(unknown); err == nil {
+		t.Fatal("variant with unknown param must fail")
+	}
+}
+
+func TestUpgradePreviewKeepsOverridesVisible(t *testing.T) {
+	c := New()
+	seedBins(t, c)
+	obj := ObjectSpec{
+		ThingID: "bin-42", Tenant: "t",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		VariantID: "wastebin-B", VariantVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance": {}, "level": {}, "fillRate": {},
+		},
+		Bindings: []things.Binding{
+			{DeviceID: "milesight:214", Object: urnDistance, Resource: "5700", Input: "distance"},
+		},
+		ParamOverrides: map[string]float64{"sensorToBottom": 1.42},
+	}
+	v2 := wastebinTemplate()
+	v2.Template.Version = "v2"
+	delete(v2.ParamDefaults, "sensorToBottom")
+	v2.Overridable = nil
+	v2.Recipes[0].Version = "v2"
+	v2.Recipes[0].Params = nil
+	if err := c.PutTemplate(v2); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+	diff, conflicts, err := c.PreviewUpgrade(obj, "wastebin", "v2", "", "")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	joined := strings.Join(conflicts, "\n")
+	if !strings.Contains(joined, "sensorToBottom") {
+		t.Fatalf("dropped override must be a visible conflict, got %v", conflicts)
+	}
+	found := false
+	for _, r := range diff.ChangedRecipes {
+		if strings.Contains(r, "wastebin-level") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("recipe change must appear in diff, got %+v", diff)
+	}
+}
+
+func TestRelationsValidatedAgainstTemplate(t *testing.T) {
+	c := New()
+	building := TemplateSpec{Template: things.Template{
+		ID: "building", Version: "v1",
+		Relations: []things.RelationSpec{
+			{Name: "rooms", AllowedTargets: []string{"room"}, Min: 0, Max: 10},
+		},
+	}}
+	if err := c.PutTemplate(building); err != nil {
+		t.Fatalf("put building: %v", err)
+	}
+	if err := c.PutTemplate(roomTemplate()); err != nil {
+		t.Fatalf("put room: %v", err)
+	}
+	_, err := c.Compile(ObjectSpec{
+		ThingID: "building-a", Tenant: "t",
+		TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+		Relations: []RelationRef{
+			{Name: "rooms", TargetThingID: "room-a", TargetTemplateID: "room"},
+			{Name: "rooms", TargetThingID: "room-b", TargetTemplateID: "bench"},
+		},
+	})
+	if err == nil {
+		t.Fatal("disallowed relation target must be rejected")
+	}
+	cfg, err := c.Compile(ObjectSpec{
+		ThingID: "building-a", Tenant: "t",
+		TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+		Relations: []RelationRef{
+			{Name: "rooms", TargetThingID: "room-a", TargetTemplateID: "room"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("valid relation rejected: %v", err)
+	}
+	if len(cfg.Relations) != 1 || cfg.Relations[0].TargetThingID != "room-a" {
+		t.Fatalf("unexpected relations: %+v", cfg.Relations)
+	}
+}
+
+func TestStoredVersionsAreCopies(t *testing.T) {
+	c := New()
+	spec := wastebinTemplate()
+	if err := c.PutTemplate(spec); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	// Mutating the caller's maps/slices after publish must not leak in.
+	spec.ParamDefaults["usableHeight"] = 999
+	spec.Recipes[0].Inputs[0] = "mutated"
+	got, ok := c.GetTemplate("wastebin", "v1")
+	if !ok {
+		t.Fatal("missing template")
+	}
+	if got.ParamDefaults["usableHeight"] == 999 {
+		t.Fatal("PutTemplate stored shared ParamDefaults map")
+	}
+	if got.Recipes[0].Inputs[0] == "mutated" {
+		t.Fatal("PutTemplate stored shared recipe slice")
+	}
+	// Mutating a returned value must not corrupt the catalog.
+	got.ParamDefaults["usableHeight"] = -1
+	got.Recipes[0].Inputs[0] = "evil"
+	again, _ := c.GetTemplate("wastebin", "v1")
+	if again.ParamDefaults["usableHeight"] == -1 || again.Recipes[0].Inputs[0] == "evil" {
+		t.Fatal("GetTemplate returned shared state")
+	}
+	// Compiled recipes must be deep copies as well.
+	cfg, err := c.Compile(ObjectSpec{
+		ThingID: "bin-1", Tenant: "t",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	cfg.Recipes[0].Inputs[0] = "evil"
+	cfg.ParamValues["usableHeight"] = -5
+	after, _ := c.GetTemplate("wastebin", "v1")
+	if after.Recipes[0].Inputs[0] == "evil" {
+		t.Fatal("Compile exposed shared recipe inputs")
+	}
+	cfg2, err := c.Compile(ObjectSpec{
+		ThingID: "bin-1", Tenant: "t",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
+	})
+	if err != nil {
+		t.Fatalf("recompile: %v", err)
+	}
+	if cfg2.Recipes[0].Inputs[0] == "evil" || cfg2.ParamValues["usableHeight"] == -5 {
+		t.Fatal("Compile result mutation leaked into catalog")
+	}
+}
+
+func TestValidationErrorsWrap(t *testing.T) {
+	c := New()
+	if err := c.PutTemplate(wastebinTemplate()); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	cases := []struct {
+		name string
+		fn   func() error
+	}{
+		{"slash-template-id", func() error {
+			bad := wastebinTemplate()
+			bad.Template.ID = "a/b"
+			return c.PutTemplate(bad)
+		}},
+		{"empty-template-version", func() error {
+			bad := wastebinTemplate()
+			bad.Template.Version = ""
+			return c.PutTemplate(bad)
+		}},
+		{"recipe-no-inputs", func() error {
+			bad := wastebinTemplate()
+			bad.Template.Version = "bad-io"
+			bad.Recipes[0].Inputs = nil
+			return c.PutTemplate(bad)
+		}},
+		{"recipe-unknown-param", func() error {
+			bad := wastebinTemplate()
+			bad.Template.Version = "bad-param"
+			bad.Recipes[0].Params = []string{"noSuch"}
+			return c.PutTemplate(bad)
+		}},
+		{"variant-preset-unknown", func() error {
+			return c.PutVariant(VariantSpec{Variant: things.Variant{
+				ID: "vps", Version: "v1",
+				TemplateID: "wastebin", TemplateVersion: "v1",
+			}, PresetProperties: []string{"nope"}})
+		}},
+		{"compile-unknown-prop", func() error {
+			_, err := c.Compile(ObjectSpec{
+				ThingID: "bin-1", Tenant: "t",
+				TemplateID: "wastebin", TemplateVersion: "v1",
+				Properties: map[string]things.Property{"nope": {}},
+			})
+			return err
+		}},
+		{"compile-bad-binding", func() error {
+			_, err := c.Compile(ObjectSpec{
+				ThingID: "bin-1", Tenant: "t",
+				TemplateID: "wastebin", TemplateVersion: "v1",
+				Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
+				Bindings:   []things.Binding{{DeviceID: "", Object: urnDistance, Resource: "5700", Input: "distance"}},
+			})
+			return err
+		}},
+		{"override-unknown", func() error {
+			_, err := c.Compile(ObjectSpec{
+				ThingID: "bin-1", Tenant: "t",
+				TemplateID: "wastebin", TemplateVersion: "v1",
+				Properties:     map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
+				ParamOverrides: map[string]float64{"noSuch": 1},
+			})
+			return err
+		}},
+		{"override-not-overridable", func() error {
+			_, err := c.Compile(ObjectSpec{
+				ThingID: "bin-1", Tenant: "t",
+				TemplateID: "wastebin", TemplateVersion: "v1",
+				Properties:     map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
+				ParamOverrides: map[string]float64{"usableHeight": 2},
+			})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		if err := tc.fn(); err == nil {
+			t.Fatalf("%s: expected error", tc.name)
+		} else if !errors.Is(err, things.ErrValidation) {
+			t.Fatalf("%s: error %v does not wrap ErrValidation", tc.name, err)
+		}
+	}
+}
+
+func TestPutTemplateRejectsDuplicates(t *testing.T) {
+	c := New()
+	dupProp := wastebinTemplate()
+	dupProp.Template.Version = "v1"
+	dupProp.Template.Optional = []string{"level"}
+	if err := c.PutTemplate(dupProp); err == nil {
+		t.Fatal("duplicate property across required/optional must fail")
+	}
+	dupRecipe := wastebinTemplate()
+	dupRecipe.Template.Version = "v1"
+	dupRecipe.Recipes = append(dupRecipe.Recipes, dupRecipe.Recipes[0])
+	if err := c.PutTemplate(dupRecipe); err == nil {
+		t.Fatal("duplicate recipe name must fail")
+	}
+}
+
+func TestRelationsMinMaxSelfRef(t *testing.T) {
+	c := New()
+	tmpl := TemplateSpec{Template: things.Template{
+		ID: "building", Version: "v1",
+		Relations: []things.RelationSpec{
+			{Name: "rooms", AllowedTargets: []string{"room"}, Min: 1, Max: 1},
+		},
+	}}
+	if err := c.PutTemplate(tmpl); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	// Min violation: no relations while Min=1.
+	if _, err := c.Compile(ObjectSpec{
+		ThingID: "building-a", Tenant: "t",
+		TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+	}); err == nil {
+		t.Fatal("missing required relation must fail (min)")
+	}
+	// Max violation: two relations while Max=1.
+	if _, err := c.Compile(ObjectSpec{
+		ThingID: "building-a", Tenant: "t",
+		TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+		Relations: []RelationRef{
+			{Name: "rooms", TargetThingID: "room-a", TargetTemplateID: "room"},
+			{Name: "rooms", TargetThingID: "room-b", TargetTemplateID: "room"},
+		},
+	}); err == nil {
+		t.Fatal("exceeding max must fail")
+	}
+	// Self reference.
+	if _, err := c.Compile(ObjectSpec{
+		ThingID: "building-a", Tenant: "t",
+		TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+		Relations: []RelationRef{
+			{Name: "rooms", TargetThingID: "building-a", TargetTemplateID: "building"},
+		},
+	}); err == nil {
+		t.Fatal("self reference must fail")
+	}
+	// Unknown slot.
+	if _, err := c.Compile(ObjectSpec{
+		ThingID: "building-a", Tenant: "t",
+		TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+		Relations: []RelationRef{
+			{Name: "nope", TargetThingID: "room-a", TargetTemplateID: "room"},
+		},
+	}); err == nil {
+		t.Fatal("unknown relation slot must fail")
+	}
+}
+
+func TestPreviewFlagsNonOverridableAndRecipeIO(t *testing.T) {
+	c := New()
+	seedBins(t, c)
+	obj := ObjectSpec{
+		ThingID: "bin-42", Tenant: "t",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		VariantID: "wastebin-B", VariantVersion: "v1",
+		Properties:     map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
+		ParamOverrides: map[string]float64{"sensorToBottom": 1.42},
+	}
+	// v2 keeps the param but makes it non-overridable: thing override must conflict.
+	v2 := wastebinTemplate()
+	v2.Template.Version = "v2"
+	v2.Overridable = []string{"usableHeight"}
+	if err := c.PutTemplate(v2); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+	_, conflicts, err := c.PreviewUpgrade(obj, "wastebin", "v2", "", "")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if joined := strings.Join(conflicts, "\n"); !strings.Contains(joined, "sensorToBottom") {
+		t.Fatalf("non-overridable override must conflict, got %v", conflicts)
+	}
+	// Recipe output-only change must appear in diff.
+	v3 := wastebinTemplate()
+	v3.Template.Version = "v3"
+	v3.Recipes[0].Outputs = []string{"level", "fillRate"}
+	if err := c.PutTemplate(v3); err != nil {
+		t.Fatalf("put v3: %v", err)
+	}
+	diff, _, err := c.PreviewUpgrade(obj, "wastebin", "v3", "", "")
+	if err != nil {
+		t.Fatalf("preview v3: %v", err)
+	}
+	found := false
+	for _, r := range diff.ChangedRecipes {
+		if strings.Contains(r, "wastebin-level") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("recipe output change must appear in diff, got %+v", diff)
+	}
+}
+
+func TestPreviewVariantPinMismatch(t *testing.T) {
+	c := New()
+	seedBins(t, c)
+	v2 := wastebinTemplate()
+	v2.Template.Version = "v2"
+	v2.Recipes[0].Params = nil
+	delete(v2.ParamDefaults, "sensorToBottom")
+	v2.Overridable = nil
+	if err := c.PutTemplate(v2); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+	obj := ObjectSpec{
+		ThingID: "bin-42", Tenant: "t",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		VariantID: "wastebin-B", VariantVersion: "v1",
+		Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
+	}
+	// Variant B pins v1 but upgrade pins v2: must be an error, not silent.
+	if _, _, err := c.PreviewUpgrade(obj, "wastebin", "v2", "wastebin-B", "v1"); err == nil {
+		t.Fatal("variant pin mismatch must fail")
+	} else if !errors.Is(err, things.ErrValidation) {
+		t.Fatalf("mismatch error must wrap ErrValidation, got %v", err)
+	}
+}
+
+func TestPreviewRelationConflicts(t *testing.T) {
+	c := New()
+	v1 := TemplateSpec{Template: things.Template{
+		ID: "building", Version: "v1",
+		Relations: []things.RelationSpec{{Name: "rooms", AllowedTargets: []string{"room"}, Min: 0, Max: 10}},
+	}}
+	v2 := TemplateSpec{Template: things.Template{
+		ID: "building", Version: "v2",
+		Relations: []things.RelationSpec{{Name: "rooms", AllowedTargets: []string{"office"}, Min: 0, Max: 10}},
+	}}
+	if err := c.PutTemplate(v1); err != nil {
+		t.Fatalf("put v1: %v", err)
+	}
+	if err := c.PutTemplate(v2); err != nil {
+		t.Fatalf("put v2: %v", err)
+	}
+	obj := ObjectSpec{
+		ThingID: "building-a", Tenant: "t",
+		TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+		Relations:  []RelationRef{{Name: "rooms", TargetThingID: "room-a", TargetTemplateID: "room"}},
+	}
+	_, conflicts, err := c.PreviewUpgrade(obj, "building", "v2", "", "")
+	if err != nil {
+		t.Fatalf("preview: %v", err)
+	}
+	if joined := strings.Join(conflicts, "\n"); !strings.Contains(joined, "room") {
+		t.Fatalf("tightened relation target must conflict, got %v", conflicts)
+	}
+}
+
+func TestConcurrentReadWrite(t *testing.T) {
+	c := New()
+	if err := c.PutTemplate(wastebinTemplate()); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _ = c.GetTemplate("wastebin", "v1")
+			_, _ = c.Compile(ObjectSpec{
+				ThingID: "bin-1", Tenant: "t",
+				TemplateID: "wastebin", TemplateVersion: "v1",
+				Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
+			})
+		}(i)
+	}
+	wg.Wait()
+}
