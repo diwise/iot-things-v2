@@ -1,4 +1,4 @@
-package acceptance
+package application_test
 
 import (
 	"encoding/json"
@@ -57,7 +57,7 @@ type fixtureFile struct {
 }
 
 func fixturePath(name string) string {
-	return filepath.Join("..", "..", "testdata", "fixtures", name)
+	return filepath.Join("..", "..", "assets", "data", "fixtures", name)
 }
 
 func loadFixture(t *testing.T, name string) fixtureFile {

@@ -1,0 +1,580 @@
+openapi: 3.0.3
+info:
+  title: IoT Things API
+  version: 0.1.0
+  description: API for querying and managing things and thing values.
+servers:
+  - url: /api/v0
+security:
+  - bearerAuth: []
+tags:
+  - name: Things
+  - name: Lookup
+paths:
+  /things:
+    get:
+      tags: [Things]
+      summary: Query things
+      parameters:
+        - name: id
+          in: query
+          schema: { type: string }
+        - name: type
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: subtype
+          in: query
+          schema: { type: string }
+        - name: tags
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: refdevice
+          in: query
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - name: export
+          in: query
+          schema: { type: boolean }
+        - name: op
+          in: query
+          description: Operator used for numeric field filters such as `v[level]=50`.
+          schema:
+            type: string
+            enum: [eq, ne, gt, lt]
+            default: gt
+        - name: v[field]
+          in: query
+          description: Numeric field filter. Replace `field` with the value field name to filter on.
+          schema: { type: number, format: double }
+      responses:
+        '200':
+          description: Things returned
+          content:
+            application/vnd.api+json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ThingCollectionResponse'
+                  - $ref: '#/components/schemas/EmptyArray'
+            text/csv:
+              schema:
+                type: string
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    post:
+      tags: [Things]
+      summary: Create thing or seed things from file
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema:
+              $ref: '#/components/schemas/Thing'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Thing'
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                fileupload:
+                  type: string
+                  format: binary
+              required: [fileupload]
+      responses:
+        '201': { description: Thing created or seed completed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+  /things/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ThingId'
+    get:
+      tags: [Things]
+      summary: Get thing by id
+      parameters:
+        - $ref: '#/components/parameters/ValueId'
+        - name: urn
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: refdevice
+          in: query
+          schema: { type: string }
+        - name: n
+          in: query
+          description: Value name filter.
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Timerel'
+        - $ref: '#/components/parameters/TimeAt'
+        - $ref: '#/components/parameters/EndTimeAt'
+        - name: value
+          in: query
+          schema: { type: number, format: double }
+        - name: v
+          in: query
+          description: Alias for `value`.
+          schema: { type: number, format: double }
+        - $ref: '#/components/parameters/Operator'
+        - name: vb
+          in: query
+          schema: { type: boolean }
+        - name: timeunit
+          in: query
+          schema:
+            type: string
+            enum: [hour, day]
+        - name: distinct
+          in: query
+          schema:
+            type: string
+            enum: [v, vb]
+        - name: latest
+          in: query
+          schema: { type: boolean }
+        - name: options
+          in: query
+          schema:
+            type: string
+            enum: [groupByID, groupByRef]
+      responses:
+        '200':
+          description: Thing returned
+          content:
+            application/vnd.api+json:
+              schema:
+                $ref: '#/components/schemas/ThingResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    put:
+      tags: [Things]
+      summary: Update thing
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema:
+              $ref: '#/components/schemas/Thing'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Thing'
+      responses:
+        '200': { description: Thing updated }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    patch:
+      tags: [Things]
+      summary: Patch thing
+      requestBody:
+        required: true
+        content:
+          application/vnd.api+json:
+            schema:
+              type: object
+              additionalProperties: true
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200': { description: Thing patched }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+    delete:
+      tags: [Things]
+      summary: Delete thing
+      responses:
+        '200': { description: Thing deleted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /things/tags:
+    get:
+      tags: [Lookup]
+      summary: Get tags
+      responses:
+        '200':
+          description: Tags returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StringCollectionResponse'
+        '500': { $ref: '#/components/responses/InternalServerError' }
+  /things/types:
+    get:
+      tags: [Lookup]
+      summary: Get thing types
+      responses:
+        '200':
+          description: Thing types returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThingTypeCollectionResponse'
+        '500': { $ref: '#/components/responses/InternalServerError' }
+  /things/values:
+    get:
+      tags: [Things]
+      summary: Query thing values
+      parameters:
+        - $ref: '#/components/parameters/ValueId'
+        - name: thingid
+          in: query
+          schema: { type: string }
+        - name: urn
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: refdevice
+          in: query
+          schema: { type: string }
+        - name: n
+          in: query
+          description: Value name filter.
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+        - $ref: '#/components/parameters/Timerel'
+        - $ref: '#/components/parameters/TimeAt'
+        - $ref: '#/components/parameters/EndTimeAt'
+        - name: value
+          in: query
+          schema: { type: number, format: double }
+        - name: v
+          in: query
+          description: Alias for `value`.
+          schema: { type: number, format: double }
+        - $ref: '#/components/parameters/Operator'
+        - name: vb
+          in: query
+          schema: { type: boolean }
+        - name: timeunit
+          in: query
+          schema:
+            type: string
+            enum: [hour, day]
+        - name: distinct
+          in: query
+          schema:
+            type: string
+            enum: [v, vb]
+        - name: latest
+          in: query
+          description: Requires `thingid`; cannot be combined with `distinct` or `timeunit`.
+          schema: { type: boolean }
+        - name: options
+          in: query
+          schema:
+            type: string
+            enum: [groupByID, groupByRef]
+      responses:
+        '200':
+          description: Values returned
+          content:
+            application/vnd.api+json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/ValueCollectionResponse'
+                  - $ref: '#/components/schemas/GroupedValueCollectionResponse'
+                  - $ref: '#/components/schemas/EmptyArray'
+            text/csv:
+              schema:
+                type: string
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '500': { $ref: '#/components/responses/InternalServerError' }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    ThingId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string }
+    ValueId:
+      name: id
+      in: query
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+    Offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+    Timerel:
+      name: timerel
+      in: query
+      schema:
+        type: string
+        enum: [before, after, between]
+    TimeAt:
+      name: timeat
+      in: query
+      schema:
+        type: string
+        format: date-time
+    EndTimeAt:
+      name: endtimeat
+      in: query
+      schema:
+        type: string
+        format: date-time
+    Operator:
+      name: op
+      in: query
+      schema:
+        type: string
+        enum: [eq, ne, gt, lt]
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        text/plain:
+          schema: { type: string }
+    Forbidden:
+      description: Forbidden
+    NotFound:
+      description: Not found
+    Conflict:
+      description: Conflict
+    InternalServerError:
+      description: Internal server error
+      content:
+        text/plain:
+          schema: { type: string }
+  schemas:
+    ApiResponse:
+      type: object
+      properties:
+        meta:
+          $ref: '#/components/schemas/Meta'
+        data: {}
+        links:
+          $ref: '#/components/schemas/Links'
+        included:
+          type: array
+          items:
+            $ref: '#/components/schemas/Resource'
+      required: [data]
+    Meta:
+      type: object
+      properties:
+        totalRecords:
+          type: integer
+          format: uint64
+        offset:
+          type: integer
+          format: uint64
+        limit:
+          type: integer
+          format: uint64
+        count:
+          type: integer
+          format: uint64
+      required: [totalRecords]
+    Links:
+      type: object
+      properties:
+        self: { type: string, format: uri-reference }
+        first: { type: string, format: uri-reference }
+        prev: { type: string, format: uri-reference }
+        next: { type: string, format: uri-reference }
+        last: { type: string, format: uri-reference }
+    Resource:
+      type: object
+      properties:
+        id: { type: string }
+        type: { type: string }
+      required: [id, type]
+    EmptyArray:
+      type: array
+      maxItems: 0
+      items: {}
+    Location:
+      type: object
+      properties:
+        latitude: { type: number, format: double }
+        longitude: { type: number, format: double }
+      required: [latitude, longitude]
+    RefDevice:
+      type: object
+      properties:
+        deviceID: { type: string }
+        measurements:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/Measurement'
+      required: [deviceID]
+    Binding:
+      type: object
+      description: >-
+        Kopplar en signal (enhet, kanal, objekt, resurs) till en namngiven
+        ingang pa saken. Channel tom matchar alla kanaler.
+      properties:
+        deviceID: { type: string }
+        channel: { type: string }
+        object: { type: string }
+        resource: { type: string }
+        input: { type: string }
+      required: [deviceID, object, resource, input]
+    Thing:
+      type: object
+      additionalProperties: true
+      properties:
+        id: { type: string }
+        type: { type: string }
+        subType: { type: string }
+        name: { type: string }
+        alternativeName: { type: string }
+        description: { type: string }
+        location:
+          $ref: '#/components/schemas/Location'
+        area:
+          type: array
+          items:
+            type: array
+            items:
+              type: array
+              items: { type: number, format: double }
+        refDevices:
+          type: array
+          description: >-
+            Harledd fran bindningarna (distinkta enheter). Lagras inte.
+          items:
+            $ref: '#/components/schemas/RefDevice'
+        bindings:
+          type: array
+          items:
+            $ref: '#/components/schemas/Binding'
+        tags:
+          type: array
+          items: { type: string }
+        tenant: { type: string }
+        observedAt: { type: string, format: date-time }
+        validURN:
+          type: array
+          items: { type: string }
+      required: [id, type, location, tenant]
+    Measurement:
+      type: object
+      properties:
+        id: { type: string }
+        urn: { type: string }
+        vb: { type: boolean, nullable: true }
+        vs: { type: string, nullable: true }
+        v: { type: number, format: double, nullable: true }
+        unit: { type: string }
+        timestamp: { type: string, format: date-time }
+        source: { type: string, nullable: true }
+        ref: { type: string }
+      required: [timestamp]
+    Value:
+      allOf:
+        - $ref: '#/components/schemas/Measurement'
+        - type: object
+          properties:
+            ref: { type: string }
+    ThingType:
+      type: object
+      properties:
+        type: { type: string }
+        subType: { type: string }
+        name: { type: string }
+        inputs:
+          type: array
+          description: >-
+            Saktypens namngivna ingangar. Anvands for att konfigurera
+            bindningar i ett GUI.
+          items: { type: string }
+      required: [type, name]
+    ThingResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/Thing'
+                - type: object
+                  properties:
+                    values:
+                      oneOf:
+                        - type: array
+                          items:
+                            $ref: '#/components/schemas/Value'
+                        - type: object
+                          additionalProperties:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Value'
+    ThingCollectionResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Thing'
+    ValueCollectionResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/Value'
+    GroupedValueCollectionResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Value'
+    StringCollectionResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items: { type: string }
+    ThingTypeCollectionResponse:
+      allOf:
+        - $ref: '#/components/schemas/ApiResponse'
+        - type: object
+          properties:
+            data:
+              type: array
+              items:
+                $ref: '#/components/schemas/ThingType'

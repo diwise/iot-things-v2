@@ -1,4 +1,4 @@
-package engine
+package application
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 
 // Tidsregler B3/B13/B14/B15 (minnesimplementation, stdlib only).
 // Egna minimala typer används lokalt för att undvika importcykel mot
-// domain; API kan anpassas mot domain av integrator.
+// things; API kan anpassas mot things av integrator.
 
 // LateSavedAsHistory dokumenterar beslutet att en sen (äldre ObservedAt)
 // observation inte blir current men ändå sparas som historik.

@@ -2,96 +2,362 @@ package main
 
 import (
 	"context"
-	"errors"
+	"flag"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
-	"github.com/diwise/iot-things-v2/internal/api"
+	"github.com/diwise/iot-things-v2/internal/application"
+	"github.com/diwise/iot-things-v2/internal/infrastructure/storage"
+	"github.com/diwise/iot-things-v2/internal/presentation/api"
+	k8shandlers "github.com/diwise/service-chassis/pkg/infrastructure/net/http/handlers"
+
+	"github.com/diwise/messaging-golang/pkg/messaging"
+	"github.com/diwise/service-chassis/pkg/infrastructure/buildinfo"
+	"github.com/diwise/service-chassis/pkg/infrastructure/env"
+	"github.com/diwise/service-chassis/pkg/infrastructure/o11y"
+	"github.com/diwise/service-chassis/pkg/infrastructure/o11y/logging"
+	"github.com/diwise/service-chassis/pkg/infrastructure/servicerunner"
 )
 
-// TODO(store): wire PostgreSQL via pgx for things/history/relations.
-// TODO(messaging): publish thing values/relation changes via messaging-golang.
+const serviceName string = "iot-things-v2"
 
-func getenv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+func defaultFlags() flagMap {
+	return flagMap{
+		listenAddress: "0.0.0.0",
+		servicePort:   "8080",
+		controlPort:   "8000",
+		enableTracing: "true",
+
+		dbHost:     "",
+		dbUser:     "",
+		dbPassword: "",
+		dbPort:     "5432",
+		dbName:     "diwise",
+		dbSSLMode:  "disable",
+
+		policiesFile:      "/opt/diwise/config/authz.rego",
+		authzAccessObject: "false",
+		thingsFile:        "/opt/diwise/config/things.csv",
+		configFile:        "/opt/diwise/config/config.yaml",
+		migrateBindings:   "true",
+
+		logLevel: "debug",
 	}
-	return def
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
+	ctx, flags := parseExternalConfig(context.Background(), defaultFlags())
 
-	listenAddr := getenv("LISTEN_ADDRESS", "0.0.0.0")
-	servicePort := getenv("SERVICE_PORT", "8080")
-	controlPort := getenv("CONTROL_PORT", "8000")
+	serviceVersion := buildinfo.SourceVersion()
+	ctx, logger, cleanup := o11y.Init(ctx, serviceName, serviceVersion, "json")
+	defer cleanup()
 
-	publicAddr := listenAddr + ":" + servicePort
-	controlAddr := listenAddr + ":" + controlPort
+	logging.SetLogLevel(parseLogLevel(flags[logLevel]))
 
-	store := api.NewServer()
-	publicMux := api.NewMux(store)
+	policies, err := os.Open(flags[policiesFile])
+	exitIf(err, logger, "unable to open opa policy file")
 
-	controlMux := http.NewServeMux()
-	controlMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-	controlMux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ready"}`))
-	})
+	things, err := os.Open(flags[thingsFile])
+	exitIf(err, logger, "unable to open things file")
 
-	publicSrv := &http.Server{
-		Addr:              publicAddr,
-		Handler:           publicMux,
-		ReadHeaderTimeout: 5 * time.Second,
+	config, err := os.Open(flags[configFile])
+	exitIf(err, logger, "unable to open config file")
+
+	cfg := &appConfig{}
+
+	runner, err := initialize(ctx, flags, cfg, policies, things, config)
+	exitIf(err, logger, "failed to initialize service runner")
+
+	err = runner.Run(ctx)
+	exitIf(err, logger, "failed to start service runner")
+}
+
+func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile, thingsFile, configFile io.ReadCloser) (servicerunner.Runner[appConfig], error) {
+	log := logging.GetFromContext(ctx)
+
+	probes := readinessProbes()
+
+	var s *storage.Storage
+	var msgCtx messaging.MsgContext
+	var app application.ThingsApp
+
+	owned := &ownedResources{}
+
+	_, runner := servicerunner.New(ctx, *cfg,
+		webserver("control", listen(flags[listenAddress]), port(flags[controlPort]),
+			pprof(), liveness(func() error { return nil }), readiness(probes),
+		),
+		webserver("public", listen(flags[listenAddress]), port(flags[servicePort]), tracing(tracingEnabled(flags)),
+			muxinit(func(ctx context.Context, identifier string, port string, appCfg *appConfig, handler *http.ServeMux) error {
+				defer policiesFile.Close()
+				log.Debug("register api handlers...")
+				return api.RegisterHandlers(ctx, handler, app, policiesFile, api.WithAccessObjectAuthorization(accessObjectEnabled(flags)))
+			}),
+		),
+		oninit(func(ctx context.Context, ac *appConfig) error {
+			log.Debug("initializing servicerunner")
+
+			defer configFile.Close()
+			defer thingsFile.Close()
+
+			var err error
+
+			s, err = storage.New(ctx, storageConfigFromFlags(flags))
+			if err != nil {
+				return fmt.Errorf("could not configure storage: %w", err)
+			}
+
+			messengerConfig, err := messaging.LoadConfiguration(ctx, serviceName, log)
+			if err != nil {
+				return fmt.Errorf("messaging configuration error: %w", err)
+			}
+
+			msgCtx, err = messaging.Initialize(ctx, messengerConfig)
+			if err != nil {
+				s.Close()
+				s = nil
+				return fmt.Errorf("failed to init messenger: %w", err)
+			}
+
+			owned.messenger = msgCtx
+			owned.storage = s
+
+			log.Debug("creating application...")
+			app, err = newApp(ctx, s, s, msgCtx, configFile)
+			if err != nil {
+				s.Close()
+				s = nil
+				return fmt.Errorf("unable to initialize app: %w", err)
+			}
+
+			log.Debug("seeding things...")
+			err = seed(ctx, thingsFile, app)
+			if err != nil {
+				s.Close()
+				s = nil
+				return fmt.Errorf("unable to seed things: %w", err)
+			}
+
+			if migrateBindingsEnabled(flags) {
+				n, err := app.MigrateBindings(ctx)
+				if err != nil {
+					s.Close()
+					s = nil
+					return fmt.Errorf("bindings migration failed: %w", err)
+				}
+				if n > 0 {
+					log.Info("migrated things to bindings", "count", n)
+				}
+			} else if pending, err := app.HasUnmigratedThings(ctx); err != nil {
+				s.Close()
+				s = nil
+				return fmt.Errorf("could not check for unmigrated things: %w", err)
+			} else if pending {
+				s.Close()
+				s = nil
+				return fmt.Errorf("things without bindings remain and THINGS_MIGRATE_BINDINGS is disabled")
+			}
+
+			return nil
+		}),
+		onstarting(func(ctx context.Context, appCfg *appConfig) (err error) {
+			log.Debug("starting servicerunner")
+
+			// OnStarting failures bypass OnShutdown in the runner, so
+			// clean up acquired resources on every error path below.
+			defer func() {
+				if err != nil {
+					owned.close(ctx)
+				}
+			}()
+
+			log.Debug("starting messaging...")
+			err = msgCtx.Start(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to start messenger: %w", err)
+			}
+
+			log.Debug("register topic handler...")
+			err = msgCtx.RegisterTopicMessageHandler("message.accepted", application.NewMeasurementsHandler(ctx, app))
+			if err != nil {
+				return fmt.Errorf("unable to register message handler: %w", err)
+			}
+
+			return nil
+		}),
+		onshutdown(func(ctx context.Context, appCfg *appConfig) error {
+			log.Debug("shutdown servicerunner")
+
+			owned.close(ctx)
+
+			return nil
+		}),
+	)
+
+	return runner, nil
+}
+
+// tracingEnabled is the minimal production seam for the tracing toggle.
+// Only the exact string "true" enables tracing; ParseBool spellings
+// such as "TRUE" or "1" intentionally do not.
+func tracingEnabled(flags flagMap) bool {
+	return flags[enableTracing] == "true"
+}
+
+// accessObjectEnabled is the minimal production seam for the
+// access-object toggle, using strconv semantics: invalid values
+// silently keep the legacy tenants model.
+func accessObjectEnabled(flags flagMap) bool {
+	v, _ := strconv.ParseBool(flags[authzAccessObject])
+	return v
+}
+
+// migrateBindingsEnabled styr uppstartsmigreringen till bindningar. Endast
+// den exakta strängen "true" aktiverar den.
+func migrateBindingsEnabled(flags flagMap) bool {
+	return flags[migrateBindings] == "true"
+}
+
+// readinessProbes returns the named readiness stubs. Per harmonization
+// standard they always report OK and never call any dependency.
+func readinessProbes() map[string]k8shandlers.ServiceProber {
+	return map[string]k8shandlers.ServiceProber{
+		"rabbitmq":  func(context.Context) (string, error) { return "ok", nil },
+		"timescale": func(context.Context) (string, error) { return "ok", nil },
 	}
-	controlSrv := &http.Server{
-		Addr:              controlAddr,
-		Handler:           controlMux,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
+}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+// shutdownTimeout är en egen övre gräns för att stoppa inflöde och dränera
+// pågående arbete. Runnerns shutdown-hook får ingen egen timeout, så tjänsten
+// sätter sin egen så att en blockerad leverans inte håller nedstängningen
+// obegränsat.
+const shutdownTimeout = 10 * time.Second
 
-	errCh := make(chan error, 2)
-	go func() {
-		logger.Info("public server listening", "addr", publicAddr)
-		if err := publicSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+// ownedResources tracks the resources created during OnInit so shutdown
+// is nil-safe, ordered and idempotent via the sync.Once guard, so the
+// messenger is shut down at most once.
+//
+// Shutdown order: stop inflow (messenger) and let it drain in-flight
+// deliveries within budget, then close storage. The messaging library
+// acknowledges only after the handler returns and drains on Shutdown, so no
+// separate handler tracker is needed. HTTP servers stay live until after
+// OnShutdown returns (runner behavior).
+type ownedResources struct {
+	once      sync.Once
+	messenger messaging.MsgContext
+	storage   interface{ Close() }
+}
+
+func (o *ownedResources) close(ctx context.Context) {
+	o.once.Do(func() {
+		if o.messenger != nil {
+			// Egen budget, oberoende av en redan avbruten stoppsignal.
+			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+			defer cancel()
+
+			if err := o.messenger.Shutdown(stopCtx); err != nil {
+				logging.GetFromContext(ctx).Debug("failed to shut down messenger", "err", err.Error())
+			}
 		}
-	}()
-	go func() {
-		logger.Info("control server listening", "addr", controlAddr)
-		if err := controlSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+		if o.storage != nil {
+			o.storage.Close()
 		}
-	}()
+	})
+}
 
-	select {
-	case <-ctx.Done():
-		logger.Info("shutdown signal received")
-	case err := <-errCh:
-		logger.Error("server failed", "error", err)
+// storageConfigFromFlags builds the storage configuration explicitly
+// from cmd-owned flags. This is the only path used to configure
+// storage; storage.LoadConfiguration was removed as dead code
+// (THINGS-001).
+func storageConfigFromFlags(flags flagMap) storage.Config {
+	return storage.NewConfig(flags[dbHost], flags[dbUser], flags[dbPassword], flags[dbPort], flags[dbName], flags[dbSSLMode])
+}
+
+func parseExternalConfig(ctx context.Context, flags flagMap) (context.Context, flagMap) {
+	// Allow environment variables to override certain defaults
+	envOrDef := env.GetVariableOrDefault
+
+	flags[listenAddress] = envOrDef(ctx, "LISTEN_ADDRESS", flags[listenAddress])
+	flags[controlPort] = envOrDef(ctx, "CONTROL_PORT", flags[controlPort])
+	flags[servicePort] = envOrDef(ctx, "SERVICE_PORT", flags[servicePort])
+
+	flags[policiesFile] = envOrDef(ctx, "POLICIES_FILE", flags[policiesFile])
+	flags[authzAccessObject] = envOrDef(ctx, "AUTHZ_ACCESS_OBJECT_ENABLED", flags[authzAccessObject])
+	flags[thingsFile] = envOrDef(ctx, "THINGS_FILE", flags[thingsFile])
+	flags[configFile] = envOrDef(ctx, "CONFIG_FILE", flags[configFile])
+	flags[migrateBindings] = envOrDef(ctx, "THINGS_MIGRATE_BINDINGS", flags[migrateBindings])
+
+	flags[dbHost] = envOrDef(ctx, "POSTGRES_HOST", flags[dbHost])
+	flags[dbPort] = envOrDef(ctx, "POSTGRES_PORT", flags[dbPort])
+	flags[dbName] = envOrDef(ctx, "POSTGRES_DBNAME", flags[dbName])
+	flags[dbUser] = envOrDef(ctx, "POSTGRES_USER", flags[dbUser])
+	flags[dbPassword] = envOrDef(ctx, "POSTGRES_PASSWORD", flags[dbPassword])
+	flags[dbSSLMode] = envOrDef(ctx, "POSTGRES_SSLMODE", flags[dbSSLMode])
+
+	flags[logLevel] = envOrDef(ctx, "LOG_LEVEL", flags[logLevel])
+
+	apply := func(f flagType) func(string) error {
+		return func(value string) error {
+			flags[f] = value
+			return nil
+		}
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	// Allow command line arguments to override defaults and environment variables
+	flag.Func("policies", "an authorization policy file", apply(policiesFile))
+	flag.Func("authz-access-object", "enable access-object authorization policy result model", apply(authzAccessObject))
+	flag.Func("things", "list of known things", apply(thingsFile))
+	flag.Func("config", "a yaml file with configuration", apply(configFile))
+	flag.Func("loglevel", "set the log level", apply(logLevel))
+	flag.Parse()
 
-	if err := publicSrv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("public server shutdown failed", "error", err)
+	return ctx, flags
+}
+
+func parseLogLevel(level string) slog.Level {
+	switch strings.ToLower(level) {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelDebug
 	}
-	if err := controlSrv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("control server shutdown failed", "error", err)
+}
+
+func newApp(ctx context.Context, r application.ThingsReader, w application.ThingsWriter, m messaging.MsgContext, cfg io.Reader) (application.ThingsApp, error) {
+	a := application.New(r, w, m)
+	err := a.LoadConfig(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("unable to load config: %w", err)
 	}
-	logger.Info("shutdown complete")
+
+	return a, nil
+}
+
+func seed(ctx context.Context, fp io.Reader, a application.ThingsApp) error {
+	return a.Seed(ctx, fp)
+}
+
+func exitIf(err error, logger *slog.Logger, msg string, args ...any) {
+	l := logger
+	if l == nil {
+		l = slog.Default()
+	}
+	if err != nil {
+		l.With(args...).Error(msg, "err", err.Error())
+		time.Sleep(2 * time.Second)
+		os.Exit(1)
+	}
 }

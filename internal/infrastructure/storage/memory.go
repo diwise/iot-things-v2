@@ -1,4 +1,4 @@
-package store
+package storage
 
 import (
 	"fmt"
@@ -85,7 +85,7 @@ func (s *MemThingStore) ListByTenant(tenant string) []ThingRecord {
 }
 
 // HistoryRecord är en minimal historikrad. Egna typer används lokalt
-// för att undvika importcykel mot domain; API kan anpassas av integrator.
+// för att undvika importcykel mot application/things; API kan anpassas av integrator.
 type HistoryRecord struct {
 	Tenant     string
 	ThingID    string

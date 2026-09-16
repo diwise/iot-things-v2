@@ -1,4 +1,4 @@
-package contract
+package types
 
 import (
 	"fmt"
@@ -41,21 +41,21 @@ type ThingValueV1 struct {
 // Validate checks required identity fields and the strict quality enum.
 func (v ThingValueV1) Validate() error {
 	if v.ThingID == "" {
-		return fmt.Errorf("contract: missing thingId")
+		return fmt.Errorf("types: missing thingId")
 	}
 	if v.Tenant == "" {
-		return fmt.Errorf("contract: missing tenant")
+		return fmt.Errorf("types: missing tenant")
 	}
 	if v.PropertyID == "" {
-		return fmt.Errorf("contract: missing propertyId")
+		return fmt.Errorf("types: missing propertyId")
 	}
 	if v.ObservedAt.IsZero() {
-		return fmt.Errorf("contract: missing observedAt")
+		return fmt.Errorf("types: missing observedAt")
 	}
 	switch v.Quality {
-	case "", "ok", "uncertain", "invalid":
+	case "ok", "uncertain", "invalid":
 	default:
-		return fmt.Errorf("contract: invalid quality %q (want ok/uncertain/invalid)", v.Quality)
+		return fmt.Errorf("types: invalid quality %q (want ok/uncertain/invalid)", v.Quality)
 	}
 	return nil
 }

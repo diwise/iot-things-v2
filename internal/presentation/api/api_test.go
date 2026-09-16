@@ -283,3 +283,96 @@ func TestAddRelationValidation(t *testing.T) {
 		t.Fatal("saknad typ ska nekas")
 	}
 }
+
+// Regression B19: PUT mot okänt thing ska ge 404 (aldrig 409/läckage).
+func TestPutMissingThingIs404(t *testing.T) {
+	s := NewServer()
+	mux := NewMux(s)
+	body := ThingDTO{ID: "missing", Tenant: "t1", Name: "X"}
+	rec := doRequest(t, mux, http.MethodPut, "/api/v1/things/missing", "t1", `"rev-1"`, body)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("PUT missing: status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Regression: path-ID mot body-ID ska valideras (400 vid mismatch),
+// samma strikthet som tenant-mismatch och iot-things updateHandler.
+func TestPutIDMismatchIs400(t *testing.T) {
+	s := testServer()
+	mux := NewMux(s)
+	body := ThingDTO{ID: "other-id", Tenant: "t1", Name: "Hijack"}
+	rec := doRequest(t, mux, http.MethodPut, "/api/v1/things/thing-1", "t1", `"rev-1"`, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT id-mismatch: status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	// Tomt body-ID fylls från path och ska accepteras.
+	body = ThingDTO{Tenant: "t1", Name: "NoID"}
+	rec = doRequest(t, mux, http.MethodPut, "/api/v1/things/thing-1", "t1", `"rev-1"`, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT utan ID: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Regression ETag: svag prefix W/, utan citat och negativa/ogiltiga värden.
+func TestParseETagVariants(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want int64
+	}{
+		{`"rev-1"`, 1},
+		{`rev-1`, 1},
+		{`W/"rev-2"`, 2},
+		{`W/rev-3`, 3},
+		{`  "rev-4"  `, 4},
+	} {
+		got, err := ParseETag(tc.in)
+		if err != nil {
+			t.Fatalf("ParseETag(%q) fel: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("ParseETag(%q) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+	for _, bad := range []string{``, `"bogus"`, `"rev--1"`, `"rev-x"`, `"rev-1-extra"`, `W/`, `""`} {
+		if _, err := ParseETag(bad); err == nil {
+			t.Fatalf("ParseETag(%q) = nil, want fel", bad)
+		}
+	}
+	if _, err := ParseETag(`"rev--5"`); err == nil {
+		t.Fatal("negativ revision ska nekas")
+	}
+	// Format/Parse roundtrip ska bevara revision.
+	for _, rev := range []int64{1, 2, 99} {
+		back, err := ParseETag(FormatETag(rev))
+		if err != nil || back != rev {
+			t.Fatalf("roundtrip rev %d = (%d, %v)", rev, back, err)
+		}
+	}
+}
+
+// Regression B17: partOf-cykler ska nekas även i API-scaffolden,
+// samma skydd som MemRelationStore (a->c->b->a).
+func TestAddRelationCycleDenied(t *testing.T) {
+	s := NewServer()
+	if err := s.AddRelation(map[string]any{"type": "partOf", "fromID": "b", "toID": "a", "tenant": "t1"}); err != nil {
+		t.Fatalf("b->a ska gå: %v", err)
+	}
+	if err := s.AddRelation(map[string]any{"type": "partOf", "fromID": "c", "toID": "b", "tenant": "t1"}); err != nil {
+		t.Fatalf("c->b ska gå: %v", err)
+	}
+	if err := s.AddRelation(map[string]any{"type": "partOf", "fromID": "a", "toID": "c", "tenant": "t1"}); err == nil {
+		t.Fatal("partOf-cykel a->c->b->a ska nekas")
+	}
+	// Samma kant i annan tenant ska inte påverkas (isolering).
+	if err := s.AddRelation(map[string]any{"type": "partOf", "fromID": "a", "toID": "c", "tenant": "t2"}); err != nil {
+		t.Fatalf("samma kant i annan tenant ska gå: %v", err)
+	}
+	// Icke-partOf-cykler är tillåtna (begränsningen gäller partOf-hierarki).
+	s2 := NewServer()
+	if err := s2.AddRelation(map[string]any{"type": "locatedIn", "fromID": "a", "toID": "b", "tenant": "t1"}); err != nil {
+		t.Fatalf("locatedIn a->b ska gå: %v", err)
+	}
+	if err := s2.AddRelation(map[string]any{"type": "locatedIn", "fromID": "b", "toID": "a", "tenant": "t1"}); err != nil {
+		t.Fatalf("locatedIn b->a ska gå (ej partOf-cykel): %v", err)
+	}
+}

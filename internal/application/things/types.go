@@ -1,11 +1,11 @@
-// Package domain defines the core domain types for iot-things-v2.
+// Package things defines the core domain types for iot-things-v2.
 //
 // The model follows THNGS_NEW.md chapters 0-3: Thing (sak) and Property
 // are normative names in code, stream identity is
 // device/[channel]/object/resource where an empty channel in a binding
 // means all channels, templates are closed definitions of allowed
 // properties, and parameter precedence is template -> variant -> thing.
-package domain
+package things
 
 import (
 	"errors"

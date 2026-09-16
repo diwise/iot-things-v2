@@ -127,8 +127,9 @@ func (s *Server) UpdateThingWithMatch(tenant, id string, dto ThingDTO, ifMatch i
 
 // AddRelation stores a relation entry. Expected keys: "type", "fromID"/"fromId",
 // "toID"/"toId", "tenant". It enforces B17 for the in-memory scaffold:
-// non-empty tenant/endpoints, denied self-reference and at most one active
-// "partOf" parent per (tenant, child). Same child->same parent is idempotent
+// non-empty tenant/endpoints, denied self-reference, denied partOf cycles
+// (via the parent chain) and at most one active "partOf" parent per
+// (tenant, child). Same child->same parent is idempotent
 // (nil without storing a duplicate). Cross-tenant reads stay isolated via
 // ListChildren/GetThing tenant filtering; callers must pass the owning tenant.
 func (s *Server) AddRelation(rel map[string]any) error {
@@ -166,6 +167,9 @@ func (s *Server) AddRelation(rel map[string]any) error {
 			}
 			return fmt.Errorf("relation: child %q already has partOf parent %q", fromID, relString(r, "toID", "toId"))
 		}
+		if partOfCreatesCycleLocked(s.relations, tenant, fromID, toID) {
+			return fmt.Errorf("relation: partOf cycle denied for child %q parent %q", fromID, toID)
+		}
 	}
 	cp := make(map[string]any, len(rel))
 	for k, v := range rel {
@@ -173,6 +177,44 @@ func (s *Server) AddRelation(rel map[string]any) error {
 	}
 	s.relations = append(s.relations, cp)
 	return nil
+}
+
+// partOfParentLocked returns the partOf parent of childID in tenant.
+// Caller must hold s.mu (read or write).
+func partOfParentLocked(relations []map[string]any, tenant, childID string) (string, bool) {
+	for _, r := range relations {
+		if relString(r, "tenant") != tenant {
+			continue
+		}
+		if relString(r, "type") != "partOf" {
+			continue
+		}
+		if relString(r, "fromID", "fromId") != childID {
+			continue
+		}
+		return relString(r, "toID", "toId"), true
+	}
+	return "", false
+}
+
+// partOfCreatesCycleLocked reports whether child->newParent would create a
+// partOf cycle in tenant by following the parent chain from newParent.
+func partOfCreatesCycleLocked(relations []map[string]any, tenant, childID, newParentID string) bool {
+	cur := newParentID
+	for i := 0; i <= len(relations)+1; i++ {
+		if cur == childID {
+			return true
+		}
+		parent, ok := partOfParentLocked(relations, tenant, cur)
+		if !ok {
+			return false
+		}
+		if parent == "" || parent == cur {
+			return false
+		}
+		cur = parent
+	}
+	return true
 }
 
 func relString(m map[string]any, keys ...string) string {
@@ -286,6 +328,10 @@ func NewMux(s *Server) *http.ServeMux {
 		}
 		if dto.Tenant != "" && dto.Tenant != tenant {
 			writeError(w, http.StatusBadRequest, "tenant mismatch")
+			return
+		}
+		if dto.ID != "" && dto.ID != id {
+			writeError(w, http.StatusBadRequest, "id mismatch")
 			return
 		}
 		raw := r.Header.Get("If-Match")

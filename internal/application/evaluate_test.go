@@ -1,4 +1,4 @@
-package engine
+package application
 
 import (
 	"testing"
@@ -161,5 +161,18 @@ func TestEvaluateBatchRejectsInvalidQuality(t *testing.T) {
 		if _, err := EvaluateBatch(inputs, []string{"a", "b"}); err == nil {
 			t.Fatalf("väntat fel för kvalitet %q (medel kräver alla ok/uncertain)", q)
 		}
+	}
+}
+
+// Regression B4: nil-värde i required-ingång ska ge fel (alla krävs),
+// även när kvalitet är ok. Medel får aldrig dividera över saknade värden.
+func TestEvaluateBatchRejectsNilValue(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	inputs := map[string]CurrentValue{
+		"a": {Value: fptr(10), Quality: "ok", ObservedAt: t0, Source: "s1"},
+		"b": {Value: nil, Quality: "ok", ObservedAt: t0, Source: "s2"},
+	}
+	if _, err := EvaluateBatch(inputs, []string{"a", "b"}); err == nil {
+		t.Fatal("väntat fel vid nil-värde i required-ingång")
 	}
 }

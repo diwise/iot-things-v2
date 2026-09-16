@@ -1,4 +1,4 @@
-package store
+package storage
 
 import (
 	"testing"
@@ -214,5 +214,37 @@ func TestRelationCycleDenied(t *testing.T) {
 	// Samma kedja i annan tenant ska inte påverkas (isolering).
 	if err := s.Add(RelationRecord{ID: "r3", Tenant: "other", Type: "partOf", FromID: "a", ToID: "c"}); err != nil {
 		t.Fatalf("samma kant i annan tenant ska gå: %v", err)
+	}
+}
+
+// Regression tenant-isolering: Get/List ska aldrig läcka över tenant-gräns.
+func TestTenantIsolationThingAndHistory(t *testing.T) {
+	ts := NewMemThingStore()
+	ts.Upsert(ThingRecord{ID: "secret", Tenant: "t1", Revision: 1, Data: []byte(`{"n":1}`)})
+	if _, _, ok := ts.Get("t2", "secret"); ok {
+		t.Fatal("Get i annan tenant ska missa (ingen läcka)")
+	}
+	if _, _, ok := ts.Get("", "secret"); ok {
+		t.Fatal("Get med tom tenant ska missa")
+	}
+	if got := ts.ListByTenant("t2"); len(got) != 0 {
+		t.Fatalf("ListByTenant(t2) ska vara tom, fick %+v", got)
+	}
+	if got := ts.ListByTenant(""); len(got) != 0 {
+		t.Fatalf("ListByTenant(tom) ska vara tom, fick %+v", got)
+	}
+
+	hs := NewMemHistoryStore()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	hs.AppendIdempotent(HistoryRecord{
+		Tenant: "t1", ThingID: "thing-1", PropertyID: "temp",
+		ObservedAt: base, ReceivedAt: base, Value: fptr(1),
+		Quality: "ok", Source: "s1", MessageID: "m1",
+	})
+	if got := hs.List("t2", "thing-1", "temp", time.Time{}, time.Time{}, 0); len(got) != 0 {
+		t.Fatalf("historik i annan tenant ska vara tom, fick %+v", got)
+	}
+	if got := hs.List("t1", "thing-1", "other-prop", time.Time{}, time.Time{}, 0); len(got) != 0 {
+		t.Fatalf("fel property ska ge tomt resultat, fick %+v", got)
 	}
 }

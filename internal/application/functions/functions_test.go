@@ -1,4 +1,4 @@
-package operators
+package functions
 
 import "testing"
 
@@ -270,5 +270,67 @@ func TestFlagOutOfRange(t *testing.T) {
 	}
 	if got := FlagOutOfRange(101, 0, 100); got != QualityUncertain {
 		t.Fatalf("above = %q, want uncertain", got)
+	}
+}
+
+// Regression: okänd/tom kvalitet ska nekas för alla aggregeringar
+// (strikt ok/uncertain, B12). Tidigare felprefix "operators:" ska vara "functions:".
+func TestMeanMinMaxRejectUnknownQuality(t *testing.T) {
+	for _, q := range []string{"", "good", "bogus", "INVALID", "invalid"} {
+		vals := []NumberWithQuality{
+			{Value: 1, Quality: QualityOk},
+			{Value: 2, Quality: q},
+		}
+		if _, _, err := Mean(vals); err == nil {
+			t.Fatalf("Mean med kvalitet %q ska ge fel", q)
+		}
+		if _, _, err := Min(vals); err == nil {
+			t.Fatalf("Min med kvalitet %q ska ge fel", q)
+		}
+		if _, _, err := Max(vals); err == nil {
+			t.Fatalf("Max med kvalitet %q ska ge fel", q)
+		}
+	}
+}
+
+// Regression: felmeddelanden ska bära nya paketnamnet "functions:".
+func TestErrorPrefixIsFunctions(t *testing.T) {
+	if _, _, err := Mean(nil); err == nil || !containsSub(err.Error(), "functions:") {
+		t.Fatalf("Mean(nil) fel = %v, vill ha functions:-prefix", err)
+	}
+	if _, err := Level(0, 1); err == nil || !containsSub(err.Error(), "functions:") {
+		t.Fatalf("Level(0,1) fel = %v, vill ha functions:-prefix", err)
+	}
+	if _, _, err := FillRate(1, 0); err == nil || !containsSub(err.Error(), "functions:") {
+		t.Fatalf("FillRate fel = %v, vill ha functions:-prefix", err)
+	}
+	if _, err := Percent(1, 0); err == nil || !containsSub(err.Error(), "functions:") {
+		t.Fatalf("Percent fel = %v, vill ha functions:-prefix", err)
+	}
+}
+
+func containsSub(s, sub string) bool {
+	return len(s) >= len(sub) && (func() bool {
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
+		}
+		return false
+	})()
+}
+
+// Regression: bakåtklocka ska ackumulera noll (aldrig negativ tid).
+func TestActiveTimeBackwardsClockAccumulatesZero(t *testing.T) {
+	s := Update(ActiveTimeState{}, true, 100)
+	s = Update(s, false, 50)
+	if s.Active {
+		t.Fatalf("ska vara inaktiv efter avaktivering: %+v", s)
+	}
+	if s.AccumulatedSec != 0 {
+		t.Fatalf("bakåtklocka ska ge 0 ackumulerat, fick %+v", s)
+	}
+	if s.StartUnix != 0 {
+		t.Fatalf("start ska nollställas efter avaktivering: %+v", s)
 	}
 }

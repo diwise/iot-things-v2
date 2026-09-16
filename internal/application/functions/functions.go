@@ -1,8 +1,8 @@
-package operators
+package functions
 
 import "errors"
 
-// Quality values as plain strings to avoid an import cycle against domain.
+// Quality values as plain strings to avoid an import cycle against things.
 // Valid values are "ok", "uncertain" and "invalid".
 const (
 	QualityOk        = "ok"
@@ -24,7 +24,7 @@ type NumberWithQuality struct {
 //   - any "uncertain" -> result "uncertain", otherwise "ok"
 func Mean(vals []NumberWithQuality) (float64, string, error) {
 	if len(vals) == 0 {
-		return 0, "", errors.New("operators: mean requires at least one input")
+		return 0, "", errors.New("functions: mean requires at least one input")
 	}
 
 	quality := QualityOk
@@ -35,7 +35,7 @@ func Mean(vals []NumberWithQuality) (float64, string, error) {
 		case QualityUncertain:
 			quality = QualityUncertain
 		default:
-			return 0, "", errors.New("operators: mean requires all inputs ok/uncertain")
+			return 0, "", errors.New("functions: mean requires all inputs ok/uncertain")
 		}
 		sum += v.Value
 	}
@@ -46,7 +46,7 @@ func Mean(vals []NumberWithQuality) (float64, string, error) {
 // Min returns the minimum value of vals with the same quality rules as Mean.
 func Min(vals []NumberWithQuality) (float64, string, error) {
 	if len(vals) == 0 {
-		return 0, "", errors.New("operators: min requires at least one input")
+		return 0, "", errors.New("functions: min requires at least one input")
 	}
 
 	quality := QualityOk
@@ -57,7 +57,7 @@ func Min(vals []NumberWithQuality) (float64, string, error) {
 		case QualityUncertain:
 			quality = QualityUncertain
 		default:
-			return 0, "", errors.New("operators: min requires all inputs ok/uncertain")
+			return 0, "", errors.New("functions: min requires all inputs ok/uncertain")
 		}
 		if v.Value < min {
 			min = v.Value
@@ -70,7 +70,7 @@ func Min(vals []NumberWithQuality) (float64, string, error) {
 // Max returns the maximum value of vals with the same quality rules as Mean.
 func Max(vals []NumberWithQuality) (float64, string, error) {
 	if len(vals) == 0 {
-		return 0, "", errors.New("operators: max requires at least one input")
+		return 0, "", errors.New("functions: max requires at least one input")
 	}
 
 	quality := QualityOk
@@ -81,7 +81,7 @@ func Max(vals []NumberWithQuality) (float64, string, error) {
 		case QualityUncertain:
 			quality = QualityUncertain
 		default:
-			return 0, "", errors.New("operators: max requires all inputs ok/uncertain")
+			return 0, "", errors.New("functions: max requires all inputs ok/uncertain")
 		}
 		if v.Value > max {
 			max = v.Value
@@ -100,7 +100,7 @@ func Max(vals []NumberWithQuality) (float64, string, error) {
 // It must be > 0.
 func Level(distanceToBottom, distance float64) (float64, error) {
 	if distanceToBottom <= 0 {
-		return 0, errors.New("operators: level requires distanceToBottom > 0")
+		return 0, errors.New("functions: level requires distanceToBottom > 0")
 	}
 
 	return distanceToBottom - distance, nil
@@ -114,7 +114,7 @@ func Level(distanceToBottom, distance float64) (float64, error) {
 //     otherwise quality is "ok" (no silent clamping/dropping).
 func FillRate(level, usableHeight float64) (float64, string, error) {
 	if usableHeight <= 0 {
-		return 0, "", errors.New("operators: fillrate requires usableHeight > 0")
+		return 0, "", errors.New("functions: fillrate requires usableHeight > 0")
 	}
 
 	rate := 100 * level / usableHeight
@@ -134,7 +134,7 @@ func Linear(value, factor, offset float64) float64 {
 // ref == 0 -> error.
 func Percent(value, ref float64) (float64, error) {
 	if ref == 0 {
-		return 0, errors.New("operators: percent requires ref != 0")
+		return 0, errors.New("functions: percent requires ref != 0")
 	}
 
 	return 100 * value / ref, nil
