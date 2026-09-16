@@ -1,0 +1,46 @@
+# Isolerad drill-miljö för iot-things-v2 (Etapp 7).
+#
+# Tjänsten delar aldrig tillstånd med iot-things v1: egen databas,
+# egen broadcast-prenumeration, egna topics. PostgreSQL krävs inte nåbar
+# i drillen (storage.New validerar endast anslutningssträngen; beständig
+# backend är K4). Sätt RABBITMQ_DISABLED=true för rent API-test utan broker.
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    hostname: rabbitmq
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  iot-things-v2:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "8081:8080"
+      - "8001:8000"
+    environment:
+      LISTEN_ADDRESS: "0.0.0.0"
+      SERVICE_PORT: "8080"
+      CONTROL_PORT: "8000"
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_VHOST: "/"
+      RABBITMQ_USER: user
+      RABBITMQ_PASS: bitnami
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DBNAME: diwise
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_SSLMODE: disable
+      LOG_LEVEL: debug

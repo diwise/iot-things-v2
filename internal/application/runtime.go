@@ -327,7 +327,7 @@ func StableEventID(tenant, thingID, messageID, property string) string {
 // kontraktsevent. Sources (ström-ID:n) slås ihop kommaseparerat: full
 // proveniens (antal tillgängliga/förväntade per ingång) stannar i
 // historik/outbox-lagren; kontraktsutökning är K1-arbete.
-func buildThingValuesEvent(tenant, thingID string, units map[string]string, events []FlowEvent, revision int64, publishedAt time.Time) pkgtypes.ThingValuesEventV1 {
+func buildThingValuesEvent(tenant, thingID, thingType, thingTypeVersion string, units map[string]string, events []FlowEvent, revision int64, publishedAt time.Time) pkgtypes.ThingValuesEventV1 {
 	values := make([]pkgtypes.ThingValueV1, 0, len(events))
 	var messageID string
 	for _, e := range events {
@@ -357,11 +357,13 @@ func buildThingValuesEvent(tenant, thingID string, units map[string]string, even
 		Schema: pkgtypes.SchemaV1,
 		EventID: "v1/" + strings.ReplaceAll(tenant, "/", "~") + "/" +
 			strings.ReplaceAll(thingID, "/", "~") + "/" + strings.ReplaceAll(messageID, "/", "~"),
-		Tenant:         tenant,
-		ThingID:        thingID,
-		ConfigRevision: revision,
-		PublishedAt:    publishedAt,
-		Values:         values,
+		Tenant:           tenant,
+		ThingID:          thingID,
+		ThingType:        thingType,
+		ThingTypeVersion: thingTypeVersion,
+		ConfigRevision:   revision,
+		PublishedAt:      publishedAt,
+		Values:           values,
 	}
 }
 
@@ -411,7 +413,7 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 		if len(group) > 0 {
 			rev = group[0].ConfigRevision
 		}
-		ev := buildThingValuesEvent(tenant, thingID, units, group, rev, now)
+		ev := buildThingValuesEvent(tenant, thingID, cfg.TemplateID, cfg.TemplateVersion, units, group, rev, now)
 		for _, v := range ev.Values {
 			if err := v.Validate(); err != nil {
 				return published, fmt.Errorf("runtime: invalid value event: %w", err)

@@ -66,16 +66,20 @@ func (v ThingValueV1) Validate() error {
 }
 
 // ThingValuesEventV1 groups property values (and related relation changes)
-// for one thing at one config revision.
+// for one thing at one config revision. ThingType carries the template ID
+// (e.g. "wastebin") so thing.updated-consumers (FIWARE mapping needs the
+// thing type) can route without a catalog join.
 type ThingValuesEventV1 struct {
-	Schema         string             `json:"schema,omitempty"`
-	EventID        string             `json:"eventId"`
-	Tenant         string             `json:"tenant"`
-	ThingID        string             `json:"thingId"`
-	ConfigRevision int64              `json:"configRevision"`
-	PublishedAt    time.Time          `json:"publishedAt"`
-	Values         []ThingValueV1     `json:"values"`
-	Relations      []RelationChangeV1 `json:"relations,omitempty"`
+	Schema           string             `json:"schema,omitempty"`
+	EventID          string             `json:"eventId"`
+	Tenant           string             `json:"tenant"`
+	ThingID          string             `json:"thingId"`
+	ThingType        string             `json:"thingType,omitempty"`
+	ThingTypeVersion string             `json:"thingTypeVersion,omitempty"`
+	ConfigRevision   int64              `json:"configRevision"`
+	PublishedAt      time.Time          `json:"publishedAt"`
+	Values           []ThingValueV1     `json:"values"`
+	Relations        []RelationChangeV1 `json:"relations,omitempty"`
 }
 
 // RelationChangeV1 describes a single directed relation change.

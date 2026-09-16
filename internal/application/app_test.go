@@ -108,7 +108,7 @@ func TestTopicPublisherDelivery(t *testing.T) {
 	pub := &TopicPublisher{MsgCtx: mock}
 	now := time.Date(2026, 9, 17, 12, 5, 0, 0, time.UTC)
 	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	ev := buildThingValuesEvent("t", "bin-42", map[string]string{}, []FlowEvent{{
+	ev := buildThingValuesEvent("t", "bin-42", "wastebin", "v1", map[string]string{}, []FlowEvent{{
 		PropertyID: "distance", Value: 0.3, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m1",
 	}}, 1, now)

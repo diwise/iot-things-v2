@@ -814,7 +814,7 @@ func TestRuntimeTenantIsolation(t *testing.T) {
 func TestRuntimeContractMapping(t *testing.T) {
 	now := time.Date(2026, 9, 17, 12, 5, 0, 0, time.UTC)
 	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	ev := buildThingValuesEvent("t", "bin-42", map[string]string{"fillRate": "pct"}, []FlowEvent{{
+	ev := buildThingValuesEvent("t", "bin-42", "wastebin", "v1", map[string]string{"fillRate": "pct"}, []FlowEvent{{
 		PropertyID: "fillRate", Value: 93.3, Quality: "uncertain",
 		ObservedAt: at, ReceivedAt: at,
 		Sources:         []string{"milesight:214/3330/5700"},
@@ -844,7 +844,7 @@ func TestRuntimeContractMapping(t *testing.T) {
 	if v.EventID == "" || ev.EventID == "" {
 		t.Fatal("stable event IDs required")
 	}
-	again := buildThingValuesEvent("t", "bin-42", map[string]string{"fillRate": "pct"}, []FlowEvent{{
+	again := buildThingValuesEvent("t", "bin-42", "wastebin", "v1", map[string]string{"fillRate": "pct"}, []FlowEvent{{
 		PropertyID: "fillRate", Value: 93.3, Quality: "uncertain",
 		ObservedAt: at, ReceivedAt: at,
 		Sources:         []string{"milesight:214/3330/5700"},
@@ -857,6 +857,33 @@ func TestRuntimeContractMapping(t *testing.T) {
 	}}, 4, now.Add(time.Hour))
 	if again.Values[0].EventID != v.EventID || again.EventID != ev.EventID {
 		t.Fatal("event IDs must be stable across redelivery (PublishedAt excluded)")
+	}
+}
+
+// Regression Etapp 7: DrainAndPublish stämplar ThingType/ThingTypeVersion
+// från lagrad config (mall-ID/version), så thing.updated-konsumenter kan
+// routa utan katalogjoin. Tomt ThingType i produktionsevent är ett fel.
+func TestRuntimeDrainPopulatesThingType(t *testing.T) {
+	fs := newFakeStore()
+	rt := NewRuntime(fs)
+	cat := rtBinCatalog(t)
+	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	if _, err := rt.HandleBatch(context.Background(), "t", "m1", []things.Observation{rtDistObs("milesight:214", 0.30, base)}, base); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	pub := &fakePublisher{}
+	if _, err := rt.DrainAndPublish(context.Background(), pub, "t", "bin-42", base.Add(time.Minute)); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if pub.count() != 1 {
+		t.Fatalf("published=%d, want 1", pub.count())
+	}
+	ev := pub.events[0]
+	if ev.ThingType != "wastebin" || ev.ThingTypeVersion != "v1" {
+		t.Fatalf("thingType=%q/%q, want wastebin/v1 (from stored config)", ev.ThingType, ev.ThingTypeVersion)
 	}
 }
 
@@ -1050,7 +1077,7 @@ func TestRuntimeDrainUsesBatchRevision(t *testing.T) {
 // Regression P12: batch-EventID sanerar tenant/thing ("/" -> "~").
 func TestRuntimeBatchEventIDSanitizes(t *testing.T) {
 	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	ev := buildThingValuesEvent("a/b", "c/d", map[string]string{}, []FlowEvent{{
+	ev := buildThingValuesEvent("a/b", "c/d", "wastebin", "v1", map[string]string{}, []FlowEvent{{
 		PropertyID: "p", Value: 1, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m/x",
 	}}, 1, at)

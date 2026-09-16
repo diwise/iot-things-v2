@@ -353,3 +353,34 @@ func TestCompatEndToEndRoomFromWireData(t *testing.T) {
 		t.Fatal("medel-event saknas")
 	}
 }
+
+// Upprepad observation (samma objekt/resurs, olika mättid): båda bevaras i
+// trådordning med varsin mättid (observationskontraktets
+// repeated-observation-fixtur). Bindningen träffar båda; flödet väljer
+// senaste mättid som aktuellt (B3) medan båda raderna sparas i historik.
+func TestCompatRepeatedObservationKeptInOrder(t *testing.T) {
+	ref := time.Date(2024, 7, 3, 12, 0, 0, 0, time.UTC)
+	obs := parseAgentPack(t, `[
+		{"bn":"dev1/3303/","bt":1720000000,"n":"0","vs":"urn:oma:lwm2m:ext:3303"},
+		{"n":"5700","u":"Cel","v":21.5,"t":0},
+		{"n":"5700","u":"Cel","v":22.0,"t":60}
+	]`, ref)
+	if len(obs) != 2 {
+		t.Fatalf("observations=%d, want 2 (repeated resource kept, not collapsed)", len(obs))
+	}
+	if !obs[0].ObservedAt.Before(obs[1].ObservedAt) {
+		t.Fatalf("trådordning bruten: %v then %v", obs[0].ObservedAt, obs[1].ObservedAt)
+	}
+	if v := obsValue(t, &obs[0]); v != 21.5 {
+		t.Fatalf("första värdet=%v, want 21.5", v)
+	}
+	if v := obsValue(t, &obs[1]); v != 22.0 {
+		t.Fatalf("andra värdet=%v, want 22.0", v)
+	}
+	b := things.Binding{DeviceID: "dev1", Object: compatTempURN, Resource: "5700", Input: "temperature.center"}
+	for i := range obs {
+		if !b.Matches(obs[i].Signal) {
+			t.Fatalf("obs %d matchar inte temp-bindning: %+v", i, obs[i].Signal)
+		}
+	}
+}
