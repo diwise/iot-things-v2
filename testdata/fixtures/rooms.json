@@ -1,0 +1,45 @@
+{
+  "description": "E1 rooms: mall room/v1 med repeat temperature.* samt objekten room-a, room-b och building-a.",
+  "templates": [
+    {
+      "id": "room/v1",
+      "name": "room",
+      "version": "v1",
+      "recipe": "room-climate",
+      "repeat": "temperature.*",
+      "optional": ["humidity", "illuminance", "average"],
+      "inputs": ["temperature.*"],
+      "outputs": ["average"]
+    },
+    {
+      "id": "building/v1",
+      "name": "building",
+      "version": "v1",
+      "recipe": "building-aggregate",
+      "required": ["partOf"],
+      "inputs": [],
+      "outputs": []
+    }
+  ],
+  "objects": [
+    {
+      "id": "room-a",
+      "template": "room/v1",
+      "partOf": "building-a",
+      "inputs": ["temperature.1", "temperature.2", "temperature.3"],
+      "outputs": ["average"]
+    },
+    {
+      "id": "room-b",
+      "template": "room/v1",
+      "partOf": "building-a",
+      "inputs": ["temperature.1", "temperature.2", "humidity", "illuminance"],
+      "outputs": ["average"]
+    },
+    {
+      "id": "building-a",
+      "template": "building/v1",
+      "children": ["room-a", "room-b"]
+    }
+  ]
+}

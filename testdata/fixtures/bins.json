@@ -1,0 +1,71 @@
+{
+  "description": "E1 bins: gemensam mall wastebin/v1 med 4 varianter (A-D) och exempelobjekt bin-42.",
+  "templates": [
+    {
+      "id": "wastebin/v1",
+      "name": "wastebin",
+      "version": "v1",
+      "recipe": "wastebin-level",
+      "required": ["distance", "level", "fillRate"],
+      "params": ["usableHeight", "sensorToBottom"],
+      "inputs": ["distance"],
+      "outputs": ["level", "fillRate"]
+    }
+  ],
+  "variants": [
+    {
+      "id": "wastebin-A",
+      "template": "wastebin/v1",
+      "recipe": "wastebin-level",
+      "params": {
+        "usableHeight": 0.8,
+        "sensorToBottom": 0.0
+      }
+    },
+    {
+      "id": "wastebin-B",
+      "template": "wastebin/v1",
+      "recipe": "wastebin-level",
+      "params": {
+        "usableHeight": 1.2,
+        "sensorToBottom": 0.0
+      }
+    },
+    {
+      "id": "wastebin-C",
+      "template": "wastebin/v1",
+      "recipe": "wastebin-level",
+      "params": {
+        "usableHeight": 1.5,
+        "sensorToBottom": 0.0
+      }
+    },
+    {
+      "id": "wastebin-D",
+      "template": "wastebin/v1",
+      "recipe": "wastebin-level",
+      "params": {
+        "usableHeight": 1.8,
+        "sensorToBottom": 0.0
+      }
+    }
+  ],
+  "objects": [
+    {
+      "id": "bin-42",
+      "template": "wastebin/v1",
+      "variant": "wastebin-B",
+      "inputs": ["distance"],
+      "outputs": ["level", "fillRate"],
+      "bindings": [
+        {
+          "device": "milesight:214",
+          "channel": "",
+          "object": "urn:oma:lwm2m:ext:3330",
+          "resource": "5700",
+          "input": "distance"
+        }
+      ]
+    }
+  ]
+}

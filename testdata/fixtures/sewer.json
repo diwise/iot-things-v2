@@ -1,0 +1,23 @@
+{
+  "description": "E1 sewer: mall sewer/v1 med distance och bräddningstid via activeTime samt sewer-1.",
+  "templates": [
+    {
+      "id": "sewer/v1",
+      "name": "sewer",
+      "version": "v1",
+      "recipe": "sewer-overflow",
+      "required": ["distance", "overflowTime"],
+      "operators": ["activeTime"],
+      "inputs": ["distance"],
+      "outputs": ["overflowTime"]
+    }
+  ],
+  "objects": [
+    {
+      "id": "sewer-1",
+      "template": "sewer/v1",
+      "inputs": ["distance"],
+      "outputs": ["overflowTime"]
+    }
+  ]
+}

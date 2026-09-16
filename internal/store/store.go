@@ -1,0 +1,451 @@
+package store
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// ThingRecord är ett minimalt minnesobjekt.
+// Revision hanteras av anroparen: Upsert behåller inkommande Revision
+// oförändrad (ingen auto-inkrementering här).
+type ThingRecord struct {
+	ID       string
+	Tenant   string
+	Revision int64
+	Data     []byte
+}
+
+// MemThingStore är ett generiskt minneslager för things.
+// Nollvärdet är inte brukbart utan NewMemThingStore (initierar karta),
+// men Upsert/Get/ListByTenant tolererar nil-karta.
+type MemThingStore struct {
+	mu sync.Mutex
+	m  map[string]ThingRecord
+}
+
+// NewMemThingStore skapar ett tomt thing-lager.
+func NewMemThingStore() *MemThingStore {
+	return &MemThingStore{m: make(map[string]ThingRecord)}
+}
+
+func thingKey(tenant, id string) string {
+	return tenant + "\x00" + id
+}
+
+// Upsert lagrar rec och behåller rec.Revision som den är.
+// Data kopieras för att undvika aliasing mot anroparen.
+func (s *MemThingStore) Upsert(rec ThingRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.m == nil {
+		s.m = make(map[string]ThingRecord)
+	}
+	cp := rec
+	if rec.Data != nil {
+		cp.Data = append([]byte(nil), rec.Data...)
+	}
+	s.m[thingKey(rec.Tenant, rec.ID)] = cp
+}
+
+// Get returnerar (data, revision, ok). Data är en kopia.
+func (s *MemThingStore) Get(tenant, id string) ([]byte, int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.m[thingKey(tenant, id)]
+	if !ok {
+		return nil, 0, false
+	}
+	var cp []byte
+	if rec.Data != nil {
+		cp = append([]byte(nil), rec.Data...)
+	}
+	return cp, rec.Revision, true
+}
+
+// ListByTenant returnerar alla records för tenant, sorterade på ID.
+func (s *MemThingStore) ListByTenant(tenant string) []ThingRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []ThingRecord
+	for _, rec := range s.m {
+		if rec.Tenant != tenant {
+			continue
+		}
+		cp := rec
+		if rec.Data != nil {
+			cp.Data = append([]byte(nil), rec.Data...)
+		}
+		out = append(out, cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// HistoryRecord är en minimal historikrad. Egna typer används lokalt
+// för att undvika importcykel mot domain; API kan anpassas av integrator.
+type HistoryRecord struct {
+	Tenant     string
+	ThingID    string
+	PropertyID string
+	ObservedAt time.Time
+	ReceivedAt time.Time
+	Value      *float64
+	Quality    string
+	Source     string
+	MessageID  string
+}
+
+// MemHistoryStore lagrar historik i minnet med idempotent append.
+type MemHistoryStore struct {
+	mu   sync.Mutex
+	recs []HistoryRecord
+	seen map[string]struct{}
+}
+
+// NewMemHistoryStore skapar ett tomt historiklagar.
+func NewMemHistoryStore() *MemHistoryStore {
+	return &MemHistoryStore{seen: make(map[string]struct{})}
+}
+
+func historyDedupKey(tenant, thingID, propID string, observed time.Time, source, quality string, value *float64) string {
+	val := "<nil>"
+	if value != nil {
+		val = strconv.FormatFloat(*value, 'g', -1, 64)
+	}
+	// Dedup-nyckel: tenant|thing|prop|observedUnixNano|source|quality|value.
+	// Tenant bevarar isolering; quality ingår så att en kvalitetsändring
+	// (ok->uncertain) med samma värde/tid/källa inte tappas som dubblett.
+	// MessageID/ReceivedAt ingår avsiktligt ej: retry med nytt ID men samma
+	// innehåll ska dedupliceras.
+	return tenant + "|" + thingID + "|" + propID + "|" +
+		strconv.FormatInt(observed.UnixNano(), 10) + "|" + source + "|" + quality + "|" + val
+}
+
+func copyFloat(v *float64) *float64 {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	return &c
+}
+
+// AppendIdempotent lägger till rec om dedup-nyckeln inte setts tidigare.
+// Returnerar true om raden lades till, false vid dubblett (hoppas över).
+func (s *MemHistoryStore) AppendIdempotent(rec HistoryRecord) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = make(map[string]struct{})
+	}
+	key := historyDedupKey(rec.Tenant, rec.ThingID, rec.PropertyID, rec.ObservedAt, rec.Source, rec.Quality, rec.Value)
+	if _, ok := s.seen[key]; ok {
+		return false
+	}
+	s.seen[key] = struct{}{}
+	cp := rec
+	cp.Value = copyFloat(rec.Value)
+	s.recs = append(s.recs, cp)
+	return true
+}
+
+// List filtrerar på tenant/thing/prop (exakt matchning) och på ObservedAt.
+// Noll-tid i from/to betyder ingen undre/övre gräns (inklusive gränser).
+// limit > 0 kapar resultatet, annars returneras allt. Sorterat på ObservedAt stigande.
+func (s *MemHistoryStore) List(tenant, thingID, propID string, from, to time.Time, limit int) []HistoryRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []HistoryRecord
+	for _, r := range s.recs {
+		if r.Tenant != tenant || r.ThingID != thingID || r.PropertyID != propID {
+			continue
+		}
+		if !from.IsZero() && r.ObservedAt.Before(from) {
+			continue
+		}
+		if !to.IsZero() && r.ObservedAt.After(to) {
+			continue
+		}
+		cp := r
+		cp.Value = copyFloat(r.Value)
+		out = append(out, cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ObservedAt.Equal(out[j].ObservedAt) {
+			return out[i].ReceivedAt.Before(out[j].ReceivedAt)
+		}
+		return out[i].ObservedAt.Before(out[j].ObservedAt)
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+// RelationRecord är en minimal relation. Konvention: FromID = barn,
+// ToID = förälder (gäller särskilt Type "partOf").
+type RelationRecord struct {
+	ID     string
+	Tenant string
+	Type   string
+	FromID string
+	ToID   string
+}
+
+// MemRelationStore lagrar relationer i minnet med cykel-skydd för partOf:
+// självreferens (From==To) nekas alltid, längre partOf-cykler nekas via
+// föräldrakedjan, och ett barn får högst en "partOf"-förälder
+// (index per tenant+barn). Tenant ingår i alla nycklar; frågor filtrerar
+// alltid på tenant så att cross-tenant-länkar varken lagras som giltiga
+// hierarkier eller läcker via Children/Parent.
+type MemRelationStore struct {
+	mu          sync.Mutex
+	byID        map[string]RelationRecord
+	childParent map[string]string // tenant\x00barnID -> relations-ID (endast partOf)
+}
+
+// NewMemRelationStore skapar ett tomt relationslager.
+func NewMemRelationStore() *MemRelationStore {
+	return &MemRelationStore{
+		byID:        make(map[string]RelationRecord),
+		childParent: make(map[string]string),
+	}
+}
+
+func relationIDKey(tenant, id string) string {
+	return tenant + "\x00" + id
+}
+
+func relationChildKey(tenant, childID string) string {
+	return tenant + "\x00" + childID
+}
+
+// partOfCreatesCycle rapporterar om kanten child->newParent skulle skapa en
+// partOf-cykel inom tenant genom att följa föräldrakedjan från newParent.
+// Anroparen måste hålla s.mu.
+func (s *MemRelationStore) partOfCreatesCycle(tenant, childID, newParentID string) bool {
+	cur := newParentID
+	for i := 0; i <= len(s.byID)+1; i++ {
+		if cur == childID {
+			return true
+		}
+		relID, ok := s.childParent[relationChildKey(tenant, cur)]
+		if !ok {
+			return false
+		}
+		rec, ok := s.byID[relationIDKey(tenant, relID)]
+		if !ok {
+			return false
+		}
+		if rec.ToID == "" || rec.ToID == cur {
+			return false
+		}
+		cur = rec.ToID
+	}
+	return true
+}
+
+// Add lägger till en relation. Returnerar fel vid självreferens,
+// partOf-cykel, dubblett-ID eller andra partOf-förälder för samma barn.
+// Samma barn->samma förälder med samma typ är idempotent (nil).
+func (s *MemRelationStore) Add(rec RelationRecord) error {
+	if rec.ID == "" {
+		return fmt.Errorf("relation: missing ID")
+	}
+	if rec.Tenant == "" {
+		return fmt.Errorf("relation: missing tenant")
+	}
+	if rec.FromID == "" || rec.ToID == "" {
+		return fmt.Errorf("relation: missing FromID/ToID")
+	}
+	if rec.FromID == rec.ToID {
+		return fmt.Errorf("relation: self-reference denied (%q)", rec.FromID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.byID == nil {
+		s.byID = make(map[string]RelationRecord)
+	}
+	if s.childParent == nil {
+		s.childParent = make(map[string]string)
+	}
+	idKey := relationIDKey(rec.Tenant, rec.ID)
+	if _, exists := s.byID[idKey]; exists {
+		return fmt.Errorf("relation: duplicate ID %q", rec.ID)
+	}
+	if rec.Type == "partOf" {
+		childKey := relationChildKey(rec.Tenant, rec.FromID)
+		if existingID, ok := s.childParent[childKey]; ok {
+			existing := s.byID[relationIDKey(rec.Tenant, existingID)]
+			if existing.ToID == rec.ToID && existing.FromID == rec.FromID {
+				return nil
+			}
+			return fmt.Errorf("relation: child %q already has partOf parent %q", rec.FromID, existing.ToID)
+		}
+		if s.partOfCreatesCycle(rec.Tenant, rec.FromID, rec.ToID) {
+			return fmt.Errorf("relation: partOf cycle denied for child %q parent %q", rec.FromID, rec.ToID)
+		}
+		s.childParent[childKey] = rec.ID
+	}
+	s.byID[idKey] = rec
+	return nil
+}
+
+// Move flyttar ett barns partOf-förälder till newParentID.
+// Fel vid självreferens, partOf-cykel eller om barnet saknar partOf-relation.
+func (s *MemRelationStore) Move(tenant, childID, newParentID string) error {
+	if childID == "" || newParentID == "" {
+		return fmt.Errorf("relation: missing child/new parent")
+	}
+	if childID == newParentID {
+		return fmt.Errorf("relation: self-reference denied (%q)", childID)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	childKey := relationChildKey(tenant, childID)
+	relID, ok := s.childParent[childKey]
+	if !ok {
+		return fmt.Errorf("relation: no partOf parent for child %q", childID)
+	}
+	idKey := relationIDKey(tenant, relID)
+	rec, ok := s.byID[idKey]
+	if !ok {
+		return fmt.Errorf("relation: index corrupt for child %q", childID)
+	}
+	if rec.ToID != newParentID && s.partOfCreatesCycle(tenant, childID, newParentID) {
+		return fmt.Errorf("relation: partOf cycle denied for child %q parent %q", childID, newParentID)
+	}
+	rec.ToID = newParentID
+	s.byID[idKey] = rec
+	return nil
+}
+
+// Children returnerar relationer där ToID == parentID för tenant,
+// sorterade på FromID.
+func (s *MemRelationStore) Children(tenant, parentID string) []RelationRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []RelationRecord
+	for _, r := range s.byID {
+		if r.Tenant != tenant || r.ToID != parentID {
+			continue
+		}
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].FromID < out[j].FromID })
+	return out
+}
+
+// Parent returnerar barnets partOf-relation (FromID=barn). false om saknas.
+func (s *MemRelationStore) Parent(tenant, childID string) (RelationRecord, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	relID, ok := s.childParent[relationChildKey(tenant, childID)]
+	if !ok {
+		return RelationRecord{}, false
+	}
+	rec, ok := s.byID[relationIDKey(tenant, relID)]
+	if !ok {
+		return RelationRecord{}, false
+	}
+	return rec, true
+}
+
+// OutboxEvent är en minimal utbox-händelse.
+type OutboxEvent struct {
+	ID         string
+	Tenant     string
+	ThingID    string
+	PropertyID string
+	ObservedAt time.Time
+	Revision   int64
+}
+
+// MemOutbox är ett minnesbaserat utbox-lager med idempotent append på ID.
+// Tomt ID kan inte dedupliceras och läggs alltid till. Sedda ID:n behålls
+// även efter ListAndClear så att retry med samma ID inte återpubliceras
+// (minnesstorlek växer obegränsat; retention enligt K4 återstår för drift).
+type MemOutbox struct {
+	mu     sync.Mutex
+	events []OutboxEvent
+	seen   map[string]struct{}
+}
+
+// NewMemOutbox skapar en tom utbox.
+func NewMemOutbox() *MemOutbox {
+	return &MemOutbox{seen: make(map[string]struct{})}
+}
+
+// Append lägger till en händelse. Returnerar false vid dubblett-ID
+// (hoppas över) och true när händelsen lagrades.
+func (o *MemOutbox) Append(ev OutboxEvent) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.seen == nil {
+		o.seen = make(map[string]struct{})
+	}
+	if ev.ID != "" {
+		if _, ok := o.seen[ev.ID]; ok {
+			return false
+		}
+		o.seen[ev.ID] = struct{}{}
+	}
+	o.events = append(o.events, ev)
+	return true
+}
+
+// ListAndClear returnerar alla händelser och tömmer utboxen.
+// Sedda ID:n behålls för att retry med samma ID fortsatt ska dedupliceras.
+func (o *MemOutbox) ListAndClear() []OutboxEvent {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := o.events
+	o.events = nil
+	return out
+}
+
+// Len returnerar antal lagrade händelser.
+func (o *MemOutbox) Len() int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return len(o.events)
+}
+
+// MemDedup är ett enkelt idempotens-filter per (tenant, messageID, thingID).
+// Tenant ingår i nyckeln så att samma messageID/thingID i olika tenants
+// inte kolliderar (tenant-isolering).
+type MemDedup struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// NewMemDedup skapar ett tomt dedup-filter.
+func NewMemDedup() *MemDedup {
+	return &MemDedup{seen: make(map[string]struct{})}
+}
+
+func dedupKey(tenant, messageID, thingID string) string {
+	return tenant + "\x00" + messageID + "\x00" + thingID
+}
+
+// SeenOrMark returnerar true om (tenant, messageID, thingID) redan setts,
+// annars markeras kombinationen och false returneras.
+// Tomt messageID kan inte dedupliceras: returnerar alltid false.
+func (d *MemDedup) SeenOrMark(tenant, messageID, thingID string) bool {
+	if messageID == "" {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.seen == nil {
+		d.seen = make(map[string]struct{})
+	}
+	key := dedupKey(tenant, messageID, thingID)
+	if _, ok := d.seen[key]; ok {
+		return true
+	}
+	d.seen[key] = struct{}{}
+	return false
+}

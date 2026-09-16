@@ -1,0 +1,45 @@
+{
+  "description": "E1 greenhouse: mallarna greenhouse/v1 och bench/v1 samt greenhouse-a med bench-1/bench-2.",
+  "templates": [
+    {
+      "id": "greenhouse/v1",
+      "name": "greenhouse",
+      "version": "v1",
+      "recipe": "greenhouse-overview",
+      "required": ["bench"],
+      "inputs": [],
+      "outputs": []
+    },
+    {
+      "id": "bench/v1",
+      "name": "bench",
+      "version": "v1",
+      "recipe": "bench-moisture",
+      "repeat": "soilMoisture.*",
+      "optional": ["airTemp"],
+      "inputs": ["soilMoisture.*"],
+      "outputs": ["soilMoistureAvg"]
+    }
+  ],
+  "objects": [
+    {
+      "id": "greenhouse-a",
+      "template": "greenhouse/v1",
+      "children": ["bench-1", "bench-2"]
+    },
+    {
+      "id": "bench-1",
+      "template": "bench/v1",
+      "partOf": "greenhouse-a",
+      "inputs": ["soilMoisture.1", "soilMoisture.2", "airTemp"],
+      "outputs": ["soilMoistureAvg"]
+    },
+    {
+      "id": "bench-2",
+      "template": "bench/v1",
+      "partOf": "greenhouse-a",
+      "inputs": ["soilMoisture.1", "soilMoisture.2"],
+      "outputs": ["soilMoistureAvg"]
+    }
+  ]
+}
