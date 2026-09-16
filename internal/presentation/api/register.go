@@ -66,10 +66,12 @@ type Manager interface {
 }
 
 // RegisterHandlers wires the public management API onto mux with the same
-// structure as iot-things: router with /api/v0 prefix, OPA auth groups per
-// scope. The v1 memory routes (NewMux) stay frozen for compat.
+// structure as iot-things: router with /api/v1 prefix, OPA auth groups per
+// scope (one group per HTTP method and route: the router registers one
+// synthetic subtree pattern per group, so the same method in two groups
+// panics the mux).
 func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, policies io.Reader, opts ...RegisterOption) error {
-	const apiPrefix string = "/api/v0"
+	const apiPrefix string = "/api/v1"
 
 	log := logging.GetFromContext(ctx)
 
@@ -107,7 +109,7 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, poli
 		// är {id}-aktioner PUT (idempotenta avsikter; förhandsvisningar
 		// är safe+idempotenta, muterande kräver If-Match) och delar
 		// UpdateThings-scope: preview-före-skapande kräver därmed
-		// uppdateringsrätt (testat i TestV0PreviewRequiresUpdate).
+		// uppdateringsrätt (testat i TestV0WriteScopeIsolation).
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(ReadThings))
 			r.Get("", h.searchThings)
