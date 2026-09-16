@@ -85,10 +85,17 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 
 	probes := readinessProbes()
 
-	var s *storage.Storage
 	var msgCtx messaging.MsgContext
 	var app application.ThingsApp
 	var mgr *application.Manager
+
+	// Backend-val i oninit: tom POSTGRES_HOST ger minnesbackend (dev/test),
+	// satt värd ger PostgreSQL (drill/prod). Samma RuntimeStore-gräns i
+	// båda fallen; stängning via ownedResources.
+	var backend interface{ Close() }
+	var runtimeStore application.RuntimeStore
+	var reader application.ThingsReader
+	var writer application.ThingsWriter
 
 	owned := &ownedResources{}
 
@@ -111,59 +118,101 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 
 			var err error
 
-			s, err = storage.New(ctx, storageConfigFromFlags(flags))
-			if err != nil {
-				return fmt.Errorf("could not configure storage: %w", err)
+			if flags[dbHost] == "" {
+				log.Info("using memory storage backend (POSTGRES_HOST empty)")
+				var mem *storage.Storage
+				mem, err = storage.New(ctx, storageConfigFromFlags(flags))
+				if err != nil {
+					return fmt.Errorf("could not configure storage: %w", err)
+				}
+				backend = mem
+				runtimeStore = storage.NewRuntimeAdapter(mem)
+				reader, writer = mem, mem
+			} else {
+				log.Info("using PostgreSQL storage backend", "host", flags[dbHost])
+				var pg *storage.PgStore
+				pg, err = storage.NewPostgres(ctx, storageConfigFromFlags(flags))
+				if err != nil {
+					return fmt.Errorf("could not configure storage: %w", err)
+				}
+				backend = pg
+				runtimeStore = pg
+				reader, writer = pg, pg
 			}
 
 			messengerConfig, err := messaging.LoadConfiguration(ctx, serviceName, log)
 			if err != nil {
+				// Backend redan skapad ovan: stäng för att undvika läcka
+				// (tidigare returnerade denna väg utan Close).
+				if backend != nil {
+					backend.Close()
+					backend = nil
+				}
+				owned.storage = nil
 				return fmt.Errorf("messaging configuration error: %w", err)
 			}
 
 			msgCtx, err = messaging.Initialize(ctx, messengerConfig)
 			if err != nil {
-				s.Close()
-				s = nil
+				if backend != nil {
+					backend.Close()
+					backend = nil
+				}
+				owned.storage = nil
 				return fmt.Errorf("failed to init messenger: %w", err)
 			}
 
 			owned.messenger = msgCtx
-			owned.storage = s
+			owned.storage = backend
 
 			log.Debug("creating application...")
-			app, mgr, err = newApp(ctx, s, s, msgCtx, configFile)
+			app, mgr, err = newApp(ctx, reader, writer, msgCtx, runtimeStore, configFile)
 			if err != nil {
-				s.Close()
-				s = nil
+				if backend != nil {
+					backend.Close()
+					backend = nil
+				}
+				owned.storage = nil
 				return fmt.Errorf("unable to initialize app: %w", err)
 			}
 
 			log.Debug("seeding things...")
 			err = seed(ctx, thingsFile, app)
 			if err != nil {
-				s.Close()
-				s = nil
+				if backend != nil {
+					backend.Close()
+					backend = nil
+				}
+				owned.storage = nil
 				return fmt.Errorf("unable to seed things: %w", err)
 			}
 
 			if migrateBindingsEnabled(flags) {
 				n, err := app.MigrateBindings(ctx)
 				if err != nil {
-					s.Close()
-					s = nil
+					if backend != nil {
+						backend.Close()
+						backend = nil
+					}
+					owned.storage = nil
 					return fmt.Errorf("bindings migration failed: %w", err)
 				}
 				if n > 0 {
 					log.Info("migrated things to bindings", "count", n)
 				}
 			} else if pending, err := app.HasUnmigratedThings(ctx); err != nil {
-				s.Close()
-				s = nil
+				if backend != nil {
+					backend.Close()
+					backend = nil
+				}
+				owned.storage = nil
 				return fmt.Errorf("could not check for unmigrated things: %w", err)
 			} else if pending {
-				s.Close()
-				s = nil
+				if backend != nil {
+					backend.Close()
+					backend = nil
+				}
+				owned.storage = nil
 				return fmt.Errorf("things without bindings remain and THINGS_MIGRATE_BINDINGS is disabled")
 			}
 
@@ -347,19 +396,13 @@ func parseLogLevel(level string) slog.Level {
 	}
 }
 
-func newApp(ctx context.Context, r application.ThingsReader, w application.ThingsWriter, m messaging.MsgContext, cfg io.Reader) (application.ThingsApp, *application.Manager, error) {
-	// Etapp 4 runtime över lagringsadaptern: atomära batchar, dedup,
-	// outbox. Samma store delas vid omstart (dränering utan omberäkning).
-	// Etapp 6 manager: katalog + objektlivscykel mot samma runtime/store.
-	var rt *application.Runtime
-	var pub application.EventPublisher
-	var mgr *application.Manager
-	if s, ok := r.(*storage.Storage); ok {
-		adapter := storage.NewRuntimeAdapter(s)
-		rt = application.NewRuntime(adapter)
-		pub = &application.TopicPublisher{MsgCtx: m}
-		mgr = application.NewManager(catalog.New(), rt, adapter)
-	}
+func newApp(ctx context.Context, r application.ThingsReader, w application.ThingsWriter, m messaging.MsgContext, store application.RuntimeStore, cfg io.Reader) (application.ThingsApp, *application.Manager, error) {
+	// Runtime över storet (minne eller PostgreSQL, valt av anroparen):
+	// atomära batchar, dedup, outbox. Samma store delas vid omstart
+	// (dränering utan omberäkning). Manager: katalog + objektlivscykel.
+	rt := application.NewRuntime(store)
+	pub := &application.TopicPublisher{MsgCtx: m}
+	mgr := application.NewManager(catalog.New(), rt, store)
 	a := application.New(r, w, m, rt, pub)
 	err := a.LoadConfig(ctx, cfg)
 	if err != nil {

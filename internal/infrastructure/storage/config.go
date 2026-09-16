@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"fmt"
+	"net/url"
 )
 
 // Config mirrors iot-things storage configuration. It is owned by cmd:
@@ -28,5 +28,18 @@ func NewConfig(host, user, password, port, dbname, sslmode string) Config {
 }
 
 func (c Config) ConnStr() string {
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", c.user, c.password, c.host, c.port, c.dbname, c.sslmode)
+	// URL-koda användare/lösenord: specialtecken (@:/?# m.fl.) i lösenord
+	// bryter annars anslutningssträngen (tidigare fmt.Sprintf utan escaping).
+	u := &url.URL{
+		Scheme: "postgres",
+		User:   url.UserPassword(c.user, c.password),
+		Host:   c.host + ":" + c.port,
+		Path:   "/" + c.dbname,
+	}
+	q := u.Query()
+	if c.sslmode != "" {
+		q.Set("sslmode", c.sslmode)
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
 }

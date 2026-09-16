@@ -92,14 +92,55 @@ func copyProcessors(m map[string]StoredProcessor) map[string]StoredProcessor {
 	return out
 }
 
-func (f *fakeStore) SaveThing(tenant, thingID string, st StoredThingState) {
+func (f *fakeStore) InsertThing(tenant, thingID string, st StoredThingState) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	key := fkey(tenant, thingID)
+	if _, exists := f.things[key]; exists {
+		return false
+	}
+	st.Current = copyCurrent(st.Current)
+	st.ProcessorStates = copyProcessors(st.ProcessorStates)
+	st.ConfigJSON = append([]byte(nil), st.ConfigJSON...)
+	st.LastEvents = append([]FlowEvent(nil), st.LastEvents...)
+	f.things[key] = st
+	return true
+}
+
+func (f *fakeStore) SaveThingCAS(tenant, thingID string, expected int64, st StoredThingState) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.things[fkey(tenant, thingID)]
+	if !ok || cur.DataRevision != expected {
+		return false
+	}
+	f.storeLocked(tenant, thingID, st)
+	return true
+}
+
+func (f *fakeStore) storeLocked(tenant, thingID string, st StoredThingState) {
 	st.Current = copyCurrent(st.Current)
 	st.ProcessorStates = copyProcessors(st.ProcessorStates)
 	st.ConfigJSON = append([]byte(nil), st.ConfigJSON...)
 	st.LastEvents = append([]FlowEvent(nil), st.LastEvents...)
 	f.things[fkey(tenant, thingID)] = st
+}
+
+// CommitBatch persisterar blob-CAS + historik + pending atomärt under ett
+// lås: vid staketkonflikt blir inget synligt.
+func (f *fakeStore) CommitBatch(tenant, thingID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.things[fkey(tenant, thingID)]
+	if !ok || cur.DataRevision != expected {
+		return false
+	}
+	f.storeLocked(tenant, thingID, st)
+	for _, h := range hist {
+		f.appendHistoryLocked(tenant, thingID, h)
+	}
+	f.storePendingLocked(tenant, thingID, pending)
+	return true
 }
 
 func (f *fakeStore) DeleteThingState(tenant, thingID string) {
@@ -174,14 +215,27 @@ func (f *fakeStore) ListTenants() []string {
 }
 
 func (f *fakeStore) AppendHistory(tenant, thingID string, h HistoryWrite) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.appendHistoryLocked(tenant, thingID, h)
+}
+
+func (f *fakeStore) appendHistoryLocked(tenant, thingID string, h HistoryWrite) bool {
+	// Samma normalisering som minnesbackend/PgStore: -0 conflatas med 0,
+	// mättid avrundas till mikrosekund (PG TIMESTAMPTZ-precision).
 	val := "<nil>"
 	if h.Value != nil {
-		val = strconv.FormatFloat(*h.Value, 'g', -1, 64)
+		if *h.Value == 0 {
+			val = "0"
+		} else {
+			val = strconv.FormatFloat(*h.Value, 'g', -1, 64)
+		}
+	}
+	if !h.ObservedAt.IsZero() {
+		h.ObservedAt = h.ObservedAt.Round(time.Microsecond)
 	}
 	key := tenant + "|" + thingID + "|" + h.PropertyID + "|" +
 		strconv.FormatInt(h.ObservedAt.UnixNano(), 10) + "|" + h.Source + "|" + h.Quality + "|" + val
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	if _, ok := f.histSeen[key]; ok {
 		return false
 	}
@@ -226,7 +280,15 @@ func (f *fakeStore) History(tenant, thingID, prop string, from, to time.Time, li
 		}
 		out = append(out, h.w)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ObservedAt.Before(out[j].ObservedAt) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ObservedAt.Equal(out[j].ObservedAt) {
+			if out[i].ReceivedAt.Equal(out[j].ReceivedAt) {
+				return out[i].Source < out[j].Source
+			}
+			return out[i].ReceivedAt.Before(out[j].ReceivedAt)
+		}
+		return out[i].ObservedAt.Before(out[j].ObservedAt)
+	})
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
@@ -236,12 +298,27 @@ func (f *fakeStore) History(tenant, thingID, prop string, from, to time.Time, li
 func (f *fakeStore) PendingEvents(tenant, thingID string) []FlowEvent {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return append([]FlowEvent(nil), f.pending[fkey(tenant, thingID)]...)
+	out := append([]FlowEvent(nil), f.pending[fkey(tenant, thingID)]...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ObservedAt.Equal(out[j].ObservedAt) {
+			if out[i].PropertyID != out[j].PropertyID {
+				return out[i].PropertyID < out[j].PropertyID
+			}
+			return StableEventID(tenant, thingID, out[i].MessageID, out[i].PropertyID) <
+				StableEventID(tenant, thingID, out[j].MessageID, out[j].PropertyID)
+		}
+		return out[i].ObservedAt.Before(out[j].ObservedAt)
+	})
+	return out
 }
 
 func (f *fakeStore) StorePending(tenant, thingID string, events []FlowEvent) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.storePendingLocked(tenant, thingID, events)
+}
+
+func (f *fakeStore) storePendingLocked(tenant, thingID string, events []FlowEvent) {
 	key := fkey(tenant, thingID)
 	for _, e := range events {
 		id := StableEventID(tenant, thingID, e.MessageID, e.PropertyID)
@@ -685,6 +762,114 @@ func TestRuntimeConcurrentBatches(t *testing.T) {
 	}
 	if got := *st.Current["distance"].Value; got != 9 {
 		t.Fatalf("current=%v, want 9 (latest observedAt)", got)
+	}
+	if n := fs.historyCount("t", "gauge-1"); n != 10 {
+		t.Fatalf("history=%d, want 10 (no lost writes)", n)
+	}
+}
+
+// CommitBatch är atomär: vid staketkonflikt blir inget synligt
+// (varken blob, historik eller pending) — ingen stale-publicering.
+func TestCommitBatchAtomicOnConflict(t *testing.T) {
+	fs := newFakeStore()
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	v := 9.0
+	st := StoredThingState{
+		ConfigJSON: []byte(`{}`), Revision: 1, DataRevision: 7,
+		Current: map[string]CurrentValue{
+			"distance": {Value: &v, Quality: "ok", ObservedAt: base},
+		},
+	}
+	if !fs.InsertThing("t", "gauge-1", st) {
+		t.Fatal("insert")
+	}
+	hist := []HistoryWrite{{
+		PropertyID: "distance", Value: &v, Quality: "ok",
+		ObservedAt: base, ReceivedAt: base, Source: "d", MessageID: "stale",
+	}}
+	pending := []FlowEvent{{
+		PropertyID: "distance", Value: v, Quality: "ok",
+		ObservedAt: base, ReceivedAt: base, MessageID: "stale", ConfigRevision: 1,
+	}}
+	st.DataRevision = 8
+	if fs.CommitBatch("t", "gauge-1", 6, st, hist, pending) {
+		t.Fatal("conflicting fence must fail")
+	}
+	if n := fs.historyCount("t", "gauge-1"); n != 0 {
+		t.Fatalf("history=%d after failed commit, want 0", n)
+	}
+	if pending := fs.PendingEvents("t", "gauge-1"); len(pending) != 0 {
+		t.Fatalf("pending=%d after failed commit, want 0", len(pending))
+	}
+	got, _ := fs.LoadThing("t", "gauge-1")
+	if got.DataRevision != 7 {
+		t.Fatalf("dataRev=%d after failed commit, want 7", got.DataRevision)
+	}
+	if !fs.CommitBatch("t", "gauge-1", 7, st, hist, pending) {
+		t.Fatal("matching fence must commit")
+	}
+	if n := fs.historyCount("t", "gauge-1"); n != 1 {
+		t.Fatalf("history=%d after commit, want 1", n)
+	}
+	if pending := fs.PendingEvents("t", "gauge-1"); len(pending) != 1 {
+		t.Fatalf("pending=%d after commit, want 1", len(pending))
+	}
+}
+
+// Två Runtime-instanser över samma store (simulerade repliker utan delat
+// lås): CAS-retry konvergerar mot senaste mättid utan förlorade skrivningar.
+func TestRuntimeCrossInstanceConcurrency(t *testing.T) {
+	fs := newFakeStore()
+	c := catalog.New()
+	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
+		ID: "gauge", Version: "v1", Required: []string{"distance"},
+	}}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	obj := catalog.ObjectSpec{
+		ThingID: "gauge-1", Tenant: "t",
+		TemplateID: "gauge", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"distance": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "d", Object: rtDistURN, Resource: "5700", Input: "distance"},
+		},
+	}
+	rtA := NewRuntime(fs)
+	if _, err := rtA.RegisterThing("t", c, obj, 1); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	rtB := NewRuntime(fs)
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	var wg sync.WaitGroup
+	errs := make([]error, 10)
+	for i := range 10 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			at := base.Add(time.Duration(i) * time.Minute)
+			v := float64(i)
+			rt := rtA
+			if i%2 == 1 {
+				rt = rtB
+			}
+			_, errs[i] = rt.HandleBatch(context.Background(), "t", fmt.Sprintf("x%d", i),
+				[]things.Observation{rtDistObs("d", v, at)}, at)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("batch %d: %v", i, err)
+		}
+	}
+	st, ok := fs.LoadThing("t", "gauge-1")
+	if !ok {
+		t.Fatal("thing missing")
+	}
+	// Äldre mättid skriver aldrig över nyare (tidsregeln gäller oavsett
+	// persistensordning): slutvärdet är alltid max observerat.
+	if got := *st.Current["distance"].Value; got != 9 {
+		t.Fatalf("current=%v, want 9 (latest observedAt wins across instances)", got)
 	}
 	if n := fs.historyCount("t", "gauge-1"); n != 10 {
 		t.Fatalf("history=%d, want 10 (no lost writes)", n)
@@ -1209,5 +1394,62 @@ func TestRuntimeRegisterCycleDenied(t *testing.T) {
 	// Självreferens nekas redan i Compile, men verifiera via MoveThing också.
 	if err := rt.MoveThing("t", "b", "b"); err == nil {
 		t.Fatal("self-move must be denied")
+	}
+}
+
+// Regression K4: samtidig registrering av samma sak (flera instanser,
+// samma tenant+ID): minst en vinner, övriga får konflikt (ErrConflict),
+// ingen dubblett och ingen krasch. Notera: en andra samtidig "create" med
+// samma revision kan hinna se den första som befintlig och bli en
+// revision-bumpande update (wins=2) i stället för konflikt — det är
+// serialiserat och säkert, men onödigt churn; exakt-1-garanti gäller endast
+// store-lagrets Insert (create-if-absent), testat i storage-paketet.
+func TestRuntimeConcurrentRegisterSameThing(t *testing.T) {
+	fs := newFakeStore()
+	c := catalog.New()
+	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
+		ID: "gauge", Version: "v1", Required: []string{"distance"},
+	}}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	obj := catalog.ObjectSpec{
+		ThingID: "gauge-1", Tenant: "t",
+		TemplateID: "gauge", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"distance": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "d", Object: rtDistURN, Resource: "5700", Input: "distance"},
+		},
+	}
+	const racers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	for i := range racers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			rt := NewRuntime(fs)
+			_, errs[i] = rt.RegisterThing("t", c, obj, 1)
+		}(i)
+	}
+	wg.Wait()
+	wins := 0
+	for _, err := range errs {
+		if err == nil {
+			wins++
+			continue
+		}
+		if !errors.Is(err, things.ErrConflict) {
+			t.Fatalf("non-conflict error: %v", err)
+		}
+	}
+	if wins < 1 || wins > 2 {
+		t.Fatalf("wins=%d, want 1 (all raced past Load) or 2 (second became update)", wins)
+	}
+	st, ok := fs.LoadThing("t", "gauge-1")
+	if !ok {
+		t.Fatal("thing missing after concurrent register")
+	}
+	if st.Revision != int64(wins) {
+		t.Fatalf("revision=%d, want %d (one bump per win)", st.Revision, wins)
 	}
 }

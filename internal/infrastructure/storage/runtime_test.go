@@ -22,7 +22,7 @@ func TestAdapterThingRoundTrip(t *testing.T) {
 	v := 21.5
 	st := application.StoredThingState{
 		ConfigJSON: []byte(`{"templateId":"room","templateVersion":"v1"}`),
-		Revision:   3,
+		Revision:   3, DataRevision: 4,
 		Current: map[string]application.CurrentValue{
 			"temperature.window": {
 				Value: &v, Quality: "ok",
@@ -37,12 +37,14 @@ func TestAdapterThingRoundTrip(t *testing.T) {
 			MessageID:  "m1",
 		}},
 	}
-	a.SaveThing("t", "room-a", st)
+	if !a.InsertThing("t", "room-a", st) {
+		t.Fatal("insert must store new thing")
+	}
 	got, ok := a.LoadThing("t", "room-a")
 	if !ok {
 		t.Fatal("stored thing missing")
 	}
-	if got.Revision != 3 || string(got.ConfigJSON) != string(st.ConfigJSON) {
+	if got.Revision != 3 || got.DataRevision != 4 || string(got.ConfigJSON) != string(st.ConfigJSON) {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}
 	if got.Current["temperature.window"].Value == nil || *got.Current["temperature.window"].Value != 21.5 {
@@ -129,8 +131,12 @@ func TestAdapterRelations(t *testing.T) {
 
 func TestAdapterTenants(t *testing.T) {
 	a := newAdapter(t)
-	a.SaveThing("b", "x", application.StoredThingState{Revision: 1})
-	a.SaveThing("a", "y", application.StoredThingState{Revision: 1})
+	if !a.InsertThing("b", "x", application.StoredThingState{Revision: 1}) {
+		t.Fatal("insert b/x")
+	}
+	if !a.InsertThing("a", "y", application.StoredThingState{Revision: 1}) {
+		t.Fatal("insert a/y")
+	}
 	tenants := a.ListTenants()
 	if len(tenants) != 2 || tenants[0] != "a" || tenants[1] != "b" {
 		t.Fatalf("tenants=%v", tenants)
@@ -159,7 +165,9 @@ func TestAdapterFullRoundTripAndDeleteForgets(t *testing.T) {
 			ConfigRevision: 7, MessageID: "m1",
 		}},
 	}
-	a.SaveThing("t", "room-a", st)
+	if !a.InsertThing("t", "room-a", st) {
+		t.Fatal("insert must store new thing")
+	}
 	got, ok := a.LoadThing("t", "room-a")
 	if !ok {
 		t.Fatal("missing")

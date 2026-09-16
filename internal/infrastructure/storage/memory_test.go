@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -34,6 +35,29 @@ func TestThingUpsertGetList(t *testing.T) {
 	}
 	if _, _, ok := s.Get("acme", "missing"); ok {
 		t.Fatal("väntat miss för okänt ID")
+	}
+}
+
+func TestThingInsertAndCompareAndSwap(t *testing.T) {
+	s := NewMemThingStore()
+	rec := ThingRecord{ID: "t1", Tenant: "acme", Revision: 1, Data: []byte(`{"n":1}`)}
+	if !s.Insert(rec) {
+		t.Fatal("insert ska lyckas för ny nyckel")
+	}
+	if s.Insert(rec) {
+		t.Fatal("dubblett-insert ska nekas")
+	}
+	if s.CompareAndSwap("acme", "t1", 99, ThingRecord{ID: "t1", Tenant: "acme", Revision: 2}) {
+		t.Fatal("CAS med gammal revision ska nekas")
+	}
+	if s.CompareAndSwap("acme", "missing", 1, rec) {
+		t.Fatal("CAS mot saknad post ska nekas")
+	}
+	if !s.CompareAndSwap("acme", "t1", 1, ThingRecord{ID: "t1", Tenant: "acme", Revision: 2, Data: []byte(`{"n":2}`)}) {
+		t.Fatal("CAS med matchande revision ska lyckas")
+	}
+	if _, rev, _ := s.Get("acme", "t1"); rev != 2 {
+		t.Fatalf("väntat revision 2, fick %d", rev)
 	}
 }
 
@@ -218,6 +242,32 @@ func TestRelationCycleDenied(t *testing.T) {
 	}
 }
 
+// Regression K4: samtidig Insert av samma nyckel (create-if-absent):
+// exakt en vinner, övriga nekas. Motsvarar PG:s ON CONFLICT DO NOTHING.
+func TestThingConcurrentInsertSameKey(t *testing.T) {
+	s := NewMemThingStore()
+	const racers = 8
+	var wg sync.WaitGroup
+	wins := make([]bool, racers)
+	for i := range racers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			wins[i] = s.Insert(ThingRecord{ID: "t1", Tenant: "acme", Revision: 1})
+		}(i)
+	}
+	wg.Wait()
+	n := 0
+	for _, ok := range wins {
+		if ok {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("wins=%d, want exactly 1", n)
+	}
+}
+
 // Regression tenant-isolering: Get/List ska aldrig läcka över tenant-gräns.
 func TestTenantIsolationThingAndHistory(t *testing.T) {
 	ts := NewMemThingStore()
@@ -343,5 +393,92 @@ func TestHistoryLateRoundTrip(t *testing.T) {
 	got := s.List("acme", "t1", "temp", time.Time{}, time.Time{}, 0)
 	if len(got) != 1 || !got[0].Late {
 		t.Fatalf("Late tappades: %+v", got)
+	}
+}
+
+// Regression K4: -0 och 0 ska dedupliceras (samma som PostgreSQL float8
+// UNIQUE där -0 == 0). Tidigare skilde minnet "-0"/"0" via FormatFloat.
+func TestHistoryNegZeroDedup(t *testing.T) {
+	s := NewMemHistoryStore()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	mk := func(v float64) HistoryRecord {
+		return HistoryRecord{
+			Tenant: "acme", ThingID: "t1", PropertyID: "p",
+			ObservedAt: base, ReceivedAt: base, Value: &v,
+			Quality: "ok", Source: "s1",
+		}
+	}
+	if !s.AppendIdempotent(mk(0.0)) {
+		t.Fatal("0.0 ska lagras")
+	}
+	neg := 0.0
+	neg = -neg // -0 utan math-import
+	if s.AppendIdempotent(mk(neg)) {
+		t.Fatal("-0 ska dedupliceras mot 0 (samma som pg)")
+	}
+	if got := s.List("acme", "t1", "p", time.Time{}, time.Time{}, 0); len(got) != 1 {
+		t.Fatalf("rader=%d, want 1", len(got))
+	}
+}
+
+// Regression K4: sub-mikrosekundskillnader ska dedupliceras (samma som
+// PostgreSQL TIMESTAMPTZ som avrundar till mikrosekund). Tidigare använde
+// minnet UnixNano exakt och divergerade.
+func TestHistorySubMicrosecondDedup(t *testing.T) {
+	s := NewMemHistoryStore()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 123456789, time.UTC)
+	v := 1.0
+	rec := HistoryRecord{
+		Tenant: "acme", ThingID: "t1", PropertyID: "p",
+		ObservedAt: base, ReceivedAt: base, Value: &v,
+		Quality: "ok", Source: "s1",
+	}
+	if !s.AppendIdempotent(rec) {
+		t.Fatal("första ska lagras")
+	}
+	dup := rec
+	dup.ObservedAt = time.Date(2026, 1, 1, 12, 0, 0, 123456780, time.UTC)
+	if s.AppendIdempotent(dup) {
+		t.Fatal("samma mikrosekund (olika nanos) ska dedupliceras som i pg")
+	}
+	other := rec
+	other.ObservedAt = base.Add(2 * time.Microsecond)
+	if !s.AppendIdempotent(other) {
+		t.Fatal("annan mikrosekund ska ge ny rad")
+	}
+}
+
+// Regression K4: PeekFor ska vara sorterad (ObservedAt, PropertyID, ID)
+// likt PgStore, så att dräneringsordningen blir deterministisk mellan
+// backendarna. Tidigare returnerade minnet insättningsordning.
+func TestOutboxPeekForSorted(t *testing.T) {
+	o := NewMemOutbox()
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	o.Append(OutboxEvent{ID: "b", Tenant: "t", ThingID: "x", PropertyID: "b", ObservedAt: ts.Add(2 * time.Hour)})
+	o.Append(OutboxEvent{ID: "a", Tenant: "t", ThingID: "x", PropertyID: "a", ObservedAt: ts})
+	got := o.PeekFor("t", "x")
+	if len(got) != 2 || got[0].ID != "a" || got[1].ID != "b" {
+		t.Fatalf("PeekFor ska vara sorterad på ObservedAt, fick %+v", got)
+	}
+}
+
+// Regression K4: History List ska bryta lika ObservedAt+ReceivedAt med
+// källa (B13) för deterministisk ordning.
+func TestHistorySourceTieBreak(t *testing.T) {
+	s := NewMemHistoryStore()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, src := range []string{"s-b", "s-a"} {
+		v := 1.0
+		if !s.AppendIdempotent(HistoryRecord{
+			Tenant: "t", ThingID: "x", PropertyID: "p",
+			ObservedAt: base, ReceivedAt: base, Value: &v,
+			Quality: "ok", Source: src,
+		}) {
+			t.Fatalf("append %s", src)
+		}
+	}
+	got := s.List("t", "x", "p", time.Time{}, time.Time{}, 0)
+	if len(got) != 2 || got[0].Source != "s-a" || got[1].Source != "s-b" {
+		t.Fatalf("käll-tie-break saknas: %+v", got)
 	}
 }

@@ -2,7 +2,7 @@
 
 Ny version av iot-things enligt `../THNGS_NEW.md`. Separat tjänst/installation med **samma struktur och mönster som iot-things**: `cmd/<tjänst>`, `internal/{application,infrastructure,presentation}`, `pkg` för publika kontrakt, `assets`, `deployments`. Samma beroenden och versioner (`service-chassis`, `messaging-golang`, `senml`, `pgx`, `opa`, `otel`).
 
-Status: Etapp 1–3 scaffold + domänkärna, operatorer, flödesregler, minneslager, HTTP-scaffold och fixtures. Se `STATUS.md` för checklista mot `THNGS_NEW.md` kap 13.
+Status: Etapp 1–4 + K4-persistens (minne + PostgreSQL via PgStore, dedup/outbox/CAS, omstart/dränering), domänkärna, operatorer, flödesregler, HTTP-scaffold och fixtures. Se `STATUS.md` för checklista mot `THNGS_NEW.md` kap 13.
 
 ## Struktur (spegel av iot-things)
 
@@ -10,7 +10,7 @@ Status: Etapp 1–3 scaffold + domänkärna, operatorer, flödesregler, minnesla
 - `internal/application`: `app.go` (`ThingsApp`-fasad, `ThingsReader`/`ThingsWriter`), `handlers.go` (`message.accepted`-handler med senml/diwise-`Parse`, tenant-`Permanent`, `convPack`→`Observation`), `evaluate.go` (`ShouldBecomeCurrent`, `EvaluateBatch`).
 - `internal/application/things`: Thing/Template/Variant/Property/Signal/Binding/Relation, sluten mall, stabila ID:n.
 - `internal/application/functions`: mean/min/max, level, fillRate, linear, percent, hysteres, aktiv tid.
-- `internal/infrastructure/storage`: `config.go` (`NewConfig`/`ConnStr`, enda väg via cmd-flags), `storage.go` (`New` validerar via `pgxpool.ParseConfig`, minnesbackend; Timescale-DDL återstår K4), `memory.go` (things/history/relations/outbox/dedup, tenant-isolering, cykelskydd).
+- `internal/infrastructure/storage`: `config.go` (`NewConfig`/`ConnStr`, enda väg via cmd-flags), `storage.go` (minnesbackend), `postgres.go` (`PgStore` över pgx + `migrations/`; Timescale-hypertabell när tillägget finns), `memory.go` (things/history/relations/outbox/dedup, tenant-isolering, cykelskydd). Backend väljs i `cmd`: tom `POSTGRES_HOST` ger minne, satt värd ger PostgreSQL.
 - `internal/presentation/api`: `register.go` (`RegisterHandlers` med `router` + OPA-`auth`, scopes `things.create/read/update/delete`, `/api/v1`-prefix), `respond.go` (JSON/ETag-hjälpare), `auth/` (kopierad OPA-middleware från iot-things).
 - `pkg/types`: `things.v1.values`, `things.v1.relations` + `Validate()` (gamla `thing.updated` orörda).
 - `assets/data/fixtures`: bins, rooms+building, greenhouse, sewer. `assets/config`: `authz.rego`, `config.yaml`, `things.csv`. `assets/docs`: `openapi.yaml` (v1-spec återstår).

@@ -72,8 +72,11 @@ enbart things-kontrakten.
 - Ingen dataimport vid införande: historik byggs från liveflödet;
   v1-databasen behålls orörd. Historisk migrering/avveckling av v1
   kräver separat beslut (utanför denna leverans).
-- Beständig katalog-seed (idempotent ompublicering efter omstart) och
-  PostgreSQL-backend (K4) är kvarvarande punkter före produktion.
+- Beständig backend är införd (K4): `PgStore` över PostgreSQL med
+  Timescale-hypertabell för historik när tillägget finns (samma
+  protokolltester gäller båda backendarna). Kvar: retention för
+  historik/seen-mängder samt beständig katalog-seed (nytt format,
+  separat arbete).
 
 ## 5. Driftsättning (förslag)
 
@@ -113,6 +116,6 @@ docker compose -f deployments/docker-compose.yaml up -d
 docker compose -f deployments/docker-compose.yaml down
 ```
 
-Tjänsten kräver ingen nåbar PostgreSQL i drillen (`storage.New`
-validerar endast anslutningssträngen; beständig backend är K4) och kan
+Tjänsten kör PostgreSQL-backenden i drillen (migrationer appliceras
+vid start; tom `POSTGRES_HOST` ger minnesbackend för dev/test) och kan
 köras brokerless med `RABBITMQ_DISABLED=true` för rent API-test.

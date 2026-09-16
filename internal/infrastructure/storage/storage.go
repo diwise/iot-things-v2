@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,6 +20,10 @@ type Storage struct {
 	Outbox    *MemOutbox
 	Dedup     *MemDedup
 
+	// mu serialiserar flerlagers-commitar (CommitBatch) mellan adaptrar
+	// över samma Storage. Underliggande lager har egna lås i konsistent
+	// ordning (Storage.mu -> lagermutex); lagermetoder tar aldrig Storage.mu.
+	mu      sync.Mutex
 	connStr string
 }
 

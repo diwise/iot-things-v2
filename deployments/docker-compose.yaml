@@ -1,9 +1,10 @@
-# Isolerad drill-miljö för iot-things-v2 (Etapp 7).
+# Isolerad drill-miljö för iot-things-v2 (Etapp 7 + K4).
 #
 # Tjänsten delar aldrig tillstånd med iot-things v1: egen databas,
-# egen broadcast-prenumeration, egna topics. PostgreSQL krävs inte nåbar
-# i drillen (storage.New validerar endast anslutningssträngen; beständig
-# backend är K4). Sätt RABBITMQ_DISABLED=true för rent API-test utan broker.
+# egen broadcast-prenumeration, egna topics. Med POSTGRES_HOST satt kör
+# tjänsten PostgreSQL-backenden (migrationer appliceras vid start);
+# tom värd ger minnesbackend (dev/test). Sätt RABBITMQ_DISABLED=true
+# för rent API-test utan broker.
 
 services:
   rabbitmq:
@@ -18,12 +19,31 @@ services:
       timeout: 5s
       retries: 6
 
+  postgres:
+    image: timescale/timescaledb-ha:pg16
+    hostname: postgres
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: diwise
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    volumes:
+      - iot-things-v2-pgdata:/var/lib/postgresql/data
+
   iot-things-v2:
     build:
       context: ..
       dockerfile: deployments/Dockerfile
     depends_on:
       rabbitmq:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     ports:
       - "8081:8080"
@@ -44,3 +64,6 @@ services:
       POSTGRES_PASSWORD: password
       POSTGRES_SSLMODE: disable
       LOG_LEVEL: debug
+
+volumes:
+  iot-things-v2-pgdata:

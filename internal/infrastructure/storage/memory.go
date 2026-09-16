@@ -73,6 +73,44 @@ func (s *MemThingStore) Delete(tenant, id string) {
 	delete(s.m, thingKey(tenant, id))
 }
 
+// Insert lagrar rec endast om nyckeln saknas (create-if-absent för
+// samtidig registrering). Returnerar false om posten redan finns.
+func (s *MemThingStore) Insert(rec ThingRecord) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.m == nil {
+		s.m = make(map[string]ThingRecord)
+	}
+	key := thingKey(rec.Tenant, rec.ID)
+	if _, exists := s.m[key]; exists {
+		return false
+	}
+	cp := rec
+	if rec.Data != nil {
+		cp.Data = append([]byte(nil), rec.Data...)
+	}
+	s.m[key] = cp
+	return true
+}
+
+// CompareAndSwap lagrar rec endast om lagrad revision är expected
+// (optimistisk låsning över instansgränser). Returnerar false vid
+// konflikt eller saknad post.
+func (s *MemThingStore) CompareAndSwap(tenant, id string, expected int64, rec ThingRecord) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.m[thingKey(tenant, id)]
+	if !ok || cur.Revision != expected {
+		return false
+	}
+	cp := rec
+	if rec.Data != nil {
+		cp.Data = append([]byte(nil), rec.Data...)
+	}
+	s.m[thingKey(tenant, id)] = cp
+	return true
+}
+
 // ListByTenant returnerar alla records för tenant, sorterade på ID.
 func (s *MemThingStore) ListByTenant(tenant string) []ThingRecord {
 	s.mu.Lock()
@@ -141,15 +179,34 @@ func NewMemHistoryStore() *MemHistoryStore {
 func historyDedupKey(tenant, thingID, propID string, observed time.Time, source, quality string, value *float64) string {
 	val := "<nil>"
 	if value != nil {
-		val = strconv.FormatFloat(*value, 'g', -1, 64)
+		// -0 conflatas med 0 för att matcha PostgreSQL (float8 '=' ser
+		// -0 == 0 i UNIQUE-index; FormatFloat skiljer "-0"/"0").
+		if *value == 0 {
+			val = "0"
+		} else {
+			val = strconv.FormatFloat(*value, 'g', -1, 64)
+		}
 	}
-	// Dedup-nyckel: tenant|thing|prop|observedUnixNano|source|quality|value.
+	// Dedup-nyckel: tenant|thing|prop|observedUnixMicro|source|quality|value.
 	// Tenant bevarar isolering; quality ingår så att en kvalitetsändring
 	// (ok->uncertain) med samma värde/tid/källa inte tappas som dubblett.
 	// MessageID/ReceivedAt ingår avsiktligt ej: retry med nytt ID men samma
 	// innehåll ska dedupliceras.
+	// Mättid normaliseras till mikrosekund (Round) för att matcha
+	// PostgreSQL TIMESTAMPTZ som avrundar sub-mikrosekund vid lagring;
+	// utan detta skulle två nanos som avrundas till samma mikrosekund
+	// dedupliceras i pg men ej i minnet.
 	return tenant + "|" + thingID + "|" + propID + "|" +
-		strconv.FormatInt(observed.UnixNano(), 10) + "|" + source + "|" + quality + "|" + val
+		strconv.FormatInt(canonicalObserved(observed).UnixNano(), 10) + "|" + source + "|" + quality + "|" + val
+}
+
+// canonicalObserved normaliserar mättid till mikrosekundprecision (samma som
+// PostgreSQL TIMESTAMPTZ). Noll-tid lämnas orörd.
+func canonicalObserved(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return t.Round(time.Microsecond)
 }
 
 func copyFloat(v *float64) *float64 {
@@ -168,6 +225,7 @@ func (s *MemHistoryStore) AppendIdempotent(rec HistoryRecord) bool {
 	if s.seen == nil {
 		s.seen = make(map[string]struct{})
 	}
+	rec.ObservedAt = canonicalObserved(rec.ObservedAt)
 	key := historyDedupKey(rec.Tenant, rec.ThingID, rec.PropertyID, rec.ObservedAt, rec.Source, rec.Quality, rec.Value)
 	if _, ok := s.seen[key]; ok {
 		return false
@@ -207,6 +265,11 @@ func (s *MemHistoryStore) List(tenant, thingID, propID string, from, to time.Tim
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].ObservedAt.Equal(out[j].ObservedAt) {
+			if out[i].ReceivedAt.Equal(out[j].ReceivedAt) {
+				// Tredje tie-break per B13 (käll-ID-ordning) för
+				// deterministisk ordning vid lika mättid+mottagning.
+				return out[i].Source < out[j].Source
+			}
 			return out[i].ReceivedAt.Before(out[j].ReceivedAt)
 		}
 		return out[i].ObservedAt.Before(out[j].ObservedAt)
@@ -465,6 +528,8 @@ func (o *MemOutbox) ListAndClear() []OutboxEvent {
 
 // PeekFor returnerar kopior av väntande händelser för tenant+thing utan att
 // tömma (för publicering med bekräftelse: rensa först efter lyckad leverans).
+// Sorterat på ObservedAt, PropertyID, ID — samma ordning som PgStore
+// (ORDER BY observed_at, property_id, id) för deterministisk dränering.
 func (o *MemOutbox) PeekFor(tenant, thingID string) []OutboxEvent {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -477,6 +542,15 @@ func (o *MemOutbox) PeekFor(tenant, thingID string) []OutboxEvent {
 		cp.Payload = append([]byte(nil), ev.Payload...)
 		out = append(out, cp)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ObservedAt.Equal(out[j].ObservedAt) {
+			if out[i].PropertyID != out[j].PropertyID {
+				return out[i].PropertyID < out[j].PropertyID
+			}
+			return out[i].ID < out[j].ID
+		}
+		return out[i].ObservedAt.Before(out[j].ObservedAt)
+	})
 	return out
 }
 

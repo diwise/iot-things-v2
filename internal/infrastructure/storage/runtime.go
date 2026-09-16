@@ -24,7 +24,7 @@ func NewRuntimeAdapter(s *Storage) *RuntimeAdapter {
 }
 
 func (a *RuntimeAdapter) LoadThing(tenant, thingID string) (application.StoredThingState, bool) {
-	raw, rev, ok := a.S.Things.Get(tenant, thingID)
+	raw, dataRev, ok := a.S.Things.Get(tenant, thingID)
 	if !ok {
 		return application.StoredThingState{}, false
 	}
@@ -32,15 +32,59 @@ func (a *RuntimeAdapter) LoadThing(tenant, thingID string) (application.StoredTh
 	if err := json.Unmarshal(raw, &st); err != nil {
 		return application.StoredThingState{}, false
 	}
-	st.Revision = rev
+	// Kolumnen är skrivstaketet (auktoritativ); konfigurationsrevisionen
+	// kommer ur JSON-blobben.
+	st.DataRevision = dataRev
 	return st, true
 }
 
-func (a *RuntimeAdapter) SaveThing(tenant, thingID string, st application.StoredThingState) {
+func (a *RuntimeAdapter) InsertThing(tenant, thingID string, st application.StoredThingState) bool {
 	raw, _ := json.Marshal(st)
-	a.S.Things.Upsert(ThingRecord{ID: thingID, Tenant: tenant, Revision: st.Revision, Data: raw})
-	// MemThingStore.Upsert behåller Revision som den är; verifiera inte här
-	// (optimistisk låsning sker i Runtime.RegisterThing före anrop).
+	return a.S.Things.Insert(ThingRecord{ID: thingID, Tenant: tenant, Revision: st.DataRevision, Data: raw})
+}
+
+func (a *RuntimeAdapter) SaveThingCAS(tenant, thingID string, expected int64, st application.StoredThingState) bool {
+	raw, _ := json.Marshal(st)
+	return a.S.Things.CompareAndSwap(tenant, thingID, expected, ThingRecord{ID: thingID, Tenant: tenant, Revision: st.DataRevision, Data: raw})
+}
+
+// CommitBatch persisterar blob-CAS + historik + pending atomärt under
+// Storage-låset: vid staketkonflikt blir inget synligt. Historik/outbox är
+// själva idempotenta, så omtag efter konflikt konvergerar.
+func (a *RuntimeAdapter) CommitBatch(tenant, thingID string, expected int64, st application.StoredThingState, hist []application.HistoryWrite, pending []application.FlowEvent) bool {
+	a.S.mu.Lock()
+	defer a.S.mu.Unlock()
+	raw, _ := json.Marshal(st)
+	if !a.S.Things.CompareAndSwap(tenant, thingID, expected, ThingRecord{ID: thingID, Tenant: tenant, Revision: st.DataRevision, Data: raw}) {
+		return false
+	}
+	for _, h := range hist {
+		a.S.History.AppendIdempotent(HistoryRecord{
+			Tenant:     tenant,
+			ThingID:    thingID,
+			PropertyID: h.PropertyID,
+			ObservedAt: h.ObservedAt,
+			ReceivedAt: h.ReceivedAt,
+			Value:      h.Value,
+			Quality:    h.Quality,
+			Source:     h.Source,
+			MessageID:  h.MessageID,
+			Late:       h.Late,
+		})
+	}
+	for _, e := range pending {
+		payload, _ := json.Marshal(e)
+		a.S.Outbox.Append(OutboxEvent{
+			ID:         application.StableEventID(tenant, thingID, e.MessageID, e.PropertyID),
+			Tenant:     tenant,
+			ThingID:    thingID,
+			PropertyID: e.PropertyID,
+			ObservedAt: e.ObservedAt,
+			Revision:   e.ConfigRevision,
+			Payload:    payload,
+		})
+	}
+	return true
 }
 
 func (a *RuntimeAdapter) DeleteThingState(tenant, thingID string) {

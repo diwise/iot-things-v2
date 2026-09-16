@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"sort"
 	"strings"
 	"sync"
@@ -30,10 +31,14 @@ import (
 	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 )
 
-// StoredThingState är det persisterade tillståndet per sak.
+// StoredThingState är det persisterade tillståndet per sak. Revision är
+// konfigurationsversionen (API-ytan, If-Match); DataRevision är
+// skrivstaketet för CAS (bumpas vid varje blob-skrivning, även batchar
+// utan configändring) så att samtidiga skribenter upptäcks.
 type StoredThingState struct {
 	ConfigJSON      []byte                     `json:"config"`
 	Revision        int64                      `json:"revision"`
+	DataRevision    int64                      `json:"dataRev"`
 	Current         map[string]CurrentValue    `json:"current,omitempty"`
 	ProcessorStates map[string]StoredProcessor `json:"processors,omitempty"`
 	LastMessageID   string                     `json:"lastMessageId,omitempty"`
@@ -41,12 +46,22 @@ type StoredThingState struct {
 }
 
 // RuntimeStore är persistensgränsen för Runtime. Minnesimplementation:
-// internal/infrastructure/storage RuntimeAdapter. Metoderna är avsiktligt
-// finkorniga så att en framtida PostgreSQL-backend kan mappa dem mot
-// transaktioner (en Runtime-batch = en transaktion).
+// internal/infrastructure/storage RuntimeAdapter; beständig implementation:
+// samma pakets PgStore. Metoderna är avsiktligt finkorniga. Tvärsnitts-
+// atomicitet bygger på idempotens + revisionerad CAS i stället för
+// distribuerade transaktioner: samtidig skrivning upptäcks (false) och
+// anroparen läser om + räknar om + försöker igen (begränsat antal).
 type RuntimeStore interface {
 	LoadThing(tenant, thingID string) (StoredThingState, bool)
-	SaveThing(tenant, thingID string, st StoredThingState)
+	// InsertThing lagrar ny sak; false om den redan finns.
+	InsertThing(tenant, thingID string, st StoredThingState) bool
+	// SaveThingCAS lagrar endast om lagrat skrivstaket är expected
+	// (DataRevision, ej konfigurationsrevisionen).
+	SaveThingCAS(tenant, thingID string, expected int64, st StoredThingState) bool
+	// CommitBatch persisterar en omgång atomärt: blob-CAS på expected
+	// staket + idempotent historik + idempotent pending. False vid
+	// staketkonflikt (inget skrivs); anroparen läser om och försöker igen.
+	CommitBatch(tenant, thingID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool
 	DeleteThingState(tenant, thingID string)
 	ListThingIDs(tenant string) []string
 	ListTenants() []string
@@ -55,7 +70,6 @@ type RuntimeStore interface {
 	PendingEvents(tenant, thingID string) []FlowEvent
 	StorePending(tenant, thingID string, events []FlowEvent)
 	ClearPendingIDs(tenant, thingID string, ids []string)
-	DedupHit(tenant, messageID, thingID string) bool
 	DedupCheck(tenant, messageID, thingID string) bool
 	DedupMark(tenant, messageID, thingID string)
 	Children(tenant, parentID string) []string
@@ -110,19 +124,26 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	st, exists := rt.store.LoadThing(tenant, obj.ThingID)
+	fence := st.DataRevision
+	var newRevision int64
 	if !exists {
-		st.Revision = revision
+		newRevision = revision
+		st.DataRevision = 1
 	} else {
 		if st.Revision != revision {
 			return nil, fmt.Errorf("%w: thing %q has revision %d, request had %d",
 				things.ErrConflict, obj.ThingID, st.Revision, revision)
 		}
-		st.Revision = revision + 1
+		newRevision = revision + 1
+		st.DataRevision++
 	}
-	st.ConfigJSON = raw
-	if st.Current == nil {
-		st.Current = make(map[string]CurrentValue)
+	// Relationsfel ska komma före blob-skrivning: validera mål och beräkna
+	// planerade länkändringar utan att mutera ännu.
+	type relOp struct {
+		op     string // "attach", "move" eller "detach"
+		target string
 	}
+	var relOps []relOp
 	hasPartOf := false
 	for _, rel := range cfg.Relations {
 		// Hierarkimedlemskap (partOf) persisteras som barn->förälder;
@@ -134,26 +155,49 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 		if _, ok := rt.store.LoadThing(tenant, rel.TargetThingID); !ok {
 			return nil, fmt.Errorf("%w: relation target %q", things.ErrNotFound, rel.TargetThingID)
 		}
-		if cur, ok := rt.store.ParentOf(tenant, obj.ThingID); ok && cur == rel.TargetThingID {
-			continue
-		}
-		if _, ok := rt.store.ParentOf(tenant, obj.ThingID); ok {
-			if err := rt.store.MoveChild(tenant, obj.ThingID, rel.TargetThingID); err != nil {
-				return nil, err
+		if cur, ok := rt.store.ParentOf(tenant, obj.ThingID); ok {
+			if cur == rel.TargetThingID {
+				continue
 			}
+			relOps = append(relOps, relOp{op: "move", target: rel.TargetThingID})
 			continue
 		}
-		if err := rt.store.AttachChild(tenant, obj.ThingID, rel.TargetThingID); err != nil {
-			return nil, err
-		}
+		relOps = append(relOps, relOp{op: "attach", target: rel.TargetThingID})
 	}
 	if !hasPartOf {
 		// Borttagen partOf i ny config ska koppla loss (lämna ej kvar gammal länk).
 		if _, ok := rt.store.ParentOf(tenant, obj.ThingID); ok {
-			rt.store.DetachChild(tenant, obj.ThingID)
+			relOps = append(relOps, relOp{op: "detach"})
 		}
 	}
-	rt.store.SaveThing(tenant, obj.ThingID, st)
+	st.Revision = newRevision
+	st.ConfigJSON = raw
+	if st.Current == nil {
+		st.Current = make(map[string]CurrentValue)
+	}
+	if !exists {
+		if !rt.store.InsertThing(tenant, obj.ThingID, st) {
+			return nil, fmt.Errorf("%w: thing %q created concurrently",
+				things.ErrConflict, obj.ThingID)
+		}
+	} else if !rt.store.SaveThingCAS(tenant, obj.ThingID, fence, st) {
+		return nil, fmt.Errorf("%w: thing %q changed concurrently",
+			things.ErrConflict, obj.ThingID)
+	}
+	for _, op := range relOps {
+		var err error
+		switch op.op {
+		case "attach":
+			err = rt.store.AttachChild(tenant, obj.ThingID, op.target)
+		case "move":
+			err = rt.store.MoveChild(tenant, obj.ThingID, op.target)
+		case "detach":
+			rt.store.DetachChild(tenant, obj.ThingID)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
 	return cfg, nil
 }
 
@@ -228,7 +272,31 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 			})
 			continue
 		}
-		outcome, err := EvaluateBatchFlow(sd.config, sd.state.Current, sd.state.ProcessorStates, grouped[id], receivedAt, messageID, sd.state.Revision)
+		outcome, err := rt.persistBatch(tenant, messageID, id, sd, grouped[id], receivedAt)
+		if err != nil {
+			return nil, err
+		}
+		outcomes = append(outcomes, BatchOutcome{ThingID: id, Outcome: outcome})
+	}
+	return outcomes, nil
+}
+
+// maxBatchAttempts gränsar CAS-omtag vid samtidig skrivning (annan instans
+// eller tråd utanför rt.mu). Backoff med jitter mellan försöken gör
+// svält praktiskt omöjlig; tar försöken slut felar rundan för
+// återleverans via broker-retry (inget tillstånd har gått förlorat:
+// omberäkning är deterministisk och alla skrivningar idempotenta).
+const maxBatchAttempts = 10
+
+// persistBatch beräknar en saks omgång och persisterar atomärt per försök:
+// historik/outbox-skrivningar är idempotenta, sak-blobben skyddas av CAS på
+// revision. Vid CAS-konflikt läses färskt tillstånd om och rundan räknas om
+// (deterministisk: samma resultat givet samma indata) innan nytt försök.
+func (rt *Runtime) persistBatch(tenant, messageID, id string, sd *storedDecoded, obs []things.Observation, receivedAt time.Time) (*FlowOutcome, error) {
+	var outcome *FlowOutcome
+	for attempt := range maxBatchAttempts {
+		var err error
+		outcome, err = EvaluateBatchFlow(sd.config, sd.state.Current, sd.state.ProcessorStates, obs, receivedAt, messageID, sd.state.Revision)
 		if err != nil {
 			return nil, fmt.Errorf("runtime: thing %q: %w", id, err)
 		}
@@ -247,21 +315,37 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 			v.StateJSON = cloneBytes(v.StateJSON)
 			sd.state.ProcessorStates[k] = v
 		}
-		for _, h := range outcome.History {
-			rt.store.AppendHistory(tenant, id, h)
-		}
 		if len(outcome.Events) > 0 {
-			rt.store.StorePending(tenant, id, outcome.Events)
 			sd.state.LastEvents = append([]FlowEvent(nil), outcome.Events...)
 		} else {
 			sd.state.LastEvents = nil
 		}
 		sd.state.LastMessageID = messageID
-		rt.store.SaveThing(tenant, id, sd.state)
-		rt.store.DedupMark(tenant, messageID, id)
-		outcomes = append(outcomes, BatchOutcome{ThingID: id, Outcome: outcome})
+		fence := sd.state.DataRevision
+		sd.state.DataRevision++
+		if rt.store.CommitBatch(tenant, id, fence, sd.state, outcome.History, outcome.Events) {
+			rt.store.DedupMark(tenant, messageID, id)
+			return outcome, nil
+		}
+		// CAS-konflikt: inget från försöket blev synligt (CommitBatch är
+		// atomär). Backoff före omtag så att tävlande skribenter sprids;
+		// första omtaget sker direkt (oftast transient), sedan växande.
+		if attempt+1 < maxBatchAttempts {
+			time.Sleep(time.Duration(attempt*attempt)*time.Millisecond +
+				time.Duration(rand.IntN(1000))*time.Microsecond)
+		}
+		fresh, ok := rt.store.LoadThing(tenant, id)
+		if !ok {
+			return nil, fmt.Errorf("%w: thing %q deleted concurrently", things.ErrConflict, id)
+		}
+		freshCfg, err := decodeConfig(fresh.ConfigJSON)
+		if err != nil {
+			return nil, fmt.Errorf("runtime: thing %q has undecodable config: %w", id, err)
+		}
+		sd.state = fresh
+		sd.config = freshCfg
 	}
-	return outcomes, nil
+	return nil, fmt.Errorf("%w: thing %q busy, retry delivery", things.ErrConflict, id)
 }
 
 type storedDecoded struct {
