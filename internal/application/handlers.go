@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,8 +118,9 @@ func convPack(parsed *diwisepkg.Pack, receivedAt time.Time, messageID string) []
 
 		for _, r := range o.Resources() {
 			name := r.Name[strings.LastIndex(r.Name, "/")+1:]
-			if name == "" || name == "0" {
-				continue
+			n, err := strconv.Atoi(name)
+			if err != nil || n == 0 {
+				continue // Header (n:0) och icke-numeriska postnamn är aldrig mätvärden.
 			}
 
 			if r.Value == nil && r.BoolValue == nil {
