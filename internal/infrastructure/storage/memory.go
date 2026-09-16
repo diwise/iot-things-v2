@@ -65,6 +65,14 @@ func (s *MemThingStore) Get(tenant, id string) ([]byte, int64, bool) {
 	return cp, rec.Revision, true
 }
 
+// Delete tar bort ett record. Historik/dedup/outbox påverkas inte
+// (värdehistorik bevaras vid borttagning av sak).
+func (s *MemThingStore) Delete(tenant, id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.m, thingKey(tenant, id))
+}
+
 // ListByTenant returnerar alla records för tenant, sorterade på ID.
 func (s *MemThingStore) ListByTenant(tenant string) []ThingRecord {
 	s.mu.Lock()
@@ -81,6 +89,23 @@ func (s *MemThingStore) ListByTenant(tenant string) []ThingRecord {
 		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// Tenants returnerar sorterade tenants med minst ett record (för
+// uppstartsdränering av utboxen över alla tenants).
+func (s *MemThingStore) Tenants() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := make(map[string]struct{})
+	for _, rec := range s.m {
+		seen[rec.Tenant] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for tenant := range seen {
+		out = append(out, tenant)
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -353,7 +378,29 @@ func (s *MemRelationStore) Parent(tenant, childID string) (RelationRecord, bool)
 	return rec, true
 }
 
-// OutboxEvent är en minimal utbox-händelse.
+// RemoveOutgoing tar bort alla relationer från fromID inom tenant (för
+// borttagning av sak; inkommande barnlänkar blockerar borttagning i stället
+// för att kaskaderas). Returnerar antal borttagna.
+func (s *MemRelationStore) RemoveOutgoing(tenant, fromID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for key, rec := range s.byID {
+		if rec.Tenant != tenant || rec.FromID != fromID {
+			continue
+		}
+		delete(s.byID, key)
+		if rec.Type == "partOf" {
+			delete(s.childParent, relationChildKey(tenant, fromID))
+		}
+		removed++
+	}
+	return removed
+}
+
+// OutboxEvent är en minimal utbox-händelse. Payload bär den fullständiga
+// händelsen (t.ex. serialiserad FlowEvent) så att omstart kan återpublicera
+// utan omberäkning; ID är det stabila deduplicerings-ID:t.
 type OutboxEvent struct {
 	ID         string
 	Tenant     string
@@ -361,6 +408,7 @@ type OutboxEvent struct {
 	PropertyID string
 	ObservedAt time.Time
 	Revision   int64
+	Payload    []byte
 }
 
 // MemOutbox är ett minnesbaserat utbox-lager med idempotent append på ID.
@@ -379,7 +427,7 @@ func NewMemOutbox() *MemOutbox {
 }
 
 // Append lägger till en händelse. Returnerar false vid dubblett-ID
-// (hoppas över) och true när händelsen lagrades.
+// (hoppas över) och true när händelsen lagrades. Payload kopieras.
 func (o *MemOutbox) Append(ev OutboxEvent) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -392,6 +440,7 @@ func (o *MemOutbox) Append(ev OutboxEvent) bool {
 		}
 		o.seen[ev.ID] = struct{}{}
 	}
+	ev.Payload = append([]byte(nil), ev.Payload...)
 	o.events = append(o.events, ev)
 	return true
 }
@@ -406,11 +455,108 @@ func (o *MemOutbox) ListAndClear() []OutboxEvent {
 	return out
 }
 
+// PeekFor returnerar kopior av väntande händelser för tenant+thing utan att
+// tömma (för publicering med bekräftelse: rensa först efter lyckad leverans).
+func (o *MemOutbox) PeekFor(tenant, thingID string) []OutboxEvent {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var out []OutboxEvent
+	for _, ev := range o.events {
+		if ev.Tenant != tenant || ev.ThingID != thingID {
+			continue
+		}
+		cp := ev
+		cp.Payload = append([]byte(nil), ev.Payload...)
+		out = append(out, cp)
+	}
+	return out
+}
+
+// ClearIDs tar bort väntande händelser med givna ID:n för tenant+thing.
+// Sedda ID:n behålls så att återleverans fortsatt dedupliceras. Används
+// efter lyckad publicering så att händelser som tillkommit under pågående
+// leverans inte tappas.
+func (o *MemOutbox) ClearIDs(tenant, thingID string, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	want := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		want[id] = struct{}{}
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	origLen := len(o.events)
+	kept := o.events[:0]
+	for _, ev := range o.events {
+		if ev.Tenant == tenant && ev.ThingID == thingID {
+			if _, ok := want[ev.ID]; ok {
+				continue
+			}
+		}
+		kept = append(kept, ev)
+	}
+	for i := len(kept); i < origLen; i++ {
+		o.events[i] = OutboxEvent{}
+	}
+	o.events = kept
+}
+
 // Len returnerar antal lagrade händelser.
 func (o *MemOutbox) Len() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return len(o.events)
+}
+
+// Forget tar bort alla väntande händelser för tenant+thing samt deras sedda
+// ID:n (för borttagning av sak: historik bevaras annorstädes, men föräldralös
+// outbox får inte bli kvar och blockera nyskapad sak med samma ID).
+func (o *MemOutbox) Forget(tenant, thingID string) {
+	if tenant == "" || thingID == "" {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	origLen := len(o.events)
+	dropped := make(map[string]struct{})
+	kept := o.events[:0]
+	for _, ev := range o.events {
+		if ev.Tenant == tenant && ev.ThingID == thingID {
+			if ev.ID != "" {
+				dropped[ev.ID] = struct{}{}
+			}
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	for i := len(kept); i < origLen; i++ {
+		o.events[i] = OutboxEvent{}
+	}
+	o.events = kept
+	for id := range dropped {
+		delete(o.seen, id)
+	}
+	// Rensa även redan levererade (ej längre väntande) ID:n för saken så att
+	// nyskapad sak med samma ID inte dedupliceras mot gammal livscykel.
+	// Stabila ID:n har formen v1/<tenant>/<thing>/<msg>/<prop> med "/" -> "~".
+	sanitize := func(s string) string {
+		out := make([]byte, 0, len(s))
+		for i := 0; i < len(s); i++ {
+			if s[i] == '/' {
+				out = append(out, '~')
+			} else {
+				out = append(out, s[i])
+			}
+		}
+		return string(out)
+	}
+	prefix := "v1/" + sanitize(tenant) + "/" + sanitize(thingID) + "/"
+	for id := range o.seen {
+		if len(id) >= len(prefix) && id[:len(prefix)] == prefix {
+			delete(o.seen, id)
+		}
+	}
 }
 
 // MemDedup är ett enkelt idempotens-filter per (tenant, messageID, thingID).
@@ -448,4 +594,54 @@ func (d *MemDedup) SeenOrMark(tenant, messageID, thingID string) bool {
 	}
 	d.seen[key] = struct{}{}
 	return false
+}
+
+// Has rapporterar om (tenant, messageID, thingID) redan setts utan att
+// markera (check-only för atomär dedup: markera först efter lyckad persist).
+// Tomt messageID ger alltid false.
+func (d *MemDedup) Has(tenant, messageID, thingID string) bool {
+	if messageID == "" {
+		return false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.seen[dedupKey(tenant, messageID, thingID)]
+	return ok
+}
+
+// Mark markerar (tenant, messageID, thingID) som sedd (no-op för tomt ID).
+func (d *MemDedup) Mark(tenant, messageID, thingID string) {
+	if messageID == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.seen == nil {
+		d.seen = make(map[string]struct{})
+	}
+	d.seen[dedupKey(tenant, messageID, thingID)] = struct{}{}
+}
+
+// ForgetThing rensar alla dedup-markörer för en sak (för borttagning:
+// nyskapad sak med samma ID ska kunna behandla samma messageID på nytt).
+func (d *MemDedup) ForgetThing(tenant, thingID string) {
+	if tenant == "" || thingID == "" {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	suffix := "\x00" + thingID
+	prefix := tenant + "\x00"
+	for key := range d.seen {
+		if len(key) < len(prefix)+len(suffix) {
+			continue
+		}
+		if key[:len(prefix)] != prefix {
+			continue
+		}
+		if key[len(key)-len(suffix):] != suffix {
+			continue
+		}
+		delete(d.seen, key)
+	}
 }

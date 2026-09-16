@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 )
@@ -113,5 +114,71 @@ func TestThingValueTimeFieldsRoundtrip(t *testing.T) {
 	}
 	if back.Schema != SchemaV1 {
 		t.Fatalf("schema = %q, want %q", back.Schema, SchemaV1)
+	}
+}
+
+// Regression L7/P12: NaN/Inf får ej passera Validate (json.Body skulle bli nil).
+func TestThingValueValidateRejectsNaNInf(t *testing.T) {
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	base := ThingValueV1{
+		Schema:     SchemaV1,
+		ThingID:    "t1",
+		Tenant:     "acme",
+		PropertyID: "temp",
+		Quality:    "ok",
+		ObservedAt: ts,
+	}
+	nan := base
+	nanVal := math.NaN()
+	nan.Value = &nanVal
+	if err := nan.Validate(); err == nil {
+		t.Fatal("NaN ska nekas")
+	}
+	inf := base
+	infVal := math.Inf(1)
+	inf.Value = &infVal
+	if err := inf.Validate(); err == nil {
+		t.Fatal("+Inf ska nekas")
+	}
+	ok := base
+	v := 21.5
+	ok.Value = &v
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("giltigt värde ska passera: %v", err)
+	}
+}
+
+// Regression P12: TopicName/ContentType/Body kontrakt.
+func TestThingValuesEventTopicContract(t *testing.T) {
+	ts := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	v := 1.0
+	ev := ThingValuesEventV1{
+		Schema:         SchemaV1,
+		EventID:        "v1/acme/t1/m1",
+		Tenant:         "acme",
+		ThingID:        "t1",
+		ConfigRevision: 2,
+		PublishedAt:    ts,
+		Values: []ThingValueV1{{
+			Schema: SchemaV1, ThingID: "t1", Tenant: "acme", PropertyID: "temp",
+			Value: &v, Quality: "ok", ObservedAt: ts, PublishedAt: ts, EventID: "v1/acme/t1/m1/temp",
+		}},
+	}
+	if ev.TopicName() != TopicThingValues {
+		t.Fatalf("TopicName=%q, want %q", ev.TopicName(), TopicThingValues)
+	}
+	if ev.ContentType() == "" {
+		t.Fatal("ContentType krävs")
+	}
+	body := ev.Body()
+	if len(body) == 0 {
+		t.Fatal("Body får ej vara tom")
+	}
+	var back ThingValuesEventV1
+	if err := json.Unmarshal(body, &back); err != nil {
+		t.Fatalf("Body roundtrip: %v", err)
+	}
+	if back.EventID != ev.EventID || len(back.Values) != 1 || back.Values[0].PropertyID != "temp" {
+		t.Fatalf("Body roundtrip mismatch: %+v", back)
 	}
 }

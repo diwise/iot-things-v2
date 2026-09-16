@@ -1,7 +1,9 @@
 package types
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -57,6 +59,9 @@ func (v ThingValueV1) Validate() error {
 	default:
 		return fmt.Errorf("types: invalid quality %q (want ok/uncertain/invalid)", v.Quality)
 	}
+	if v.Value != nil && (math.IsNaN(*v.Value) || math.IsInf(*v.Value, 0)) {
+		return fmt.Errorf("types: invalid value (NaN/Inf not allowed)")
+	}
 	return nil
 }
 
@@ -82,4 +87,16 @@ type RelationChangeV1 struct {
 	Tenant     string    `json:"tenant"`
 	Revision   int64     `json:"revision"`
 	ChangedAt  time.Time `json:"changedAt"`
+}
+
+// TopicName reports the publish topic (B20: isolated v1 topics).
+func (e ThingValuesEventV1) TopicName() string { return TopicThingValues }
+
+// ContentType reports the versioned payload content type.
+func (e ThingValuesEventV1) ContentType() string { return "application/vnd.diwise.things.v1+json" }
+
+// Body serializes the event for transport.
+func (e ThingValuesEventV1) Body() []byte {
+	b, _ := json.Marshal(e)
+	return b
 }

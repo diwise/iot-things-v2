@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -80,6 +81,12 @@ func NewMeasurementsHandler(c context.Context, app ThingsApp) messaging.TopicMes
 			err = errMissingTenant
 			log.Error("message contains no tenant")
 			return messaging.Permanent(err)
+		}
+		if topicMessage.MessageID() == "" {
+			// Dedup/outbox kräver stabilt messageID (L6/L10); tomt ID läker
+			// aldrig vid retry.
+			log.Error("message contains no message ID")
+			return messaging.Permanent(fmt.Errorf("message contains no message ID"))
 		}
 
 		logger = logger.With("device_id", deviceID, "tenant", tenant)

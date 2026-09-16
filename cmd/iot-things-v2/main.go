@@ -190,6 +190,15 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 				return fmt.Errorf("unable to register message handler: %w", err)
 			}
 
+			log.Debug("draining pending outbox batches...")
+			n, err := app.DrainPending(ctx)
+			if err != nil {
+				return fmt.Errorf("unable to drain outbox: %w", err)
+			}
+			if n > 0 {
+				log.Info("republished pending outbox batches", "count", n)
+			}
+
 			return nil
 		}),
 		onshutdown(func(ctx context.Context, appCfg *appConfig) error {
@@ -337,7 +346,15 @@ func parseLogLevel(level string) slog.Level {
 }
 
 func newApp(ctx context.Context, r application.ThingsReader, w application.ThingsWriter, m messaging.MsgContext, cfg io.Reader) (application.ThingsApp, error) {
-	a := application.New(r, w, m)
+	// Etapp 4 runtime över lagringsadaptern: atomära batchar, dedup,
+	// outbox. Samma store delas vid omstart (dränering utan omberäkning).
+	var rt *application.Runtime
+	var pub application.EventPublisher
+	if s, ok := r.(*storage.Storage); ok {
+		rt = application.NewRuntime(storage.NewRuntimeAdapter(s))
+		pub = &application.TopicPublisher{MsgCtx: m}
+	}
+	a := application.New(r, w, m, rt, pub)
 	err := a.LoadConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("unable to load config: %w", err)

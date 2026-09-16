@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application/things"
 	"github.com/diwise/messaging-golang/pkg/messaging"
@@ -27,6 +28,9 @@ type ThingsApp interface {
 
 	MigrateBindings(ctx context.Context) (int, error)
 	HasUnmigratedThings(ctx context.Context) (bool, error)
+
+	// DrainPending publishes all pending outbox batches (restart drain).
+	DrainPending(ctx context.Context) (int, error)
 }
 
 // ThingsReader is implemented by the infrastructure storage layer.
@@ -53,33 +57,62 @@ type app struct {
 	reader ThingsReader
 	writer ThingsWriter
 	msgCtx messaging.MsgContext
+	rt     *Runtime
+	pub    EventPublisher
 
 	mu sync.Mutex
 }
 
-// New wires reader/writer/msgCtx. Messaging may be nil in tests.
-func New(r ThingsReader, w ThingsWriter, m messaging.MsgContext) *app {
-	return &app{reader: r, writer: w, msgCtx: m}
+// New wires reader/writer/msgCtx with the Etapp 4 runtime and publisher.
+// rt/pub may be nil in tests: batches are then accepted without persistence
+// fan-out (DrainPending reports none).
+func New(r ThingsReader, w ThingsWriter, m messaging.MsgContext, rt *Runtime, pub EventPublisher) *app {
+	return &app{reader: r, writer: w, msgCtx: m, rt: rt, pub: pub}
 }
 
-// HandleMeasurements validates tenant identity and fans observations out to
-// bound properties. Full binding/graph evaluation lands in evaluate.go;
-// this facade owns ack semantics: structural/identity errors are permanent,
-// handling errors are returned for retry (same contract as iot-things
-// handlers: Permanent vs Temporary classification lives in handlers.go).
+// HandleMeasurements validates tenant identity, persists the batch
+// atomically via the runtime and publishes pending events. Errors propagate
+// for retry (same contract as iot-things); structural/identity errors are
+// classified Permanent in handlers.go and never reach here as such.
 func (a *app) HandleMeasurements(ctx context.Context, tenant string, messageID string, observations []things.Observation) error {
 	if tenant == "" {
 		return fmt.Errorf("%w: empty tenant (message %q)", ErrMissingThingTenant, messageID)
+	}
+	if messageID == "" {
+		return fmt.Errorf("%w: empty messageID", ErrMissingThingTenant)
 	}
 	if len(observations) == 0 {
 		return nil
 	}
 	log := logging.GetFromContext(ctx)
 	log.Debug("handle measurements", "tenant", tenant, "messageID", messageID, "count", len(observations))
-	// TODO(evaluate): resolve bindings via reader, apply time/quality rules in
-	// evaluate.go, persist current/history/state + outbox atomically, publish
-	// pkg/types ThingValuesEventV1 via msgCtx.
+	if a.rt == nil {
+		return nil
+	}
+	outcomes, err := a.rt.HandleBatch(ctx, tenant, messageID, observations, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if a.pub == nil {
+		return nil
+	}
+	// Enhetlig publiceringstid per batch (samma PublishedAt för alla saker).
+	now := time.Now().UTC()
+	for _, o := range outcomes {
+		if _, err := a.rt.DrainAndPublish(ctx, a.pub, tenant, o.ThingID, now); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// DrainPending publishes all pending outbox batches (restart drain after
+// messaging start, before/after handler registration in cmd).
+func (a *app) DrainPending(ctx context.Context) (int, error) {
+	if a.rt == nil || a.pub == nil {
+		return 0, nil
+	}
+	return a.rt.DrainAll(ctx, a.pub, time.Now().UTC())
 }
 
 // Add validates and stores a thing definition (JSON). Full validation

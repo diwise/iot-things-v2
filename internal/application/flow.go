@@ -55,6 +55,7 @@ type FlowEvent struct {
 	Value           float64
 	Quality         string
 	ObservedAt      time.Time
+	ReceivedAt      time.Time
 	Sources         []string
 	Available       int
 	Expected        int
@@ -183,6 +184,7 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 					PropertyID:     input,
 					Quality:        q,
 					ObservedAt:     o.ObservedAt,
+					ReceivedAt:     rx,
 					Sources:        []string{o.Signal.ID()},
 					Available:      1,
 					Expected:       1,
@@ -241,6 +243,7 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 				Value:           res.Value,
 				Quality:         res.Quality,
 				ObservedAt:      res.ObservedAt,
+				ReceivedAt:      receivedAt,
 				Sources:         res.Sources,
 				Available:       res.Available,
 				Expected:        res.Expected,

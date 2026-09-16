@@ -248,3 +248,57 @@ func TestTenantIsolationThingAndHistory(t *testing.T) {
 		t.Fatalf("fel property ska ge tomt resultat, fick %+v", got)
 	}
 }
+
+// Regression L6/L10: Has/Mark split för atomär dedup; ForgetThing rensar per sak.
+func TestDedupHasMarkForget(t *testing.T) {
+	d := NewMemDedup()
+	if d.Has("t", "m1", "thing") {
+		t.Fatal("Has före Mark ska vara false")
+	}
+	d.Mark("t", "m1", "thing")
+	if !d.Has("t", "m1", "thing") {
+		t.Fatal("Has efter Mark ska vara true")
+	}
+	if !d.SeenOrMark("t", "m1", "thing") {
+		t.Fatal("SeenOrMark efter Mark ska vara true")
+	}
+	d.Mark("t", "", "thing") // no-op, ska ej panika
+	if d.Has("t", "", "thing") {
+		t.Fatal("tomt ID ska aldrig Has")
+	}
+	d.ForgetThing("t", "thing")
+	if d.Has("t", "m1", "thing") {
+		t.Fatal("Has efter ForgetThing ska vara false")
+	}
+	// Annan sak påverkas ej.
+	d.Mark("t", "m1", "other")
+	d.ForgetThing("t", "thing")
+	if !d.Has("t", "m1", "other") {
+		t.Fatal("ForgetThing får ej rensa annan sak")
+	}
+}
+
+// Regression L7: Forget rensar väntande + sedda ID:n per sak utan att röra andra.
+func TestOutboxForget(t *testing.T) {
+	o := NewMemOutbox()
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	o.Append(OutboxEvent{ID: "v1/t/a/m1/p", Tenant: "t", ThingID: "a", ObservedAt: ts})
+	o.Append(OutboxEvent{ID: "v1/t/b/m1/p", Tenant: "t", ThingID: "b", ObservedAt: ts})
+	o.ClearIDs("t", "a", []string{"v1/t/a/m1/p"}) // levererad: väntande borta, sedd kvar
+	if o.Len() != 1 {
+		t.Fatalf("len=%d, want 1", o.Len())
+	}
+	if o.Append(OutboxEvent{ID: "v1/t/a/m1/p", Tenant: "t", ThingID: "a", ObservedAt: ts}) {
+		t.Fatal("levererad ID ska fortsatt dedupliceras före Forget")
+	}
+	o.Forget("t", "a")
+	if o.Len() != 1 {
+		t.Fatalf("len=%d efter Forget(a), want 1 (b kvar)", o.Len())
+	}
+	if !o.Append(OutboxEvent{ID: "v1/t/a/m1/p", Tenant: "t", ThingID: "a", ObservedAt: ts}) {
+		t.Fatal("Forget ska rensa sedda ID:n så att nyskapad sak kan återanvända ID")
+	}
+	if got := o.PeekFor("t", "b"); len(got) != 1 {
+		t.Fatalf("PeekFor(b)=%d, want 1 (orörd)", len(got))
+	}
+}
