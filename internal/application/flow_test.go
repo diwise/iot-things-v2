@@ -113,9 +113,17 @@ func tempObs(device string, v float64, at time.Time) things.Observation {
 func mergeCurrent(base map[string]CurrentValue, out *FlowOutcome) map[string]CurrentValue {
 	next := make(map[string]CurrentValue, len(base)+len(out.Updated))
 	for k, v := range base {
+		if v.Value != nil {
+			c := *v.Value
+			v.Value = &c
+		}
 		next[k] = v
 	}
 	for k, v := range out.Updated {
+		if v.Value != nil {
+			c := *v.Value
+			v.Value = &c
+		}
 		next[k] = v
 	}
 	return next
@@ -124,7 +132,7 @@ func mergeCurrent(base map[string]CurrentValue, out *FlowOutcome) map[string]Cur
 func TestBinChainLevelAndFillRate(t *testing.T) {
 	_, cfg := flowBins(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{{
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{{
 		Signal:     things.ParseSignalID("milesight:214", "", flowURNdistance, "5700"),
 		Value:      flowPtr(0.30),
 		Quality:    things.QualityOK,
@@ -168,7 +176,7 @@ func TestRoomMeanAcrossBatches(t *testing.T) {
 	for i, s := range steps {
 		at := base.Add(time.Duration(s.minute) * time.Minute)
 		var err error
-		out, err = EvaluateBatchFlow(&cfg, current, []things.Observation{tempObs(s.device, s.value, at)}, at, "m", 1)
+		out, err = EvaluateBatchFlow(&cfg, current, nil, []things.Observation{tempObs(s.device, s.value, at)}, at, "m", 1)
 		if err != nil {
 			t.Fatalf("step %d: %v", i, err)
 		}
@@ -179,7 +187,7 @@ func TestRoomMeanAcrossBatches(t *testing.T) {
 		t.Fatalf("average=%+v, want 21", avg)
 	}
 	at := base.Add(3 * time.Minute)
-	out, err := EvaluateBatchFlow(&cfg, current, []things.Observation{tempObs("s3", 27, at)}, at, "m", 1)
+	out, err := EvaluateBatchFlow(&cfg, current, nil, []things.Observation{tempObs("s3", 27, at)}, at, "m", 1)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -191,7 +199,7 @@ func TestRoomMeanAcrossBatches(t *testing.T) {
 func TestBatchSingleMeanEvent(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{
 		tempObs("s1", 18, base),
 		tempObs("s2", 21, base.Add(time.Minute)),
 		tempObs("s3", 24, base.Add(2*time.Minute)),
@@ -217,12 +225,12 @@ func TestLateObservationSavedNotCurrent(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	current := map[string]CurrentValue{}
-	out, err := EvaluateBatchFlow(&cfg, current, []things.Observation{tempObs("s1", 30, base.Add(10*time.Minute))}, base.Add(10*time.Minute), "m1", 1)
+	out, err := EvaluateBatchFlow(&cfg, current, nil, []things.Observation{tempObs("s1", 30, base.Add(10*time.Minute))}, base.Add(10*time.Minute), "m1", 1)
 	if err != nil {
 		t.Fatalf("flow: %v", err)
 	}
 	current = mergeCurrent(current, out)
-	out, err = EvaluateBatchFlow(&cfg, current, []things.Observation{tempObs("s1", 10, base)}, base.Add(11*time.Minute), "m2", 1)
+	out, err = EvaluateBatchFlow(&cfg, current, nil, []things.Observation{tempObs("s1", 10, base)}, base.Add(11*time.Minute), "m2", 1)
 	if err != nil {
 		t.Fatalf("late flow: %v", err)
 	}
@@ -247,14 +255,14 @@ func TestInvalidNeverReplaces(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	current := map[string]CurrentValue{}
-	out, err := EvaluateBatchFlow(&cfg, current, []things.Observation{tempObs("s1", 30, base)}, base, "m1", 1)
+	out, err := EvaluateBatchFlow(&cfg, current, nil, []things.Observation{tempObs("s1", 30, base)}, base, "m1", 1)
 	if err != nil {
 		t.Fatalf("flow: %v", err)
 	}
 	current = mergeCurrent(current, out)
 	bad := tempObs("s1", 0, base.Add(time.Minute))
 	bad.Quality = things.QualityInvalid
-	out, err = EvaluateBatchFlow(&cfg, current, []things.Observation{bad}, base.Add(time.Minute), "m2", 1)
+	out, err = EvaluateBatchFlow(&cfg, current, nil, []things.Observation{bad}, base.Add(time.Minute), "m2", 1)
 	if err != nil {
 		t.Fatalf("invalid flow: %v", err)
 	}
@@ -269,7 +277,7 @@ func TestInvalidNeverReplaces(t *testing.T) {
 func TestMissingInputSkipsMean(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{
 		tempObs("s1", 18, base), tempObs("s2", 21, base),
 	}, base, "m", 1)
 	if err != nil {
@@ -292,7 +300,7 @@ func TestUnboundSignalIgnored(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	obs := tempObs("unknown-sensor", 99, base)
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{obs}, base, "m", 1)
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{obs}, base, "m", 1)
 	if err != nil {
 		t.Fatalf("flow: %v", err)
 	}
@@ -327,12 +335,12 @@ func TestCycleDetected(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	if _, err := EvaluateBatchFlow(cfg, map[string]CurrentValue{
 		"a": {Value: flowPtr(1), Quality: "ok", ObservedAt: base},
-	}, nil, base, "m", 1); err == nil {
+	}, nil, nil, base, "m", 1); err == nil {
 		t.Fatal("cyclic graph must be rejected")
 	}
 }
 
-func TestUnknownAndActiveTimeOperatorsRejected(t *testing.T) {
+func TestUnknownOperatorRejected(t *testing.T) {
 	mk := func(op string) catalog.EffectiveConfig {
 		return catalog.EffectiveConfig{
 			Properties: map[string]things.Property{"p": {}, "q": {}},
@@ -345,12 +353,13 @@ func TestUnknownAndActiveTimeOperatorsRejected(t *testing.T) {
 	current := map[string]CurrentValue{
 		"p": {Value: flowPtr(1), Quality: "ok", ObservedAt: base},
 	}
-	for _, op := range []string{"noSuchOperator", "activeTime"} {
+	for _, op := range []string{"noSuchOperator", "active_time_typo"} {
 		cfg := mk(op)
-		if _, err := EvaluateBatchFlow(&cfg, current, nil, base, "m", 1); err == nil {
+		if _, err := EvaluateBatchFlow(&cfg, current, nil, nil, base, "m", 1); err == nil {
 			t.Fatalf("operator %q must fail", op)
 		}
 	}
+	// activeTime körs sedan Etapp 5 (se TestActiveTimeLifecycle).
 }
 
 func TestUnitMismatchRecordedInvalid(t *testing.T) {
@@ -378,7 +387,7 @@ func TestUnitMismatchRecordedInvalid(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	obs := tempObs("s1", 70, base)
 	obs.Unit = "°F"
-	out, err := EvaluateBatchFlow(cfg, nil, []things.Observation{obs}, base, "m", 1)
+	out, err := EvaluateBatchFlow(cfg, nil, nil, []things.Observation{obs}, base, "m", 1)
 	if err != nil {
 		t.Fatalf("flow: %v", err)
 	}
@@ -415,7 +424,7 @@ func TestThresholdHysteresisStable(t *testing.T) {
 		{35, 1}, {25, 1}, {15, 0}, {25, 0}, {35, 1},
 	} {
 		at := base.Add(time.Duration(i) * time.Minute)
-		out, err := EvaluateBatchFlow(mustCompileBench(t, c), current, []things.Observation{{
+		out, err := EvaluateBatchFlow(mustCompileBench(t, c), current, nil, []things.Observation{{
 			Signal:     things.ParseSignalID("s", "", flowURNtemp, "5700"),
 			Value:      flowPtr(tc.value),
 			Quality:    things.QualityOK,
@@ -454,7 +463,7 @@ func mustCompileBench(t *testing.T, c *catalog.Catalog) *catalog.EffectiveConfig
 func TestFillRateOutOfRangeKeptUncertain(t *testing.T) {
 	_, cfg := flowBins(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{{
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{{
 		Signal:     things.ParseSignalID("milesight:214", "", flowURNdistance, "5700"),
 		Value:      flowPtr(2.0),
 		Quality:    things.QualityOK,
@@ -539,7 +548,7 @@ func TestTieBreakReceivedAtWins(t *testing.T) {
 		{mkBatch()[1], mkBatch()[0]},
 	}
 	for i, batch := range orders {
-		out, err := EvaluateBatchFlow(&cfg, nil, batch, base.Add(2*time.Minute), "m", 1)
+		out, err := EvaluateBatchFlow(&cfg, nil, nil, batch, base.Add(2*time.Minute), "m", 1)
 		if err != nil {
 			t.Fatalf("order %d: %v", i, err)
 		}
@@ -589,7 +598,7 @@ func TestTieBreakSourceIDWins(t *testing.T) {
 	}
 	// sB/3303/5700 > sA/3303/5700 i strängordning, alltså ska sB vinna.
 	for i, batch := range [][]things.Observation{mkBatch(), {mkBatch()[1], mkBatch()[0]}} {
-		out, err := EvaluateBatchFlow(&cfg, nil, batch, base, "m", 1)
+		out, err := EvaluateBatchFlow(&cfg, nil, nil, batch, base, "m", 1)
 		if err != nil {
 			t.Fatalf("order %d: %v", i, err)
 		}
@@ -614,11 +623,11 @@ func TestBatchOrderDeterministic(t *testing.T) {
 		tempObs("s3", 24, base.Add(2*time.Minute)),
 	}
 	rev := []things.Observation{fwd[2], fwd[1], fwd[0]}
-	outF, err := EvaluateBatchFlow(&cfg, nil, fwd, base.Add(3*time.Minute), "m", 1)
+	outF, err := EvaluateBatchFlow(&cfg, nil, nil, fwd, base.Add(3*time.Minute), "m", 1)
 	if err != nil {
 		t.Fatalf("fwd: %v", err)
 	}
-	outR, err := EvaluateBatchFlow(&cfg, nil, rev, base.Add(3*time.Minute), "m", 1)
+	outR, err := EvaluateBatchFlow(&cfg, nil, nil, rev, base.Add(3*time.Minute), "m", 1)
 	if err != nil {
 		t.Fatalf("rev: %v", err)
 	}
@@ -671,7 +680,7 @@ func TestBatchSamePropertySingleEvent(t *testing.T) {
 		}
 	}
 	for i, batch := range [][]things.Observation{mkBatch(), {mkBatch()[1], mkBatch()[0]}} {
-		out, err := EvaluateBatchFlow(&cfg, nil, batch, base.Add(11*time.Minute), "m", 1)
+		out, err := EvaluateBatchFlow(&cfg, nil, nil, batch, base.Add(11*time.Minute), "m", 1)
 		if err != nil {
 			t.Fatalf("order %d: %v", i, err)
 		}
@@ -702,12 +711,12 @@ func TestLateGivesHistoryWithoutEvent(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	current := map[string]CurrentValue{}
-	out, err := EvaluateBatchFlow(&cfg, current, []things.Observation{tempObs("s1", 30, base.Add(10*time.Minute))}, base.Add(10*time.Minute), "m1", 1)
+	out, err := EvaluateBatchFlow(&cfg, current, nil, []things.Observation{tempObs("s1", 30, base.Add(10*time.Minute))}, base.Add(10*time.Minute), "m1", 1)
 	if err != nil {
 		t.Fatalf("flow: %v", err)
 	}
 	current = mergeCurrent(current, out)
-	out, err = EvaluateBatchFlow(&cfg, current, []things.Observation{tempObs("s1", 10, base)}, base.Add(11*time.Minute), "m2", 1)
+	out, err = EvaluateBatchFlow(&cfg, current, nil, []things.Observation{tempObs("s1", 10, base)}, base.Add(11*time.Minute), "m2", 1)
 	if err != nil {
 		t.Fatalf("late: %v", err)
 	}
@@ -728,7 +737,7 @@ func TestInvalidInputSkipsMean(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	bad := tempObs("s1", 0, base)
 	bad.Quality = things.QualityInvalid
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{
 		bad,
 		tempObs("s2", 21, base),
 		tempObs("s3", 24, base),
@@ -757,7 +766,7 @@ func TestUncertainPropagatesThroughMean(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	u := tempObs("s1", 18, base)
 	u.Quality = things.QualityUncertain
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{
 		u,
 		tempObs("s2", 21, base.Add(time.Minute)),
 		tempObs("s3", 24, base.Add(2*time.Minute)),
@@ -784,7 +793,7 @@ func TestDerivedObservedAtIsLatest(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	latest := base.Add(2 * time.Minute)
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{
 		tempObs("s1", 18, base),
 		tempObs("s2", 21, base.Add(time.Minute)),
 		tempObs("s3", 24, latest),
@@ -803,7 +812,7 @@ func TestDerivedObservedAtIsLatest(t *testing.T) {
 func TestDerivedSourcesAreSignalIDs(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{
 		tempObs("s1", 18, base),
 		tempObs("s2", 21, base.Add(time.Minute)),
 		tempObs("s3", 24, base.Add(2*time.Minute)),
@@ -871,7 +880,7 @@ func TestDuplicateOutputRejected(t *testing.T) {
 		"a": {Value: flowPtr(1), Quality: "ok", ObservedAt: base},
 		"b": {Value: flowPtr(2), Quality: "ok", ObservedAt: base},
 	}
-	if _, err := EvaluateBatchFlow(cfg, current, nil, base, "m", 1); err == nil {
+	if _, err := EvaluateBatchFlow(cfg, current, nil, nil, base, "m", 1); err == nil {
 		t.Fatal("duplicate output must be rejected")
 	}
 }
@@ -899,7 +908,7 @@ func TestMissingOperatorParamsRejected(t *testing.T) {
 			},
 		}},
 	} {
-		if _, err := EvaluateBatchFlow(&tc.cfg, current, nil, base, "m", 1); err == nil {
+		if _, err := EvaluateBatchFlow(&tc.cfg, current, nil, nil, base, "m", 1); err == nil {
 			t.Fatalf("%s: missing param must fail", tc.name)
 		}
 	}
@@ -911,7 +920,7 @@ func TestNilValueNeverBecomesCurrent(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	obs := tempObs("s1", 0, base)
 	obs.Value = nil
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{obs}, base, "m", 1)
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{obs}, base, "m", 1)
 	if err != nil {
 		t.Fatalf("flow: %v", err)
 	}
@@ -934,7 +943,7 @@ func TestInvalidHistoryNotMarkedLate(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	bad := tempObs("s1", 0, base.Add(time.Minute))
 	bad.Quality = things.QualityInvalid
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{bad}, base.Add(time.Minute), "m", 1)
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{bad}, base.Add(time.Minute), "m", 1)
 	if err != nil {
 		t.Fatalf("flow: %v", err)
 	}
@@ -956,7 +965,7 @@ func TestOutcomeDoesNotAliasInput(t *testing.T) {
 	v := 18.0
 	obs := tempObs("s1", v, base)
 	obs.Value = &v
-	out, err := EvaluateBatchFlow(&cfg, nil, []things.Observation{obs}, base, "m", 1)
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{obs}, base, "m", 1)
 	if err != nil {
 		t.Fatalf("flow: %v", err)
 	}

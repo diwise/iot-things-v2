@@ -332,7 +332,7 @@ func TestCompatEndToEndRoomFromWireData(t *testing.T) {
 		Inputs:  []string{"temperature.window", "temperature.center", "temperature.door"},
 		Outputs: []string{"temperature.average"},
 	}}
-	out, err := EvaluateBatchFlow(cfg, nil, obs, ref, "compat-m1", 1)
+	out, err := EvaluateBatchFlow(cfg, nil, nil, obs, ref, "compat-m1", 1)
 	if err != nil {
 		t.Fatalf("flow: %v", err)
 	}

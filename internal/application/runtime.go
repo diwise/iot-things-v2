@@ -32,11 +32,12 @@ import (
 
 // StoredThingState är det persisterade tillståndet per sak.
 type StoredThingState struct {
-	ConfigJSON    []byte
-	Revision      int64
-	Current       map[string]CurrentValue
-	LastMessageID string
-	LastEvents    []FlowEvent
+	ConfigJSON      []byte
+	Revision        int64
+	Current         map[string]CurrentValue
+	ProcessorStates map[string]StoredProcessor
+	LastMessageID   string
+	LastEvents      []FlowEvent
 }
 
 // RuntimeStore är persistensgränsen för Runtime. Minnesimplementation:
@@ -226,7 +227,7 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 			})
 			continue
 		}
-		outcome, err := EvaluateBatchFlow(sd.config, sd.state.Current, grouped[id], receivedAt, messageID, sd.state.Revision)
+		outcome, err := EvaluateBatchFlow(sd.config, sd.state.Current, sd.state.ProcessorStates, grouped[id], receivedAt, messageID, sd.state.Revision)
 		if err != nil {
 			return nil, fmt.Errorf("runtime: thing %q: %w", id, err)
 		}
@@ -235,6 +236,15 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 				sd.state.Current = make(map[string]CurrentValue)
 			}
 			sd.state.Current[k] = v
+		}
+		for k, v := range outcome.ProcStates {
+			if sd.state.ProcessorStates == nil {
+				sd.state.ProcessorStates = make(map[string]StoredProcessor)
+			}
+			// Djupkopiera tillståndsblobben: outcome/store/anropare får ej
+			// dela StateJSON-underliggande array (ingen tillstånds-aliasing).
+			v.StateJSON = cloneBytes(v.StateJSON)
+			sd.state.ProcessorStates[k] = v
 		}
 		for _, h := range outcome.History {
 			rt.store.AppendHistory(tenant, id, h)

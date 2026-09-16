@@ -59,6 +59,8 @@ func (f *fakeStore) LoadThing(tenant, thingID string) (StoredThingState, bool) {
 	}
 	cp := st
 	cp.Current = copyCurrent(st.Current)
+	cp.ProcessorStates = copyProcessors(st.ProcessorStates)
+	cp.ConfigJSON = append([]byte(nil), st.ConfigJSON...)
 	cp.LastEvents = append([]FlowEvent(nil), st.LastEvents...)
 	return cp, true
 }
@@ -78,10 +80,24 @@ func copyCurrent(m map[string]CurrentValue) map[string]CurrentValue {
 	return out
 }
 
+func copyProcessors(m map[string]StoredProcessor) map[string]StoredProcessor {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]StoredProcessor, len(m))
+	for k, v := range m {
+		v.StateJSON = append([]byte(nil), v.StateJSON...)
+		out[k] = v
+	}
+	return out
+}
+
 func (f *fakeStore) SaveThing(tenant, thingID string, st StoredThingState) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	st.Current = copyCurrent(st.Current)
+	st.ProcessorStates = copyProcessors(st.ProcessorStates)
+	st.ConfigJSON = append([]byte(nil), st.ConfigJSON...)
 	st.LastEvents = append([]FlowEvent(nil), st.LastEvents...)
 	f.things[fkey(tenant, thingID)] = st
 }
