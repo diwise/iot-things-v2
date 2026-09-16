@@ -1,0 +1,523 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"testing"
+
+	"github.com/diwise/iot-things-v2/internal/application"
+	"github.com/diwise/iot-things-v2/internal/application/catalog"
+	"github.com/diwise/iot-things-v2/internal/application/things"
+	"github.com/diwise/iot-things-v2/internal/infrastructure/storage"
+	"github.com/diwise/iot-things-v2/internal/presentation/api/auth"
+)
+
+const (
+	v0TempURN = "urn:oma:lwm2m:ext:3303"
+	v0DistURN = "urn:oma:lwm2m:ext:3330"
+)
+
+func v0ctx(tenant string) context.Context {
+	return auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		tenant: {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+	})
+}
+
+func v0setup(t *testing.T) (*handler, *application.Manager, *application.Runtime) {
+	t.Helper()
+	s, err := storage.New(context.Background(), storage.NewConfig("", "", "", "5432", "diwise", "disable"))
+	if err != nil {
+		t.Fatalf("storage.New: %v", err)
+	}
+	adapter := storage.NewRuntimeAdapter(s)
+	rt := application.NewRuntime(adapter)
+	mgr := application.NewManager(catalog.New(), rt, adapter)
+	return &handler{mgr: mgr}, mgr, rt
+}
+
+func v0wastebin(t *testing.T, h *handler) {
+	t.Helper()
+	ctx := v0ctx("t")
+	tmpl := catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "wastebin", Version: "v1",
+			Required: []string{"distance", "level", "fillRate"},
+		},
+		ParamDefaults: map[string]float64{"usableHeight": 1.0, "sensorToBottom": 1.5},
+		Overridable:   []string{"sensorToBottom"},
+		Recipes: []catalog.Recipe{
+			{Name: "wastebin-level", Operator: "distanceToLevel", Version: "v1",
+				Inputs: []string{"distance"}, Outputs: []string{"level"},
+				Params: []string{"sensorToBottom"}},
+			{Name: "fill-rate", Operator: "fillRate", Version: "v1",
+				Inputs: []string{"level"}, Outputs: []string{"fillRate"},
+				Params: []string{"usableHeight"}},
+		},
+	}
+	if rr := doJSON(h.publishTemplate, ctx, "", tmpl, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("publish template: %d %s", rr.Code, rr.Body.String())
+	}
+	variant := catalog.VariantSpec{Variant: things.Variant{
+		ID: "wastebin-B", Version: "v1",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		ParamValues: map[string]float64{"usableHeight": 1.2},
+	}}
+	if rr := doJSON(h.publishVariant, ctx, "", variant, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("publish variant: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+func v0binObject() catalog.ObjectSpec {
+	return catalog.ObjectSpec{
+		ThingID: "bin-42", Name: "Soptunna 42",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		VariantID: "wastebin-B", VariantVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance": {}, "level": {}, "fillRate": {},
+		},
+		Bindings: []things.Binding{
+			{DeviceID: "milesight:214", Object: v0DistURN, Resource: "5700", Input: "distance"},
+		},
+		ParamOverrides: map[string]float64{"sensorToBottom": 1.42},
+	}
+}
+
+func doJSON(fn func(http.ResponseWriter, *http.Request), ctx context.Context, id string, body any, ifMatch string) *httptest.ResponseRecorder {
+	var buf bytes.Buffer
+	if body != nil {
+		_ = json.NewEncoder(&buf).Encode(body)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/x", &buf)
+	req = req.WithContext(ctx)
+	if id != "" {
+		req.SetPathValue("id", id)
+	}
+	if ifMatch != "" {
+		req.Header.Set("If-Match", ifMatch)
+	}
+	rr := httptest.NewRecorder()
+	fn(rr, req)
+	return rr
+}
+
+func doGET(fn func(http.ResponseWriter, *http.Request), ctx context.Context, id, query string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/x?"+query, nil)
+	req = req.WithContext(ctx)
+	if id != "" {
+		req.SetPathValue("id", id)
+	}
+	rr := httptest.NewRecorder()
+	fn(rr, req)
+	return rr
+}
+
+func TestV0CreateGetUpdate(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+
+	rr := doJSON(h.createThing, ctx, "", v0binObject(), "")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	var created application.ThingSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Name != "Soptunna 42" {
+		t.Fatalf("summary=%+v", created)
+	}
+	etag := rr.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("ETag required")
+	}
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusConflict {
+		t.Fatalf("duplicate create=%d, want 409", rr.Code)
+	}
+
+	rr = doGET(h.getThing, ctx, "bin-42", "")
+	if rr.Code != http.StatusOK || rr.Header().Get("ETag") != etag {
+		t.Fatalf("get: %d etag=%q want %q", rr.Code, rr.Header().Get("ETag"), etag)
+	}
+	if rr := doGET(h.getThing, v0ctx("other"), "bin-42", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant get=%d, want 404", rr.Code)
+	}
+
+	// Stale revision nekas.
+	obj := v0binObject()
+	obj.Name = "Stale"
+	if rr := doJSON(h.updateThing, ctx, "bin-42", obj, `"rev-99"`); rr.Code != http.StatusConflict {
+		t.Fatalf("stale update=%d, want 409", rr.Code)
+	}
+	obj.Name = "Soptunna 42 ny"
+	rr = doJSON(h.updateThing, ctx, "bin-42", obj, etag)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("update: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("ETag") == etag {
+		t.Fatal("ETag must advance after update")
+	}
+	if rr := doJSON(h.updateThing, ctx, "bin-42", obj, ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing If-Match=%d, want 400", rr.Code)
+	}
+}
+
+func TestV0ValidationAndAuth(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+
+	bad := v0binObject()
+	bad.Properties["nope"] = things.Property{}
+	if rr := doJSON(h.createThing, ctx, "", bad, ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("invalid create=%d, want 400", rr.Code)
+	}
+	if rr := doJSON(h.createThing, context.Background(), "", v0binObject(), ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated=%d, want 401", rr.Code)
+	}
+	if rr := doGET(h.getThing, context.Background(), "bin-42", ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated get=%d, want 401", rr.Code)
+	}
+}
+
+func TestV0BindingsPreviewHistory(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr := doJSON(h.previewThing, ctx, "bin-42", v0binObject(), "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("preview: %d %s", rr.Code, rr.Body.String())
+	}
+	var preview catalog.EffectiveConfig
+	if err := json.Unmarshal(rr.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode preview: %v", err)
+	}
+	if preview.ParamValues["usableHeight"] != 1.2 {
+		t.Fatalf("preview=%+v", preview)
+	}
+
+	// Bindningsbyte kräver If-Match och bumpar revision.
+	swapped := map[string]any{"bindings": []things.Binding{
+		{DeviceID: "milesight:215", Object: v0DistURN, Resource: "5700", Input: "distance"},
+	}}
+	rr = doGET(h.getThing, ctx, "bin-42", "")
+	etag := rr.Header().Get("ETag")
+	srr := doJSON(h.swapBindings, ctx, "bin-42", swapped, etag)
+	if srr.Code != http.StatusOK {
+		t.Fatalf("swap: %d %s", srr.Code, srr.Body.String())
+	}
+	if srr.Header().Get("ETag") == etag {
+		t.Fatal("ETag must advance after swap")
+	}
+
+	rr = doGET(h.getHistory, ctx, "bin-42", "property=distance&limit=10")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("history: %d %s", rr.Code, rr.Body.String())
+	}
+	rr = doGET(h.getHistory, ctx, "bin-42", "limit=nope")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad limit=%d, want 400", rr.Code)
+	}
+}
+
+func TestV0UpgradeMoveDelete(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	v2 := catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "wastebin", Version: "v2",
+			Required: []string{"distance", "level", "fillRate"},
+		},
+		ParamDefaults: map[string]float64{"usableHeight": 1.0},
+		Recipes: []catalog.Recipe{
+			{Name: "wastebin-level", Operator: "distanceToLevel", Version: "v2",
+				Inputs: []string{"distance"}, Outputs: []string{"level"}},
+		},
+	}
+	if rr := doJSON(h.publishTemplate, ctx, "", v2, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("publish v2: %d %s", rr.Code, rr.Body.String())
+	}
+	ref := versionRef{TemplateID: "wastebin", TemplateVersion: "v2"}
+	rr := doJSON(h.previewUpgrade, ctx, "bin-42", ref, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("preview upgrade: %d %s", rr.Code, rr.Body.String())
+	}
+	var preview struct {
+		Diff      catalog.Diff `json:"diff"`
+		Conflicts []string     `json:"conflicts"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &preview); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(preview.Conflicts) == 0 {
+		t.Fatal("removed override must conflict")
+	}
+
+	rr = doGET(h.getThing, ctx, "bin-42", "")
+	etag := rr.Header().Get("ETag")
+	if rr := doJSON(h.upgradeThing, ctx, "bin-42", ref, etag); rr.Code != http.StatusConflict {
+		t.Fatalf("blocked upgrade=%d, want 409", rr.Code)
+	}
+	// Force via query param kräver egen request (doJSON sätter ingen query).
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(ref)
+	req := httptest.NewRequest(http.MethodPost, "/x?force=true", &buf)
+	req = req.WithContext(ctx)
+	req.SetPathValue("id", "bin-42")
+	req.Header.Set("If-Match", etag)
+	frr := httptest.NewRecorder()
+	h.upgradeThing(frr, req)
+	if frr.Code != http.StatusOK {
+		t.Fatalf("forced upgrade: %d %s", frr.Code, frr.Body.String())
+	}
+
+	// Move + overview + delete.
+	move := map[string]string{"parentId": "building-a"}
+	if rr := doJSON(h.moveThing, ctx, "bin-42", move, ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("move without If-Match=%d, want 400", rr.Code)
+	}
+	mrr := doGET(h.getThing, ctx, "bin-42", "")
+	metag := mrr.Header().Get("ETag")
+	if rr := doJSON(h.moveThing, ctx, "bin-42", move, metag); rr.Code != http.StatusNotFound {
+		t.Fatalf("move to unknown parent=%d, want 404", rr.Code)
+	}
+	rr = doGET(h.getOverview, ctx, "bin-42", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("overview: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doGET(h.deleteThing, ctx, "bin-42", ""); rr.Code != http.StatusNoContent {
+		t.Fatalf("delete=%d, want 204", rr.Code)
+	}
+	if rr := doGET(h.getThing, ctx, "bin-42", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("get after delete=%d, want 404", rr.Code)
+	}
+}
+
+func TestV0CatalogAndSearch(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+
+	if rr := doGET(h.listTemplates, ctx, "", ""); rr.Code != http.StatusOK {
+		t.Fatalf("list templates: %d", rr.Code)
+	}
+	if rr := doGET(h.listVariants, ctx, "", ""); rr.Code != http.StatusOK {
+		t.Fatalf("list variants: %d", rr.Code)
+	}
+	rr := doGET(h.searchThings, ctx, "", "template=wastebin&limit=5")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search: %d %s", rr.Code, rr.Body.String())
+	}
+	var found []application.ThingSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 1 || found[0].ThingID != "bin-42" {
+		t.Fatalf("search=%+v", found)
+	}
+}
+
+// RegisterHandlers ska acceptera den riktiga OPA-policyn (startup-paritet).
+func TestV0RegisterHandlersWithRealPolicy(t *testing.T) {
+	f, err := os.Open("../../../assets/config/authz.rego")
+	if err != nil {
+		t.Fatalf("open policy: %v", err)
+	}
+	defer f.Close()
+	_, mgr, _ := v0setup(t)
+	mux := http.NewServeMux()
+	if err := RegisterHandlers(context.Background(), mux, mgr, f); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+}
+
+// Hjälpare med exakt scope-uppsättning per tenant: avslöjar
+// auktoriseringshål som v0ctx (alla scopes) döljer.
+func v0ctxScopes(tenant string, scopes ...auth.Scope) context.Context {
+	set := map[auth.Scope]struct{}{}
+	for _, s := range scopes {
+		set[s] = struct{}{}
+	}
+	return auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		tenant: set,
+	})
+}
+
+func v0ctxReadOnly(tenant string) context.Context {
+	return v0ctxScopes(tenant, ReadThings)
+}
+
+func v0ctxCreateOnly(tenant string) context.Context {
+	return v0ctxScopes(tenant, ReadThings, CreateThings)
+}
+
+// Regression tenant/scope: skrivendpoints kräver sitt eget scope, inte bara läs.
+// Read-only får varken skapa eller förhandsgranska (PUT-preview kräver Update).
+func TestV0WriteScopeIsolation(t *testing.T) {
+	h, _, _ := v0setup(t)
+	full := v0ctx("t")
+	v0wastebin(t, h)
+
+	ro := v0ctxReadOnly("t")
+	if rr := doJSON(h.createThing, ro, "", v0binObject(), ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("read-only create=%d, want 401", rr.Code)
+	}
+	if rr := doJSON(h.previewThing, ro, "bin-42", v0binObject(), ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("read-only preview=%d, want 401", rr.Code)
+	}
+	// Create-only (utan Update) kan skapa men inte förhandsgranska eller uppdatera.
+	co := v0ctxCreateOnly("t")
+	obj := v0binObject()
+	obj.ThingID = "bin-co"
+	if rr := doJSON(h.createThing, co, "", obj, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create-only create=%d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	if rr := doJSON(h.previewThing, co, "bin-co", obj, ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("create-only preview=%d, want 401 (preview kräver Update)", rr.Code)
+	}
+	if rr := doJSON(h.updateThing, co, "bin-co", obj, `"rev-1"`); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("create-only update=%d, want 401", rr.Code)
+	}
+	// Fulla rättigheter fungerar fortfarande.
+	if rr := doJSON(h.previewThing, full, "bin-co", obj, ""); rr.Code != http.StatusOK {
+		t.Fatalf("full preview=%d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+// Regression tenant-smuggling: Tenant i body ignoreras till förmån för auth-tenant.
+func TestV0BodyTenantIgnored(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+
+	obj := v0binObject()
+	obj.Tenant = "other"
+	if rr := doJSON(h.createThing, ctx, "", obj, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create=%d, want 201 (%s)", rr.Code, rr.Body.String())
+	}
+	if rr := doGET(h.getThing, ctx, "bin-42", ""); rr.Code != http.StatusOK {
+		t.Fatalf("get in auth tenant=%d, want 200", rr.Code)
+	}
+	if rr := doGET(h.getThing, v0ctx("other"), "bin-42", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("get in body tenant=%d, want 404", rr.Code)
+	}
+}
+
+// Regression: flera auktoriserade tenants utan särskiljning ska ge 400, aldrig tyst merge.
+func TestV0AmbiguousTenant(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		"t1": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+		"t2": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+	})
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous create=%d, want 400", rr.Code)
+	}
+	if rr := doGET(h.getThing, ctx, "bin-42", ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous get=%d, want 400", rr.Code)
+	}
+}
+
+// Regression B19: flytt kräver If-Match, bumpas och syns i overview.
+func TestV0MoveRequiresIfMatch(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	roomTmpl := catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "room", Version: "v1",
+			RepeatGroups: []string{"temperature."},
+			Relations: []things.RelationSpec{
+				{Name: "partOf", AllowedTargets: []string{"building"}, Min: 0, Max: 1},
+			},
+		},
+	}
+	if rr := doJSON(h.publishTemplate, ctx, "", roomTmpl, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("publish room: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doJSON(h.publishTemplate, ctx, "", catalog.TemplateSpec{
+		Template: things.Template{ID: "building", Version: "v1"},
+	}, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("publish building: %d %s", rr.Code, rr.Body.String())
+	}
+	mkObj := func(id, parent string) catalog.ObjectSpec {
+		obj := catalog.ObjectSpec{
+			ThingID: id, TemplateID: "room", TemplateVersion: "v1",
+			Properties: map[string]things.Property{"temperature.window": {}},
+			Bindings: []things.Binding{
+				{DeviceID: "s-" + id, Object: v0TempURN, Resource: "5700", Input: "temperature.window"},
+			},
+		}
+		if parent != "" {
+			obj.Relations = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "building"}}
+		}
+		return obj
+	}
+	bldg := catalog.ObjectSpec{
+		ThingID: "b1", TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+	}
+	if rr := doJSON(h.createThing, ctx, "", bldg, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create building: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doJSON(h.createThing, ctx, "", mkObj("r1", ""), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create room: %d %s", rr.Code, rr.Body.String())
+	}
+	move := map[string]string{"parentId": "b1"}
+	if rr := doJSON(h.moveThing, ctx, "r1", move, ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("move without If-Match=%d, want 400", rr.Code)
+	}
+	rr := doGET(h.getThing, ctx, "r1", "")
+	etag := rr.Header().Get("ETag")
+	if rr := doJSON(h.moveThing, ctx, "r1", move, `"rev-99"`); rr.Code != http.StatusConflict {
+		t.Fatalf("stale move=%d, want 409", rr.Code)
+	}
+	mrr := doJSON(h.moveThing, ctx, "r1", move, etag)
+	if mrr.Code != http.StatusOK {
+		t.Fatalf("move=%d, want 200 (%s)", mrr.Code, mrr.Body.String())
+	}
+	if mrr.Header().Get("ETag") == etag {
+		t.Fatal("ETag must advance after move")
+	}
+	orr := doGET(h.getOverview, ctx, "b1", "")
+	if orr.Code != http.StatusOK {
+		t.Fatalf("overview=%d, want 200", orr.Code)
+	}
+	var ov application.Overview
+	if err := json.Unmarshal(orr.Body.Bytes(), &ov); err != nil {
+		t.Fatalf("decode overview: %v", err)
+	}
+	if len(ov.Children) != 1 || ov.Children[0].ThingID != "r1" {
+		t.Fatalf("overview=%+v, want r1 under b1", ov)
+	}
+}
+
+// Regression P5: historik för okänt thing ska ge 404, inte 200 med tom lista.
+func TestV0HistoryUnknownIs404(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+	if rr := doGET(h.getHistory, ctx, "missing", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("history missing=%d, want 404", rr.Code)
+	}
+	if rr := doGET(h.getOverview, ctx, "missing", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("overview missing=%d, want 404", rr.Code)
+	}
+	if rr := doGET(h.getOverview, v0ctx("other"), "missing", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant overview=%d, want 404", rr.Code)
+	}
+}

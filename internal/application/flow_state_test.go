@@ -29,7 +29,7 @@ func activeTimeCfg() catalog.EffectiveConfig {
 func sigObs(device string, v float64, at time.Time) things.Observation {
 	return things.Observation{
 		Signal:     things.ParseSignalID(device, "", flowURNtemp, "5700"),
-		Value:      flowPtr(v),
+		Value:      new(v),
 		Quality:    things.QualityOK,
 		ObservedAt: at,
 		ReceivedAt: at,
@@ -165,7 +165,7 @@ func TestActiveTimeVersionReset(t *testing.T) {
 		"run": {Operator: "activeTime", Version: "v0", StateJSON: old},
 	}
 	current := map[string]CurrentValue{
-		"sig": {Value: flowPtr(1), Quality: "ok", ObservedAt: base},
+		"sig": {Value: new(float64(1)), Quality: "ok", ObservedAt: base},
 	}
 	out, err := EvaluateBatchFlow(&cfg, current, proc, []things.Observation{sigObs("s", 1, base.Add(time.Minute))}, base.Add(time.Minute), "m1", 1)
 	if err != nil {
@@ -252,7 +252,7 @@ func sewerCatalog(t *testing.T) (*catalog.Catalog, catalog.ObjectSpec) {
 func sewerObs(v float64, at time.Time) things.Observation {
 	return things.Observation{
 		Signal:     things.ParseSignalID("sewer-sensor", "", flowStateDistURN, "5700"),
-		Value:      flowPtr(v),
+		Value:      new(v),
 		Unit:       "m",
 		Quality:    things.QualityOK,
 		ObservedAt: at,
@@ -477,7 +477,7 @@ func TestThresholdSkipPreservesOutput(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	current := map[string]CurrentValue{}
 	out, err := EvaluateBatchFlow(cfg, current, nil, []things.Observation{{
-		Signal: things.ParseSignalID("s", "", flowURNtemp, "5700"), Value: flowPtr(35),
+		Signal: things.ParseSignalID("s", "", flowURNtemp, "5700"), Value: new(float64(35)),
 		Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base,
 	}}, base, "m1", 1)
 	if err != nil {
@@ -488,7 +488,7 @@ func TestThresholdSkipPreservesOutput(t *testing.T) {
 		t.Fatalf("init low=%v, want 1", got)
 	}
 	bad := things.Observation{
-		Signal: things.ParseSignalID("s", "", flowURNtemp, "5700"), Value: flowPtr(0),
+		Signal: things.ParseSignalID("s", "", flowURNtemp, "5700"), Value: new(float64(0)),
 		Quality: things.QualityInvalid, ObservedAt: base.Add(time.Minute), ReceivedAt: base.Add(time.Minute),
 	}
 	skipped, err := EvaluateBatchFlow(cfg, current, nil, []things.Observation{bad}, base.Add(time.Minute), "m2", 1)
@@ -599,7 +599,7 @@ func TestStaticRejectsNonPositiveParams(t *testing.T) {
 		if err := validateRecipeStatic(&cfg, cfg.Recipes[0]); err == nil {
 			t.Fatalf("%s %s=%v must fail static validation", tc.op, tc.param, tc.v)
 		}
-		current := map[string]CurrentValue{"p": {Value: flowPtr(1), Quality: "ok", ObservedAt: time.Now().UTC()}}
+		current := map[string]CurrentValue{"p": {Value: new(float64(1)), Quality: "ok", ObservedAt: time.Now().UTC()}}
 		if _, err := EvaluateBatchFlow(&cfg, current, nil, nil, time.Now().UTC(), "m", 1); err == nil {
 			t.Fatalf("%s %s=%v must fail even when untouched", tc.op, tc.param, tc.v)
 		}
@@ -633,7 +633,7 @@ func TestSelfLoopRejected(t *testing.T) {
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	if _, err := EvaluateBatchFlow(cfg, map[string]CurrentValue{
-		"a": {Value: flowPtr(1), Quality: "ok", ObservedAt: base},
+		"a": {Value: new(float64(1)), Quality: "ok", ObservedAt: base},
 	}, nil, nil, base, "m", 1); err == nil {
 		t.Fatal("self-loop flow must fail")
 	}

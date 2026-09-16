@@ -32,12 +32,12 @@ import (
 
 // StoredThingState är det persisterade tillståndet per sak.
 type StoredThingState struct {
-	ConfigJSON      []byte
-	Revision        int64
-	Current         map[string]CurrentValue
-	ProcessorStates map[string]StoredProcessor
-	LastMessageID   string
-	LastEvents      []FlowEvent
+	ConfigJSON      []byte                     `json:"config"`
+	Revision        int64                      `json:"revision"`
+	Current         map[string]CurrentValue    `json:"current,omitempty"`
+	ProcessorStates map[string]StoredProcessor `json:"processors,omitempty"`
+	LastMessageID   string                     `json:"lastMessageId,omitempty"`
+	LastEvents      []FlowEvent                `json:"lastEvents,omitempty"`
 }
 
 // RuntimeStore är persistensgränsen för Runtime. Minnesimplementation:
@@ -51,6 +51,7 @@ type RuntimeStore interface {
 	ListThingIDs(tenant string) []string
 	ListTenants() []string
 	AppendHistory(tenant, thingID string, h HistoryWrite) bool
+	History(tenant, thingID, prop string, from, to time.Time, limit int) []HistoryWrite
 	PendingEvents(tenant, thingID string) []FlowEvent
 	StorePending(tenant, thingID string, events []FlowEvent)
 	ClearPendingIDs(tenant, thingID string, ids []string)

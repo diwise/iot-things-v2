@@ -207,6 +207,32 @@ func (f *fakeStore) historyCount(tenant, thingID string) int {
 	return n
 }
 
+func (f *fakeStore) History(tenant, thingID, prop string, from, to time.Time, limit int) []HistoryWrite {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []HistoryWrite
+	for _, h := range f.hist {
+		if h.tenant != tenant || h.thingID != thingID {
+			continue
+		}
+		if prop != "" && h.w.PropertyID != prop {
+			continue
+		}
+		if !from.IsZero() && h.w.ObservedAt.Before(from) {
+			continue
+		}
+		if !to.IsZero() && h.w.ObservedAt.After(to) {
+			continue
+		}
+		out = append(out, h.w)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ObservedAt.Before(out[j].ObservedAt) })
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
 func (f *fakeStore) PendingEvents(tenant, thingID string) []FlowEvent {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -637,7 +663,7 @@ func TestRuntimeConcurrentBatches(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	var wg sync.WaitGroup
 	errs := make([]error, 10)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

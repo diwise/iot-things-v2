@@ -15,12 +15,12 @@ const LateSavedAsHistory = true
 
 // CurrentValue är det gällande värdet för en egenskap.
 type CurrentValue struct {
-	Value      *float64
-	Quality    string
-	ObservedAt time.Time
-	ReceivedAt time.Time
-	Source     string
-	MessageID  string
+	Value      *float64  `json:"value,omitempty"`
+	Quality    string    `json:"quality,omitempty"`
+	ObservedAt time.Time `json:"observedAt"`
+	ReceivedAt time.Time `json:"receivedAt"`
+	Source     string    `json:"source,omitempty"`
+	MessageID  string    `json:"messageId,omitempty"`
 }
 
 // ObservedInput är en inkommande observation som ska prövas mot current.

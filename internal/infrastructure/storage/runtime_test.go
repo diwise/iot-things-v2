@@ -206,3 +206,40 @@ func TestAdapterFullRoundTripAndDeleteForgets(t *testing.T) {
 		t.Fatal("historik ska vara bevarad (dubblett ska dedupliceras även efter delete)")
 	}
 }
+
+// Regression Etapp 6: adaptern ska bevara Late och returnera alla
+// egenskaper vid tom prop (samma semantik som Manager förväntar sig).
+func TestAdapterHistoryLateAndEmptyProp(t *testing.T) {
+	a := newAdapter(t)
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	v := 20.0
+	late := application.HistoryWrite{
+		PropertyID: "distance", Value: &v, Quality: "ok",
+		ObservedAt: at, ReceivedAt: at.Add(time.Minute), Source: "s/3330/5700",
+		MessageID: "m2", Late: true,
+	}
+	cur := application.HistoryWrite{
+		PropertyID: "level", Value: &v, Quality: "ok",
+		ObservedAt: at, ReceivedAt: at, Source: "recipe:wastebin-level",
+		MessageID: "m1",
+	}
+	if !a.AppendHistory("t", "bin-42", late) {
+		t.Fatal("late append must store")
+	}
+	if !a.AppendHistory("t", "bin-42", cur) {
+		t.Fatal("current append must store")
+	}
+	all := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0)
+	if len(all) != 2 {
+		t.Fatalf("empty prop must return all, got %d", len(all))
+	}
+	lateCount := 0
+	for _, h := range all {
+		if h.Late {
+			lateCount++
+		}
+	}
+	if lateCount != 1 {
+		t.Fatalf("Late lost through adapter: %+v", all)
+	}
+}

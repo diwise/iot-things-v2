@@ -7,6 +7,7 @@ package storage
 import (
 	"encoding/json"
 	"sort"
+	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application"
 )
@@ -75,7 +76,26 @@ func (a *RuntimeAdapter) AppendHistory(tenant, thingID string, h application.His
 		Quality:    h.Quality,
 		Source:     h.Source,
 		MessageID:  h.MessageID,
+		Late:       h.Late,
 	})
+}
+
+func (a *RuntimeAdapter) History(tenant, thingID, prop string, from, to time.Time, limit int) []application.HistoryWrite {
+	recs := a.S.History.List(tenant, thingID, prop, from, to, limit)
+	out := make([]application.HistoryWrite, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, application.HistoryWrite{
+			PropertyID: r.PropertyID,
+			Value:      r.Value,
+			Quality:    r.Quality,
+			ObservedAt: r.ObservedAt,
+			ReceivedAt: r.ReceivedAt,
+			Source:     r.Source,
+			MessageID:  r.MessageID,
+			Late:       r.Late,
+		})
+	}
+	return out
 }
 
 func (a *RuntimeAdapter) PendingEvents(tenant, thingID string) []application.FlowEvent {

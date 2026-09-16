@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application"
+	"github.com/diwise/iot-things-v2/internal/application/catalog"
 	"github.com/diwise/iot-things-v2/internal/infrastructure/storage"
 	"github.com/diwise/iot-things-v2/internal/presentation/api"
 	k8shandlers "github.com/diwise/service-chassis/pkg/infrastructure/net/http/handlers"
@@ -87,6 +88,7 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 	var s *storage.Storage
 	var msgCtx messaging.MsgContext
 	var app application.ThingsApp
+	var mgr *application.Manager
 
 	owned := &ownedResources{}
 
@@ -98,7 +100,7 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 			muxinit(func(ctx context.Context, identifier string, port string, appCfg *appConfig, handler *http.ServeMux) error {
 				defer policiesFile.Close()
 				log.Debug("register api handlers...")
-				return api.RegisterHandlers(ctx, handler, app, policiesFile, api.WithAccessObjectAuthorization(accessObjectEnabled(flags)))
+				return api.RegisterHandlers(ctx, handler, mgr, policiesFile, api.WithAccessObjectAuthorization(accessObjectEnabled(flags)))
 			}),
 		),
 		oninit(func(ctx context.Context, ac *appConfig) error {
@@ -130,7 +132,7 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 			owned.storage = s
 
 			log.Debug("creating application...")
-			app, err = newApp(ctx, s, s, msgCtx, configFile)
+			app, mgr, err = newApp(ctx, s, s, msgCtx, configFile)
 			if err != nil {
 				s.Close()
 				s = nil
@@ -345,22 +347,26 @@ func parseLogLevel(level string) slog.Level {
 	}
 }
 
-func newApp(ctx context.Context, r application.ThingsReader, w application.ThingsWriter, m messaging.MsgContext, cfg io.Reader) (application.ThingsApp, error) {
+func newApp(ctx context.Context, r application.ThingsReader, w application.ThingsWriter, m messaging.MsgContext, cfg io.Reader) (application.ThingsApp, *application.Manager, error) {
 	// Etapp 4 runtime över lagringsadaptern: atomära batchar, dedup,
 	// outbox. Samma store delas vid omstart (dränering utan omberäkning).
+	// Etapp 6 manager: katalog + objektlivscykel mot samma runtime/store.
 	var rt *application.Runtime
 	var pub application.EventPublisher
+	var mgr *application.Manager
 	if s, ok := r.(*storage.Storage); ok {
-		rt = application.NewRuntime(storage.NewRuntimeAdapter(s))
+		adapter := storage.NewRuntimeAdapter(s)
+		rt = application.NewRuntime(adapter)
 		pub = &application.TopicPublisher{MsgCtx: m}
+		mgr = application.NewManager(catalog.New(), rt, adapter)
 	}
 	a := application.New(r, w, m, rt, pub)
 	err := a.LoadConfig(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("unable to load config: %w", err)
+		return nil, nil, fmt.Errorf("unable to load config: %w", err)
 	}
 
-	return a, nil
+	return a, mgr, nil
 }
 
 func seed(ctx context.Context, fp io.Reader, a application.ThingsApp) error {

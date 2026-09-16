@@ -111,6 +111,8 @@ func (s *MemThingStore) Tenants() []string {
 
 // HistoryRecord är en minimal historikrad. Egna typer används lokalt
 // för att undvika importcykel mot application/things; API kan anpassas av integrator.
+// Late markerar sena observationer som sparas utan att bli aktuella (B13)
+// och måste bevaras genom lagring/läsning (Etapp 6 P5).
 type HistoryRecord struct {
 	Tenant     string
 	ThingID    string
@@ -121,6 +123,7 @@ type HistoryRecord struct {
 	Quality    string
 	Source     string
 	MessageID  string
+	Late       bool
 }
 
 // MemHistoryStore lagrar historik i minnet med idempotent append.
@@ -176,15 +179,20 @@ func (s *MemHistoryStore) AppendIdempotent(rec HistoryRecord) bool {
 	return true
 }
 
-// List filtrerar på tenant/thing/prop (exakt matchning) och på ObservedAt.
+// List filtrerar på tenant/thing/prop (exakt matchning på prop om angiven;
+// tom propID betyder alla egenskaper) och på ObservedAt.
 // Noll-tid i from/to betyder ingen undre/övre gräns (inklusive gränser).
-// limit > 0 kapar resultatet, annars returneras allt. Sorterat på ObservedAt stigande.
+// limit > 0 kapar resultatet (äldst först), annars returneras allt.
+// Sorterat på ObservedAt stigande.
 func (s *MemHistoryStore) List(tenant, thingID, propID string, from, to time.Time, limit int) []HistoryRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []HistoryRecord
 	for _, r := range s.recs {
-		if r.Tenant != tenant || r.ThingID != thingID || r.PropertyID != propID {
+		if r.Tenant != tenant || r.ThingID != thingID {
+			continue
+		}
+		if propID != "" && r.PropertyID != propID {
 			continue
 		}
 		if !from.IsZero() && r.ObservedAt.Before(from) {

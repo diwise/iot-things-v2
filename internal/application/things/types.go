@@ -10,6 +10,7 @@ package things
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -28,10 +29,10 @@ const (
 // "5700". Channel is usually empty; several sensors of the same type on
 // the same device are distinguished by channel.
 type Signal struct {
-	DeviceID string
-	Channel  string
-	Object   string
-	Resource string
+	DeviceID string `json:"deviceID"`
+	Channel  string `json:"channel,omitempty"`
+	Object   string `json:"object"`
+	Resource string `json:"resource"`
 }
 
 // shortObject returns the last ":" segment of an object URN,
@@ -69,11 +70,11 @@ func ParseSignalID(device, channel, objectURN, resource string) Signal {
 // match exactly. Input is the stable property ID,
 // e.g. "temperature.window".
 type Binding struct {
-	DeviceID string
-	Channel  string
-	Object   string
-	Resource string
-	Input    string
+	DeviceID string `json:"deviceID"`
+	Channel  string `json:"channel,omitempty"`
+	Object   string `json:"object"`
+	Resource string `json:"resource"`
+	Input    string `json:"input"`
 }
 
 // Matches reports whether the binding selects signal s.
@@ -97,47 +98,47 @@ func (b Binding) Matches(s Signal) bool {
 // ID is stable (e.g. "temperature.window"); DisplayName is a separate
 // mutable field and never breaks references or history.
 type Property struct {
-	ID          string
-	DisplayName string
-	DataType    string // "number", "boolean" or "string"
-	Quantity    string
-	Unit        string
-	Description string
+	ID          string `json:"id"`
+	DisplayName string `json:"displayName,omitempty"`
+	DataType    string `json:"dataType,omitempty"`
+	Quantity    string `json:"quantity,omitempty"`
+	Unit        string `json:"unit,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // Observation is one typed value with measurement time, reception time,
 // identity, quality and origin.
 type Observation struct {
-	Signal     Signal
-	Value      *float64
-	BoolValue  *bool
-	Unit       string
-	ObservedAt time.Time
-	ReceivedAt time.Time
-	Quality    Quality
-	Source     string
-	MessageID  string
+	Signal     Signal    `json:"signal"`
+	Value      *float64  `json:"value,omitempty"`
+	BoolValue  *bool     `json:"boolValue,omitempty"`
+	Unit       string    `json:"unit,omitempty"`
+	ObservedAt time.Time `json:"observedAt"`
+	ReceivedAt time.Time `json:"receivedAt"`
+	Quality    Quality   `json:"quality,omitempty"`
+	Source     string    `json:"source,omitempty"`
+	MessageID  string    `json:"messageId,omitempty"`
 }
 
 // RelationSpec describes one allowed named relation of a template.
 type RelationSpec struct {
-	Name           string
-	AllowedTargets []string
-	Min            int
-	Max            int
+	Name           string   `json:"name"`
+	AllowedTargets []string `json:"allowedTargets,omitempty"`
+	Min            int      `json:"min,omitempty"`
+	Max            int      `json:"max,omitempty"`
 }
 
 // Template is a versioned closed definition of allowed properties.
 // Required and Optional hold exact property IDs. RepeatGroups holds
 // repeatable measurement-point prefixes such as "temperature.".
 type Template struct {
-	ID                string
-	Version           string
-	Required          []string
-	Optional          []string
-	RepeatGroups      []string
-	AllowedQuantities []string
-	Relations         []RelationSpec
+	ID                string         `json:"id"`
+	Version           string         `json:"version"`
+	Required          []string       `json:"required,omitempty"`
+	Optional          []string       `json:"optional,omitempty"`
+	RepeatGroups      []string       `json:"repeatGroups,omitempty"`
+	AllowedQuantities []string       `json:"allowedQuantities,omitempty"`
+	Relations         []RelationSpec `json:"relations,omitempty"`
 }
 
 // ValidatePropertyID reports whether id is allowed by the closed
@@ -149,15 +150,11 @@ func (t Template) ValidatePropertyID(id string) error {
 	if id == "" {
 		return fmt.Errorf("%w: empty property id", ErrValidation)
 	}
-	for _, r := range t.Required {
-		if id == r {
-			return nil
-		}
+	if slices.Contains(t.Required, id) {
+		return nil
 	}
-	for _, o := range t.Optional {
-		if id == o {
-			return nil
-		}
+	if slices.Contains(t.Optional, id) {
+		return nil
 	}
 	for _, prefix := range t.RepeatGroups {
 		if prefix != "" && len(id) > len(prefix) && strings.HasPrefix(id, prefix) {
@@ -170,11 +167,11 @@ func (t Template) ValidatePropertyID(id string) error {
 // Variant is a named, versioned configuration of exactly one template
 // version, mainly parameter values.
 type Variant struct {
-	ID              string
-	Version         string
-	TemplateID      string
-	TemplateVersion string
-	ParamValues     map[string]float64
+	ID              string             `json:"id"`
+	Version         string             `json:"version"`
+	TemplateID      string             `json:"templateId"`
+	TemplateVersion string             `json:"templateVersion"`
+	ParamValues     map[string]float64 `json:"paramValues,omitempty"`
 }
 
 // ParamSource describes the origin of an effective parameter value.
@@ -191,18 +188,18 @@ const (
 // the configuration can be reproduced without reading a later template
 // version.
 type Thing struct {
-	ID              string
-	Tenant          string
-	Name            string
-	TemplateID      string
-	TemplateVersion string
-	VariantID       string
-	VariantVersion  string
-	Revision        int64
-	Properties      map[string]Property
-	Bindings        []Binding
-	ParamValues     map[string]float64
-	ParamSources    map[string]ParamSource
+	ID              string                 `json:"id"`
+	Tenant          string                 `json:"tenant"`
+	Name            string                 `json:"name,omitempty"`
+	TemplateID      string                 `json:"templateId"`
+	TemplateVersion string                 `json:"templateVersion"`
+	VariantID       string                 `json:"variantId,omitempty"`
+	VariantVersion  string                 `json:"variantVersion,omitempty"`
+	Revision        int64                  `json:"revision"`
+	Properties      map[string]Property    `json:"properties,omitempty"`
+	Bindings        []Binding              `json:"bindings,omitempty"`
+	ParamValues     map[string]float64     `json:"paramValues,omitempty"`
+	ParamSources    map[string]ParamSource `json:"paramSources,omitempty"`
 }
 
 // EffectiveParam resolves key with precedence
@@ -230,11 +227,11 @@ func (t Thing) EffectiveParam(key string, tmplDefaults map[string]float64, varia
 // Relation is a persistent, typed, directed link between independent
 // things within the same tenant.
 type Relation struct {
-	ID     string
-	Tenant string
-	Type   string
-	FromID string
-	ToID   string
+	ID     string `json:"id"`
+	Tenant string `json:"tenant"`
+	Type   string `json:"type"`
+	FromID string `json:"fromId"`
+	ToID   string `json:"toId"`
 }
 
 var (

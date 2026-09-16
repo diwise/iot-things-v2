@@ -33,8 +33,8 @@ type ThingValueV1 struct {
 	Source         string    `json:"source,omitempty"`
 	MessageID      string    `json:"messageId,omitempty"`
 	ObservedAt     time.Time `json:"observedAt"`
-	ReceivedAt     time.Time `json:"receivedAt,omitempty"`
-	ComputedAt     time.Time `json:"computedAt,omitempty"`
+	ReceivedAt     time.Time `json:"receivedAt"`
+	ComputedAt     time.Time `json:"computedAt"`
 	PublishedAt    time.Time `json:"publishedAt"`
 	ConfigRevision int64     `json:"configRevision"`
 	EventID        string    `json:"eventId,omitempty"`

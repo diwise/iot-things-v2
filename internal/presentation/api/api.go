@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"strconv"
 	"strings"
@@ -172,9 +173,7 @@ func (s *Server) AddRelation(rel map[string]any) error {
 		}
 	}
 	cp := make(map[string]any, len(rel))
-	for k, v := range rel {
-		cp[k] = v
-	}
+	maps.Copy(cp, rel)
 	s.relations = append(s.relations, cp)
 	return nil
 }

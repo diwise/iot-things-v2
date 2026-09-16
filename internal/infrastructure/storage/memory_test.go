@@ -5,7 +5,8 @@ import (
 	"time"
 )
 
-func fptr(v float64) *float64 { return &v }
+//go:fix inline
+func fptr(v float64) *float64 { return new(v) }
 
 func TestThingUpsertGetList(t *testing.T) {
 	s := NewMemThingStore()
@@ -41,7 +42,7 @@ func TestHistoryAppendIdempotentAndList(t *testing.T) {
 	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	rec := HistoryRecord{
 		Tenant: "acme", ThingID: "t1", PropertyID: "temp",
-		ObservedAt: base, ReceivedAt: base, Value: fptr(21.5),
+		ObservedAt: base, ReceivedAt: base, Value: new(21.5),
 		Quality: "ok", Source: "s1", MessageID: "m1",
 	}
 	if !s.AppendIdempotent(rec) {
@@ -57,7 +58,7 @@ func TestHistoryAppendIdempotentAndList(t *testing.T) {
 	}
 	// Annat värde => ny rad.
 	other := rec
-	other.Value = fptr(22.5)
+	other.Value = new(22.5)
 	if !s.AppendIdempotent(other) {
 		t.Fatal("annat värde ska ge ny rad")
 	}
@@ -80,7 +81,7 @@ func TestHistoryAppendIdempotentAndList(t *testing.T) {
 	// Tidsfilter + limit.
 	later := rec
 	later.ObservedAt = base.Add(time.Hour)
-	later.Value = fptr(23)
+	later.Value = new(float64(23))
 	later.Source = "s1"
 	// Säkerställ unik nyckel (nytt värde + ny tid).
 	if !s.AppendIdempotent(later) {
@@ -238,7 +239,7 @@ func TestTenantIsolationThingAndHistory(t *testing.T) {
 	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	hs.AppendIdempotent(HistoryRecord{
 		Tenant: "t1", ThingID: "thing-1", PropertyID: "temp",
-		ObservedAt: base, ReceivedAt: base, Value: fptr(1),
+		ObservedAt: base, ReceivedAt: base, Value: new(float64(1)),
 		Quality: "ok", Source: "s1", MessageID: "m1",
 	})
 	if got := hs.List("t2", "thing-1", "temp", time.Time{}, time.Time{}, 0); len(got) != 0 {
@@ -300,5 +301,47 @@ func TestOutboxForget(t *testing.T) {
 	}
 	if got := o.PeekFor("t", "b"); len(got) != 1 {
 		t.Fatalf("PeekFor(b)=%d, want 1 (orörd)", len(got))
+	}
+}
+
+// Regression Etapp 6 P5: tom propID betyder alla egenskaper (samma semantik
+// som Manager/fakeStore). Tidigare returnerade produktionsadaptern 0 rader
+// för tom prop medan tester mot faken fick alla.
+func TestHistoryEmptyPropReturnsAll(t *testing.T) {
+	s := NewMemHistoryStore()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	for _, prop := range []string{"distance", "level", "fillRate"} {
+		rec := HistoryRecord{
+			Tenant: "acme", ThingID: "bin-42", PropertyID: prop,
+			ObservedAt: base, ReceivedAt: base, Value: new(float64(1)),
+			Quality: "ok", Source: "s1",
+		}
+		if !s.AppendIdempotent(rec) {
+			t.Fatalf("append %s ska lyckas", prop)
+		}
+	}
+	if got := s.List("acme", "bin-42", "", time.Time{}, time.Time{}, 0); len(got) != 3 {
+		t.Fatalf("tom propID ska ge alla 3 rader, fick %d", len(got))
+	}
+	if got := s.List("acme", "bin-42", "distance", time.Time{}, time.Time{}, 0); len(got) != 1 {
+		t.Fatalf("filtrerad prop ska ge 1 rad, fick %d", len(got))
+	}
+}
+
+// Regression Etapp 6 B13/P5: Late-flaggan ska överleva lagring och läsning.
+func TestHistoryLateRoundTrip(t *testing.T) {
+	s := NewMemHistoryStore()
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	rec := HistoryRecord{
+		Tenant: "acme", ThingID: "t1", PropertyID: "temp",
+		ObservedAt: base, ReceivedAt: base.Add(time.Minute), Value: new(float64(20)),
+		Quality: "ok", Source: "s1", Late: true,
+	}
+	if !s.AppendIdempotent(rec) {
+		t.Fatal("append ska lyckas")
+	}
+	got := s.List("acme", "t1", "temp", time.Time{}, time.Time{}, 0)
+	if len(got) != 1 || !got[0].Late {
+		t.Fatalf("Late tappades: %+v", got)
 	}
 }

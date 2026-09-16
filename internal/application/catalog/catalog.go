@@ -13,6 +13,8 @@ package catalog
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -23,85 +25,87 @@ import (
 // Recipe is a computation prescription from a template: a configured use of
 // one versioned operator over explicit inputs.
 type Recipe struct {
-	Name     string
-	Operator string
-	Version  string
-	Inputs   []string
-	Outputs  []string
-	Params   []string
+	Name     string   `json:"name"`
+	Operator string   `json:"operator"`
+	Version  string   `json:"version,omitempty"`
+	Inputs   []string `json:"inputs"`
+	Outputs  []string `json:"outputs"`
+	Params   []string `json:"params,omitempty"`
 }
 
 // TemplateSpec is a publishable template version: the closed property
 // definition plus parameter defaults, overridability, recipes and allowed
 // relations.
 type TemplateSpec struct {
-	Template        things.Template
-	ParamDefaults   map[string]float64
-	Overridable     []string // params a thing may override; empty = all
-	Recipes         []Recipe
-	OperatorVersion map[string]string // operator -> version pinned by template
+	Template        things.Template    `json:"template"`
+	ParamDefaults   map[string]float64 `json:"paramDefaults,omitempty"`
+	Overridable     []string           `json:"overridable,omitempty"`
+	Recipes         []Recipe           `json:"recipes,omitempty"`
+	OperatorVersion map[string]string  `json:"operatorVersions,omitempty"`
 }
 
 // VariantSpec is a publishable variant version: exactly one template
 // version plus reused parameter values and optional preset properties.
 type VariantSpec struct {
-	Variant          things.Variant
-	PresetProperties []string
+	Variant          things.Variant `json:"variant"`
+	PresetProperties []string       `json:"presetProperties,omitempty"`
 }
 
 // RelationRef is one requested relation of an object under compilation.
 type RelationRef struct {
-	Name             string
-	TargetThingID    string
-	TargetTemplateID string
+	Name             string `json:"name"`
+	TargetThingID    string `json:"targetThingId"`
+	TargetTemplateID string `json:"targetTemplateId,omitempty"`
 }
 
 // ObjectSpec is the creation/update request compiled into an effective
 // configuration: activated properties, bindings, overrides and relations.
 type ObjectSpec struct {
-	ThingID         string
-	Tenant          string
-	Name            string
-	TemplateID      string
-	TemplateVersion string
-	VariantID       string
-	VariantVersion  string
-	Properties      map[string]things.Property
-	Bindings        []things.Binding
-	ParamOverrides  map[string]float64
-	Relations       []RelationRef
+	ThingID         string                     `json:"thingId"`
+	Tenant          string                     `json:"tenant,omitempty"`
+	Name            string                     `json:"name,omitempty"`
+	TemplateID      string                     `json:"templateId"`
+	TemplateVersion string                     `json:"templateVersion"`
+	VariantID       string                     `json:"variantId,omitempty"`
+	VariantVersion  string                     `json:"variantVersion,omitempty"`
+	Properties      map[string]things.Property `json:"properties,omitempty"`
+	Bindings        []things.Binding           `json:"bindings,omitempty"`
+	ParamOverrides  map[string]float64         `json:"paramOverrides,omitempty"`
+	Relations       []RelationRef              `json:"relations,omitempty"`
 }
 
 // ResolvedRelation is a validated relation with its named slot.
 type ResolvedRelation struct {
-	Name             string
-	TargetThingID    string
-	TargetTemplateID string
+	Name             string `json:"name"`
+	TargetThingID    string `json:"targetThingId"`
+	TargetTemplateID string `json:"targetTemplateId,omitempty"`
 }
 
 // EffectiveConfig is the materialized configuration stored on the thing:
 // version references plus resolved values, so it stays reproducible without
 // reading a later template version.
 type EffectiveConfig struct {
-	TemplateID      string
-	TemplateVersion string
-	VariantID       string
-	VariantVersion  string
-	Properties      map[string]things.Property
-	Bindings        []things.Binding
-	ParamValues     map[string]float64
-	ParamSources    map[string]things.ParamSource
-	Recipes         []Recipe
-	Relations       []ResolvedRelation
+	ThingID         string                        `json:"thingId,omitempty"`
+	Name            string                        `json:"name,omitempty"`
+	TemplateID      string                        `json:"templateId"`
+	TemplateVersion string                        `json:"templateVersion"`
+	VariantID       string                        `json:"variantId,omitempty"`
+	VariantVersion  string                        `json:"variantVersion,omitempty"`
+	Properties      map[string]things.Property    `json:"properties,omitempty"`
+	Bindings        []things.Binding              `json:"bindings,omitempty"`
+	ParamValues     map[string]float64            `json:"paramValues,omitempty"`
+	ParamSources    map[string]things.ParamSource `json:"paramSources,omitempty"`
+	Recipes         []Recipe                      `json:"recipes,omitempty"`
+	Relations       []ResolvedRelation            `json:"relations,omitempty"`
 }
 
 // Diff describes template/variant changes for upgrade preview.
 type Diff struct {
-	AddedProps     []string
-	RemovedProps   []string
-	AddedParams    []string
-	RemovedParams  []string
-	ChangedRecipes []string
+	AddedProps     []string `json:"addedProperties,omitempty"`
+	RemovedProps   []string `json:"removedProperties,omitempty"`
+	AddedParams    []string `json:"addedParams,omitempty"`
+	RemovedParams  []string `json:"removedParams,omitempty"`
+	ChangedRecipes []string `json:"changedRecipes,omitempty"`
 }
 
 // Catalog stores immutable published versions. Zero value is unusable;
@@ -154,9 +158,7 @@ func cloneFloatMap(in map[string]float64) map[string]float64 {
 		return nil
 	}
 	out := make(map[string]float64, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -165,9 +167,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -365,6 +365,40 @@ func (c *Catalog) PutVariant(spec VariantSpec) error {
 	return nil
 }
 
+// ListTemplates returnerar publicerade mallversioner sorterade på id/version.
+func (c *Catalog) ListTemplates() []TemplateSpec {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]TemplateSpec, 0, len(c.templates))
+	for _, spec := range c.templates {
+		out = append(out, cloneTemplateSpec(spec))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Template.ID != out[j].Template.ID {
+			return out[i].Template.ID < out[j].Template.ID
+		}
+		return out[i].Template.Version < out[j].Template.Version
+	})
+	return out
+}
+
+// ListVariants returnerar publicerade variantversioner sorterade på id/version.
+func (c *Catalog) ListVariants() []VariantSpec {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]VariantSpec, 0, len(c.variants))
+	for _, spec := range c.variants {
+		out = append(out, cloneVariantSpec(spec))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Variant.ID != out[j].Variant.ID {
+			return out[i].Variant.ID < out[j].Variant.ID
+		}
+		return out[i].Variant.Version < out[j].Variant.Version
+	})
+	return out
+}
+
 // GetVariant returns a published variant version.
 func (c *Catalog) GetVariant(id, version string) (VariantSpec, bool) {
 	c.mu.RLock()
@@ -463,6 +497,8 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 	}
 
 	return &EffectiveConfig{
+		ThingID:         obj.ThingID,
+		Name:            obj.Name,
 		TemplateID:      obj.TemplateID,
 		TemplateVersion: obj.TemplateVersion,
 		VariantID:       variantID,
@@ -543,13 +579,7 @@ func resolveRelations(t things.Template, obj ObjectSpec) ([]ResolvedRelation, er
 			return nil, fmt.Errorf("%w: object %q must not relate to itself", things.ErrValidation, obj.ThingID)
 		}
 		if len(slot.AllowedTargets) > 0 {
-			allowed := false
-			for _, target := range slot.AllowedTargets {
-				if rel.TargetTemplateID == target {
-					allowed = true
-					break
-				}
-			}
+			allowed := slices.Contains(slot.AllowedTargets, rel.TargetTemplateID)
 			if !allowed {
 				return nil, fmt.Errorf("%w: object %q relation %q target template %q not allowed",
 					things.ErrValidation, obj.ThingID, rel.Name, rel.TargetTemplateID)
@@ -721,13 +751,7 @@ func previewRelationConflicts(tmpl things.Template, old []ResolvedRelation, newT
 			continue
 		}
 		if len(slot.AllowedTargets) > 0 {
-			allowed := false
-			for _, target := range slot.AllowedTargets {
-				if rel.TargetTemplateID == target {
-					allowed = true
-					break
-				}
-			}
+			allowed := slices.Contains(slot.AllowedTargets, rel.TargetTemplateID)
 			if !allowed {
 				out = append(out, fmt.Sprintf("relation %q target template %q not allowed by %s/%s", rel.Name, rel.TargetTemplateID, newTemplateID, newTemplateVersion))
 			}

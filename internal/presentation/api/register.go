@@ -2,10 +2,18 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
+	"time"
 
+	"github.com/diwise/iot-things-v2/internal/application"
+	"github.com/diwise/iot-things-v2/internal/application/catalog"
+	"github.com/diwise/iot-things-v2/internal/application/things"
 	"github.com/diwise/iot-things-v2/internal/presentation/api/auth"
 	"github.com/diwise/service-chassis/pkg/infrastructure/net/http/router"
 	"github.com/diwise/service-chassis/pkg/infrastructure/o11y/logging"
@@ -35,23 +43,35 @@ func WithAccessObjectAuthorization(enabled bool) RegisterOption {
 	}
 }
 
-// ThingsApp is the minimal application surface the HTTP layer needs. It is
-// deliberately narrow so presentation stays decoupled from the application
-// implementation (same direction as iot-things: presentation -> application).
-type ThingsApp interface {
-	Add(ctx context.Context, b []byte) error
+// Manager is the application surface the HTTP layer needs (implemented by
+// *application.Manager). Narrow on purpose: presentation stays decoupled
+// from the implementation (same direction as iot-things).
+type Manager interface {
+	PublishTemplate(ctx context.Context, spec catalog.TemplateSpec) error
+	PublishVariant(ctx context.Context, spec catalog.VariantSpec) error
+	ListTemplates(ctx context.Context) []catalog.TemplateSpec
+	ListVariants(ctx context.Context) []catalog.VariantSpec
+	PreviewObject(ctx context.Context, tenant string, obj catalog.ObjectSpec) (*catalog.EffectiveConfig, error)
+	CreateObject(ctx context.Context, tenant string, obj catalog.ObjectSpec) (*catalog.EffectiveConfig, error)
+	UpdateObject(ctx context.Context, tenant string, obj catalog.ObjectSpec, revision int64) (*catalog.EffectiveConfig, error)
+	SwapBindings(ctx context.Context, tenant, thingID string, bindings []things.Binding, revision int64) (*catalog.EffectiveConfig, error)
+	PreviewUpgrade(ctx context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string) (catalog.Diff, []string, error)
+	UpgradeObject(ctx context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string, force bool, revision int64) (catalog.Diff, []string, error)
+	DeleteObject(ctx context.Context, tenant, thingID string) error
+	MoveObject(ctx context.Context, tenant, childID, newParentID string, revision int64) error
+	History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit int) ([]application.HistoryWrite, error)
+	GetObject(ctx context.Context, tenant, thingID string) (application.ThingSummary, error)
+	SearchObjects(ctx context.Context, tenant, templateID string, limit int) []application.ThingSummary
+	Overview(ctx context.Context, tenant, thingID string) (application.Overview, error)
 }
 
-// RegisterHandlers wires the public API onto mux with the same structure as
-// iot-things: router with /api/v0 prefix, OPA auth groups per scope, tracing
-// via service-chassis. The v1 memory routes (NewMux) stay available for the
-// scaffold and its tests; the authenticated v0 surface below is where the
-// application wiring lands next (handlers currently return 501).
-func RegisterHandlers(ctx context.Context, mux *http.ServeMux, app ThingsApp, policies io.Reader, opts ...RegisterOption) error {
+// RegisterHandlers wires the public management API onto mux with the same
+// structure as iot-things: router with /api/v0 prefix, OPA auth groups per
+// scope. The v1 memory routes (NewMux) stay frozen for compat.
+func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, policies io.Reader, opts ...RegisterOption) error {
 	const apiPrefix string = "/api/v0"
 
 	log := logging.GetFromContext(ctx)
-	_ = log
 
 	registerOpts := registerOptions{}
 	for _, apply := range opts {
@@ -63,35 +83,501 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, app ThingsApp, po
 		return fmt.Errorf("failed to create api authenticator: %w", err)
 	}
 
+	h := &handler{log: log, mgr: mgr}
+
 	r := router.New(mux, router.WithPrefix(apiPrefix))
 
-	notImplemented := func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "not implemented (TODO: wire application.ThingsApp)"})
-	}
-
-	r.Route("things", func(r router.ServeMux) {
+	r.Route("catalog", func(r router.ServeMux) {
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(ReadThings))
-			r.Get("", notImplemented)
-			r.Get("{id}", notImplemented)
+			r.Get("templates", h.listTemplates)
+			r.Get("variants", h.listVariants)
+		})
+		r.Group(func(r router.ServeMux) {
+			r.Use(authz.RequireAccess(CreateThings))
+			r.Post("templates", h.publishTemplate)
+			r.Post("variants", h.publishVariant)
+		})
+	})
+
+	r.Route("things", func(r router.ServeMux) {
+		// En grupp per HTTP-metod och route: routern registrerar en
+		// syntetisk subtree-pattern per (metod, grupp), så samma metod
+		// i två grupper med olika scope krockar (Go-mux panik). Därför
+		// är {id}-aktioner PUT (idempotenta avsikter; förhandsvisningar
+		// är safe+idempotenta, muterande kräver If-Match) och delar
+		// UpdateThings-scope: preview-före-skapande kräver därmed
+		// uppdateringsrätt (testat i TestV0PreviewRequiresUpdate).
+		r.Group(func(r router.ServeMux) {
+			r.Use(authz.RequireAccess(ReadThings))
+			r.Get("", h.searchThings)
+			r.Get("{id}", h.getThing)
+			r.Get("{id}/history", h.getHistory)
+			r.Get("{id}/overview", h.getOverview)
 		})
 
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(CreateThings))
-			r.Post("", notImplemented)
+			r.Post("", h.createThing)
 		})
 
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(UpdateThings))
-			r.Put("{id}", notImplemented)
-			r.Patch("{id}", notImplemented)
+			r.Put("{id}", h.updateThing)
+			r.Put("{id}/bindings", h.swapBindings)
+			r.Put("{id}/preview", h.previewThing)
+			r.Put("{id}/move", h.moveThing)
+			r.Put("{id}/upgrade/preview", h.previewUpgrade)
+			r.Put("{id}/upgrade", h.upgradeThing)
 		})
 
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(DeleteThings))
-			r.Delete("{id}", notImplemented)
+			r.Delete("{id}", h.deleteThing)
 		})
 	})
 
 	return nil
+}
+
+type handler struct {
+	log *slog.Logger
+	mgr Manager
+}
+
+// tenant resolves the single authorized tenant for the request. Reads fan
+// out is a TODO; all endpoints currently require exactly one tenant so
+// writes are never ambiguous and reads never merge tenants silently.
+// scope är endpointets eget kravscope (läs/skapa/uppdatera/ta bort):
+// tenanten måste vara auktoriserad för just den åtgärden, inte bara läs.
+func tenant(r *http.Request, scope auth.Scope) (string, error) {
+	tenants := auth.GetTenantsWithAllowedScopes(r.Context(), scope)
+	if len(tenants) == 0 {
+		return "", errUnauthorized
+	}
+	if len(tenants) != 1 {
+		return "", errAmbiguousTenant
+	}
+	return tenants[0], nil
+}
+
+var (
+	errUnauthorized    = errors.New("unauthorized")
+	errAmbiguousTenant = errors.New("ambiguous tenant")
+)
+
+func writeAPIError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errUnauthorized):
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+	case errors.Is(err, errAmbiguousTenant):
+		writeError(w, http.StatusBadRequest, "ambiguous tenant")
+	case errors.Is(err, things.ErrValidation):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, things.ErrNotFound):
+		writeError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, things.ErrConflict):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "internal error")
+	}
+}
+
+func decodeBody[T any](r *http.Request) (T, error) {
+	var v T
+	if r.Body == nil {
+		return v, fmt.Errorf("%w: empty body", things.ErrValidation)
+	}
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+		return v, fmt.Errorf("%w: invalid JSON body: %v", things.ErrValidation, err)
+	}
+	return v, nil
+}
+
+func (h *handler) publishTemplate(w http.ResponseWriter, r *http.Request) {
+	if _, err := tenant(r, CreateThings); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	spec, err := decodeBody[catalog.TemplateSpec](r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if err := h.mgr.PublishTemplate(r.Context(), spec); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *handler) listTemplates(w http.ResponseWriter, r *http.Request) {
+	if _, err := tenant(r, ReadThings); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.mgr.ListTemplates(r.Context()))
+}
+
+func (h *handler) publishVariant(w http.ResponseWriter, r *http.Request) {
+	if _, err := tenant(r, CreateThings); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	spec, err := decodeBody[catalog.VariantSpec](r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if err := h.mgr.PublishVariant(r.Context(), spec); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (h *handler) listVariants(w http.ResponseWriter, r *http.Request) {
+	if _, err := tenant(r, ReadThings); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.mgr.ListVariants(r.Context()))
+}
+
+func (h *handler) createThing(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, CreateThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	obj, err := decodeBody[catalog.ObjectSpec](r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	cfg, err := h.mgr.CreateObject(r.Context(), t, obj)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	sum, err := h.mgr.GetObject(r.Context(), t, obj.ThingID)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	_ = cfg
+	w.Header().Set("ETag", FormatETag(sum.Revision))
+	writeJSON(w, http.StatusCreated, sum)
+}
+
+func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, ReadThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	limit, err := queryLimit(r, "limit")
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h.mgr.SearchObjects(r.Context(), t, r.URL.Query().Get("template"), limit))
+}
+
+func (h *handler) getThing(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, ReadThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	sum, err := h.mgr.GetObject(r.Context(), t, r.PathValue("id"))
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.Header().Set("ETag", FormatETag(sum.Revision))
+	writeJSON(w, http.StatusOK, sum)
+}
+
+func (h *handler) updateThing(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, UpdateThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	rev, err := requireIfMatch(r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	obj, err := decodeBody[catalog.ObjectSpec](r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	id := r.PathValue("id")
+	if obj.ThingID != "" && obj.ThingID != id {
+		writeAPIError(w, fmt.Errorf("%w: path id %q mismatches body thingId %q", things.ErrValidation, id, obj.ThingID))
+		return
+	}
+	obj.ThingID = id
+	if _, err := h.mgr.UpdateObject(r.Context(), t, obj, rev); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	sum, err := h.mgr.GetObject(r.Context(), t, id)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.Header().Set("ETag", FormatETag(sum.Revision))
+	writeJSON(w, http.StatusOK, sum)
+}
+
+func (h *handler) deleteThing(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, DeleteThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if err := h.mgr.DeleteObject(r.Context(), t, r.PathValue("id")); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) swapBindings(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, UpdateThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	rev, err := requireIfMatch(r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	var body struct {
+		Bindings []things.Binding `json:"bindings"`
+	}
+	if r.Body == nil {
+		writeAPIError(w, fmt.Errorf("%w: empty body", things.ErrValidation))
+		return
+	}
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAPIError(w, fmt.Errorf("%w: invalid JSON body: %v", things.ErrValidation, err))
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := h.mgr.SwapBindings(r.Context(), t, id, body.Bindings, rev); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	sum, err := h.mgr.GetObject(r.Context(), t, id)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.Header().Set("ETag", FormatETag(sum.Revision))
+	writeJSON(w, http.StatusOK, sum)
+}
+
+func (h *handler) previewThing(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, UpdateThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	obj, err := decodeBody[catalog.ObjectSpec](r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if id := r.PathValue("id"); obj.ThingID != "" && obj.ThingID != id {
+		writeAPIError(w, fmt.Errorf("%w: path id %q mismatches body thingId %q", things.ErrValidation, id, obj.ThingID))
+		return
+	}
+	cfg, err := h.mgr.PreviewObject(r.Context(), t, obj)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+type versionRef struct {
+	TemplateID      string `json:"templateId"`
+	TemplateVersion string `json:"templateVersion"`
+	VariantID       string `json:"variantId,omitempty"`
+	VariantVersion  string `json:"variantVersion,omitempty"`
+}
+
+func (h *handler) previewUpgrade(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, UpdateThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	ref, err := decodeBody[versionRef](r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	diff, conflicts, err := h.mgr.PreviewUpgrade(r.Context(), t, r.PathValue("id"), ref.TemplateID, ref.TemplateVersion, ref.VariantID, ref.VariantVersion)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"diff": diff, "conflicts": conflicts})
+}
+
+func (h *handler) upgradeThing(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, UpdateThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	rev, err := requireIfMatch(r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	ref, err := decodeBody[versionRef](r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	force := r.URL.Query().Get("force") == "true"
+	diff, conflicts, err := h.mgr.UpgradeObject(r.Context(), t, r.PathValue("id"), ref.TemplateID, ref.TemplateVersion, ref.VariantID, ref.VariantVersion, force, rev)
+	if err != nil {
+		if errors.Is(err, things.ErrConflict) {
+			writeJSON(w, http.StatusConflict, map[string]any{"diff": diff, "conflicts": conflicts, "error": err.Error()})
+			return
+		}
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"diff": diff, "conflicts": conflicts})
+}
+
+func (h *handler) moveThing(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, UpdateThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	rev, err := requireIfMatch(r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	var body struct {
+		ParentID string `json:"parentId"`
+	}
+	if r.Body == nil {
+		writeAPIError(w, fmt.Errorf("%w: empty body", things.ErrValidation))
+		return
+	}
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeAPIError(w, fmt.Errorf("%w: invalid JSON body: %v", things.ErrValidation, err))
+		return
+	}
+	id := r.PathValue("id")
+	if err := h.mgr.MoveObject(r.Context(), t, id, body.ParentID, rev); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	sum, err := h.mgr.GetObject(r.Context(), t, id)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.Header().Set("ETag", FormatETag(sum.Revision))
+	writeJSON(w, http.StatusOK, sum)
+}
+
+func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, ReadThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	q := r.URL.Query()
+	limit, err := queryLimit(r, "limit")
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	from, err := queryTime(q.Get("from"))
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	to, err := queryTime(q.Get("to"))
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	entries, err := h.mgr.History(r.Context(), t, r.PathValue("id"), q.Get("property"), from, to, limit)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	if entries == nil {
+		entries = []application.HistoryWrite{}
+	}
+	writeJSON(w, http.StatusOK, entries)
+}
+
+func (h *handler) getOverview(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, ReadThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	ov, err := h.mgr.Overview(r.Context(), t, r.PathValue("id"))
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ov)
+}
+
+func requireIfMatch(r *http.Request) (int64, error) {
+	raw := r.Header.Get("If-Match")
+	if raw == "" {
+		return 0, fmt.Errorf("%w: missing If-Match header", things.ErrValidation)
+	}
+	rev, err := ParseETag(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%w: invalid If-Match header: %v", things.ErrValidation, err)
+	}
+	return rev, nil
+}
+
+func queryLimit(r *http.Request, key string) (int, error) {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("%w: invalid %s", things.ErrValidation, key)
+	}
+	return n, nil
+}
+
+func queryTime(raw string) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	ts, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w: invalid time %q (want RFC3339)", things.ErrValidation, raw)
+	}
+	return ts, nil
 }

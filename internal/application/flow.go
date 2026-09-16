@@ -38,32 +38,32 @@ import (
 // Anroparens lagring är idempotent per (mättid, källa, värde), så retry
 // konvergerar.
 type HistoryWrite struct {
-	PropertyID string
-	Value      *float64
-	Quality    string
-	ObservedAt time.Time
-	ReceivedAt time.Time
-	Source     string
-	MessageID  string
-	Late       bool
+	PropertyID string    `json:"propertyId"`
+	Value      *float64  `json:"value,omitempty"`
+	Quality    string    `json:"quality,omitempty"`
+	ObservedAt time.Time `json:"observedAt"`
+	ReceivedAt time.Time `json:"receivedAt"`
+	Source     string    `json:"source,omitempty"`
+	MessageID  string    `json:"messageId,omitempty"`
+	Late       bool      `json:"late,omitempty"`
 }
 
 // FlowEvent är en utgående logisk händelse per uppdaterad egenskap.
 // Stabilt ID bygger anroparen som messageID + egenskap, så återleverans
 // dedupliceras hos konsumenten.
 type FlowEvent struct {
-	PropertyID      string
-	Value           float64
-	Quality         string
-	ObservedAt      time.Time
-	ReceivedAt      time.Time
-	Sources         []string
-	Available       int
-	Expected        int
-	Operator        string
-	OperatorVersion string
-	ConfigRevision  int64
-	MessageID       string
+	PropertyID      string    `json:"propertyId"`
+	Value           float64   `json:"value"`
+	Quality         string    `json:"quality,omitempty"`
+	ObservedAt      time.Time `json:"observedAt"`
+	ReceivedAt      time.Time `json:"receivedAt"`
+	Sources         []string  `json:"sources,omitempty"`
+	Available       int       `json:"available,omitempty"`
+	Expected        int       `json:"expected,omitempty"`
+	Operator        string    `json:"operator,omitempty"`
+	OperatorVersion string    `json:"operatorVersion,omitempty"`
+	ConfigRevision  int64     `json:"configRevision,omitempty"`
+	MessageID       string    `json:"messageId,omitempty"`
 }
 
 // StoredProcessor är versionerat beständigt tillstånd för en tillstånds-
@@ -73,9 +73,9 @@ type FlowEvent struct {
 // tillståndet och resultatet flaggas uncertain i stället för att tyst
 // återanvända ett främmande tillstånd.
 type StoredProcessor struct {
-	Operator  string
-	Version   string
-	StateJSON []byte
+	Operator  string `json:"operator"`
+	Version   string `json:"version,omitempty"`
+	StateJSON []byte `json:"state,omitempty"`
 }
 
 // FlowOutcome är resultatet av en utvärderingsomgång: nya aktuella värden

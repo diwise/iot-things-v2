@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -104,12 +105,7 @@ func findObject(t *testing.T, f fixtureFile, id string) objectDef {
 }
 
 func contains(items []string, want string) bool {
-	for _, item := range items {
-		if item == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(items, want)
 }
 
 func countPrefix(items []string, prefix string) int {

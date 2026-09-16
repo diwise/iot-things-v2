@@ -13,7 +13,8 @@ const (
 	flowURNtemp     = "urn:oma:lwm2m:ext:3303"
 )
 
-func flowPtr(v float64) *float64 { return &v }
+//go:fix inline
+func flowPtr(v float64) *float64 { return new(v) }
 
 func flowBins(t *testing.T) (*catalog.Catalog, catalog.EffectiveConfig) {
 	t.Helper()
@@ -103,7 +104,7 @@ func flowRooms(t *testing.T) (*catalog.Catalog, catalog.EffectiveConfig) {
 func tempObs(device string, v float64, at time.Time) things.Observation {
 	return things.Observation{
 		Signal:     things.ParseSignalID(device, "", flowURNtemp, "5700"),
-		Value:      flowPtr(v),
+		Value:      new(v),
 		Quality:    things.QualityOK,
 		ObservedAt: at,
 		ReceivedAt: at,
@@ -134,7 +135,7 @@ func TestBinChainLevelAndFillRate(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{{
 		Signal:     things.ParseSignalID("milesight:214", "", flowURNdistance, "5700"),
-		Value:      flowPtr(0.30),
+		Value:      new(0.30),
 		Quality:    things.QualityOK,
 		ObservedAt: base,
 		ReceivedAt: base,
@@ -334,7 +335,7 @@ func TestCycleDetected(t *testing.T) {
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	if _, err := EvaluateBatchFlow(cfg, map[string]CurrentValue{
-		"a": {Value: flowPtr(1), Quality: "ok", ObservedAt: base},
+		"a": {Value: new(float64(1)), Quality: "ok", ObservedAt: base},
 	}, nil, nil, base, "m", 1); err == nil {
 		t.Fatal("cyclic graph must be rejected")
 	}
@@ -351,7 +352,7 @@ func TestUnknownOperatorRejected(t *testing.T) {
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	current := map[string]CurrentValue{
-		"p": {Value: flowPtr(1), Quality: "ok", ObservedAt: base},
+		"p": {Value: new(float64(1)), Quality: "ok", ObservedAt: base},
 	}
 	for _, op := range []string{"noSuchOperator", "active_time_typo"} {
 		cfg := mk(op)
@@ -426,7 +427,7 @@ func TestThresholdHysteresisStable(t *testing.T) {
 		at := base.Add(time.Duration(i) * time.Minute)
 		out, err := EvaluateBatchFlow(mustCompileBench(t, c), current, nil, []things.Observation{{
 			Signal:     things.ParseSignalID("s", "", flowURNtemp, "5700"),
-			Value:      flowPtr(tc.value),
+			Value:      new(tc.value),
 			Quality:    things.QualityOK,
 			ObservedAt: at,
 			ReceivedAt: at,
@@ -465,7 +466,7 @@ func TestFillRateOutOfRangeKeptUncertain(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{{
 		Signal:     things.ParseSignalID("milesight:214", "", flowURNdistance, "5700"),
-		Value:      flowPtr(2.0),
+		Value:      new(2.0),
 		Quality:    things.QualityOK,
 		ObservedAt: base,
 		ReceivedAt: base,
@@ -529,14 +530,14 @@ func TestTieBreakReceivedAtWins(t *testing.T) {
 		return []things.Observation{
 			{
 				Signal:     things.ParseSignalID("sA", "", flowURNtemp, "5700"),
-				Value:      flowPtr(10),
+				Value:      new(float64(10)),
 				Quality:    things.QualityOK,
 				ObservedAt: base,
 				ReceivedAt: base,
 			},
 			{
 				Signal:     things.ParseSignalID("sB", "", flowURNtemp, "5700"),
-				Value:      flowPtr(20),
+				Value:      new(float64(20)),
 				Quality:    things.QualityOK,
 				ObservedAt: base,
 				ReceivedAt: base.Add(time.Minute),
@@ -582,14 +583,14 @@ func TestTieBreakSourceIDWins(t *testing.T) {
 		return []things.Observation{
 			{
 				Signal:     things.ParseSignalID("sA", "", flowURNtemp, "5700"),
-				Value:      flowPtr(10),
+				Value:      new(float64(10)),
 				Quality:    things.QualityOK,
 				ObservedAt: base,
 				ReceivedAt: base,
 			},
 			{
 				Signal:     things.ParseSignalID("sB", "", flowURNtemp, "5700"),
-				Value:      flowPtr(20),
+				Value:      new(float64(20)),
 				Quality:    things.QualityOK,
 				ObservedAt: base,
 				ReceivedAt: base,
@@ -877,8 +878,8 @@ func TestDuplicateOutputRejected(t *testing.T) {
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	current := map[string]CurrentValue{
-		"a": {Value: flowPtr(1), Quality: "ok", ObservedAt: base},
-		"b": {Value: flowPtr(2), Quality: "ok", ObservedAt: base},
+		"a": {Value: new(float64(1)), Quality: "ok", ObservedAt: base},
+		"b": {Value: new(float64(2)), Quality: "ok", ObservedAt: base},
 	}
 	if _, err := EvaluateBatchFlow(cfg, current, nil, nil, base, "m", 1); err == nil {
 		t.Fatal("duplicate output must be rejected")
@@ -889,7 +890,7 @@ func TestDuplicateOutputRejected(t *testing.T) {
 func TestMissingOperatorParamsRejected(t *testing.T) {
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	current := map[string]CurrentValue{
-		"p": {Value: flowPtr(1), Quality: "ok", ObservedAt: base},
+		"p": {Value: new(float64(1)), Quality: "ok", ObservedAt: base},
 	}
 	for _, tc := range []struct {
 		name string
