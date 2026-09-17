@@ -70,8 +70,12 @@ enbart things-kontrakten.
   (separat schema/instans; delar aldrig tabeller med v1).
 - Samma broker; egen transient broadcast-prenumeration.
 - Ingen dataimport vid införande: historik byggs från liveflödet;
-  v1-databasen behålls orörd. Historisk migrering/avveckling av v1
-  kräver separat beslut (utanför denna leverans).
+  v1-databasen behålls orörd. Undantag: `things.csv` (v1-seedformat)
+  kan importeras idempotent vid start (`THINGS_FILE`) för att skapa
+  saker från seed-mallarna med korrekta bindningar (maxd/maxl ->
+  parametrar, plats/metadata bevaras); rader som inte kan uttryckas
+  (t.ex. vinkel) nekas per rad med loggning. Historisk migrering/
+  avveckling av v1 kräver separat beslut (utanför denna leverans).
 - Beständig backend är införd (K4): `PgStore` över PostgreSQL med
   Timescale-hypertabell för historik när tillägget finns (samma
   protokolltester gäller båda backendarna). Kvar: retention för

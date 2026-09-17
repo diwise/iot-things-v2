@@ -81,7 +81,7 @@ func main() {
 	exitIf(err, logger, "failed to start service runner")
 }
 
-func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile, thingsFile, configFile io.ReadCloser) (servicerunner.Runner[appConfig], error) {
+func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile, thingsData, configData io.ReadCloser) (servicerunner.Runner[appConfig], error) {
 	log := logging.GetFromContext(ctx)
 
 	probes := readinessProbes()
@@ -100,6 +100,11 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 
 	owned := &ownedResources{}
 
+	// Sökvägar fångas här: initialize-parametrarna skuggar flaggkonstanterna
+	// med samma namn, så flags[...] måste läsas utanför dem.
+	thingsPath := flags[thingsFile]
+	catalogSeedPath := flags[catalogSeedFile]
+
 	_, runner := servicerunner.New(ctx, *cfg,
 		webserver("control", listen(flags[listenAddress]), port(flags[controlPort]),
 			pprof(), liveness(func() error { return nil }), readiness(probes),
@@ -114,8 +119,8 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 		oninit(func(ctx context.Context, ac *appConfig) error {
 			log.Debug("initializing servicerunner")
 
-			defer configFile.Close()
-			defer thingsFile.Close()
+			defer configData.Close()
+			defer thingsData.Close()
 
 			var err error
 
@@ -167,7 +172,7 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 			owned.storage = backend
 
 			log.Debug("creating application...")
-			app, mgr, err = newApp(ctx, reader, writer, msgCtx, runtimeStore, configFile)
+			app, mgr, err = newApp(ctx, reader, writer, msgCtx, runtimeStore, configData)
 			if err != nil {
 				if backend != nil {
 					backend.Close()
@@ -178,7 +183,7 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 			}
 
 			log.Debug("seeding things...")
-			err = seed(ctx, thingsFile, app)
+			err = seed(ctx, thingsData, app)
 			if err != nil {
 				if backend != nil {
 					backend.Close()
@@ -189,13 +194,23 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 			}
 
 			log.Debug("seeding catalog...")
-			if err := seedCatalog(ctx, flags[catalogSeedFile], mgr); err != nil {
+			if err := seedCatalog(ctx, catalogSeedPath, mgr); err != nil {
 				if backend != nil {
 					backend.Close()
 					backend = nil
 				}
 				owned.storage = nil
 				return fmt.Errorf("unable to seed catalog: %w", err)
+			}
+
+			log.Debug("importing things...")
+			if err := importThings(ctx, thingsPath, mgr); err != nil {
+				if backend != nil {
+					backend.Close()
+					backend = nil
+				}
+				owned.storage = nil
+				return fmt.Errorf("unable to import things: %w", err)
 			}
 
 			if migrateBindingsEnabled(flags) {
@@ -457,6 +472,31 @@ func seedCatalog(ctx context.Context, path string, mgr *application.Manager) err
 		return err
 	}
 	logging.GetFromContext(ctx).Info("catalog seed applied", "added", added, "skipped", skipped)
+	return nil
+}
+
+// importThings reads v1 things.csv and creates things from the seeded
+// templates idempotently (already-created rows are skipped, so restarts
+// only fill gaps). A missing file warns and continues; structurally broken
+// CSV fails startup, while per-row failures warn per row and continue:
+// the operator fixes the file and restarts.
+func importThings(ctx context.Context, path string, mgr *application.Manager) error {
+	f, err := os.Open(path)
+	if err != nil {
+		logging.GetFromContext(ctx).Warn("things file not loaded, skipping import",
+			"path", path, "err", err.Error())
+		return nil
+	}
+	defer f.Close()
+	added, skipped, failures, err := mgr.ImportCSV(ctx, f)
+	if err != nil {
+		return err
+	}
+	log := logging.GetFromContext(ctx).With("added", added, "skipped", skipped, "failed", len(failures))
+	for _, failure := range failures {
+		log.Warn("things import row rejected", "row", failure.Row, "id", failure.ID, "err", failure.Error)
+	}
+	log.Info("things import applied")
 	return nil
 }
 

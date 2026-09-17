@@ -6,7 +6,7 @@ Status: Etapp 1–6 + K4-persistens (minne + PostgreSQL via PgStore, dedup/outbo
 
 ## Struktur (spegel av iot-things)
 
-- `cmd/iot-things-v2`: `main.go` + `config.go` (flags/env/CLI-precedens, `servicerunner`, control+public-servrar, `ownedResources`-shutdown, `storageConfigFromFlags`, seed, `MigrateBindings`-gating). Service-namn `iot-things-v2`.
+- `cmd/iot-things-v2`: `main.go` + `config.go` (flags/env/CLI-precedens, `servicerunner`, control+public-servrar, `ownedResources`-shutdown, `storageConfigFromFlags`, seed, `MigrateBindings`-gating). Service-namn `iot-things-v2`. Vid start: katalogseed (`CATALOG_SEED_FILE`) före sakimport (`THINGS_FILE`, v1-things.csv, idempotent).
 - `internal/application`: `app.go` (`ThingsApp`-fasad, `ThingsReader`/`ThingsWriter`), `handlers.go` (`message.accepted`-handler med senml/diwise-`Parse`, tenant-`Permanent`, `convPack`→`Observation`), `evaluate.go` (`ShouldBecomeCurrent`, `EvaluateBatch`).
 - `internal/application/things`: Thing/Template/Variant/Property/Signal/Binding/Relation, sluten mall, stabila ID:n.
 - `internal/application/functions`: mean/min/max, level, fillRate, linear, percent, hysteres, aktiv tid.

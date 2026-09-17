@@ -38,7 +38,7 @@
       "template": {
         "id": "room",
         "version": "v1",
-        "optional": ["temperature.window", "temperature.center", "temperature.door", "temperature.average", "humidity", "illuminance", "co2"],
+        "optional": ["temperature", "temperature.window", "temperature.center", "temperature.door", "temperature.average", "humidity", "illuminance", "co2"],
         "repeatGroups": ["temperature."],
         "classification": "room",
         "labels": ["Inomhusklimat"],
