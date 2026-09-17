@@ -7,7 +7,7 @@ info:
     mallar. Publicerade mall-/variantversioner är oföränderliga; ändringar
     av saker kräver aktuell revision via If-Match (svarar 409 vid konflikt)
     och returnerar ny revision som ETag ("rev-<n>"). Alla saker kräver namn,
-    plats, metadata och kategori (ärvd från mallen eller egen).
+    plats och kategori (ärvd från mallen eller egen); metadata är frivillig.
     Användare med flera tenants väljer en explicit via ?tenant= på samtliga
     endpoints; utan väljare svarar tvetydiga anrop 400 och läsningar slås
     aldrig ihop över tenants.
@@ -613,7 +613,7 @@ components:
         targetTemplateId: { type: string }
     ObjectSpec:
       type: object
-      required: [thingId, name, location, metadata, templateId, templateVersion]
+      required: [thingId, name, location, templateId, templateVersion]
       properties:
         thingId: { type: string }
         name: { type: string }
@@ -674,7 +674,7 @@ components:
         source: { type: string }
     ThingSummary:
       type: object
-      required: [thingId, tenant, name, location, metadata, category, templateId, templateVersion, revision]
+      required: [thingId, tenant, name, location, category, templateId, templateVersion, revision]
       properties:
         thingId: { type: string }
         tenant: { type: string }

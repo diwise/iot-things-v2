@@ -821,7 +821,8 @@ func TestSeedFileRejectsObjects(t *testing.T) {
 	}
 }
 
-// Alla saker kräver namn, plats, metadata och kategori (ärvd eller egen).
+// Alla saker kräver namn, plats och kategori (ärvd eller egen).
+// Metadata, bindningar och relationer är frivilliga.
 func TestCompileRequiresDescriptiveFields(t *testing.T) {
 	c := New()
 	if err := c.PutTemplate(wastebinTemplate()); err != nil {
@@ -839,10 +840,8 @@ func TestCompileRequiresDescriptiveFields(t *testing.T) {
 		t.Fatalf("valid object: %v", err)
 	}
 	cases := map[string]func(*ObjectSpec){
-		"namnlös":      func(o *ObjectSpec) { o.Name = "  " },
-		"platslös":     func(o *ObjectSpec) { o.Location = nil },
-		"metadatalös":  func(o *ObjectSpec) { o.Metadata = nil },
-		"tom metadata": func(o *ObjectSpec) { o.Metadata = map[string]string{} },
+		"namnlös":  func(o *ObjectSpec) { o.Name = "  " },
+		"platslös": func(o *ObjectSpec) { o.Location = nil },
 	}
 	for name, mutate := range cases {
 		obj := base

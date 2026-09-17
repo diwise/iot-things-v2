@@ -491,9 +491,6 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 	if obj.Location == nil {
 		return nil, fmt.Errorf("%w: object %q must have a location", things.ErrValidation, obj.ThingID)
 	}
-	if len(obj.Metadata) == 0 {
-		return nil, fmt.Errorf("%w: object %q must have metadata", things.ErrValidation, obj.ThingID)
-	}
 
 	c.mu.RLock()
 	tmpl, ok := c.templates[versionKey(obj.TemplateID, obj.TemplateVersion)]
