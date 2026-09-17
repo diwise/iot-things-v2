@@ -198,3 +198,51 @@ func FlagOutOfRange(value, min, max float64) string {
 
 	return QualityOk
 }
+
+// BoolToFloat maps a boolean observation onto the numeric pipeline:
+// true -> 1, false -> 0. Boolean state (presence, door, pump run signal)
+// thereby flows through the same operators as thresholds report it
+// (threshold outputs 1/0, activeTime treats != 0 as active).
+func BoolToFloat(b bool) float64 {
+	if b {
+		return 1
+	}
+
+	return 0
+}
+
+// CounterState is the persistent state for the counter operator:
+// the cumulative count plus the previous input level for edge detection.
+type CounterState struct {
+	Count      int64
+	LastActive bool
+}
+
+// CountEdge advances CounterState for the new observed active flag and
+// reports whether the edge counted. Edge selects which transitions count:
+// "rising" (default), "falling" or "both". The zero value counts the first
+// active observation as a rising edge, mirroring a sensor that starts idle.
+//
+// State changes only on new observations, like the other stateful
+// operators; retries converge because the runtime deduplicates batches
+// before evaluation.
+func CountEdge(state CounterState, active bool, edge string) (CounterState, bool) {
+	var counted bool
+
+	switch edge {
+	case "falling":
+		counted = state.LastActive && !active
+	case "both":
+		counted = state.LastActive != active
+	default: // "rising" and anything else: conservative default
+		counted = !state.LastActive && active
+	}
+
+	if counted {
+		state.Count++
+	}
+
+	state.LastActive = active
+
+	return state, counted
+}

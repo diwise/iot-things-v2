@@ -162,17 +162,28 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 			if q != functions.QualityOk && q != functions.QualityUncertain && q != functions.QualityInvalid {
 				q = functions.QualityInvalid
 			}
+			// Bool-ingest: en boolesk observation (utan numeriskt värde)
+			// mappas till 1/0 så att tillståndssignaler (presence,
+			// digitalInput) flödar genom samma pipeline som trösklar
+			// rapporterar den. Booleska poster bär ingen enhet och
+			// unitMismatch accepterar tom enhet, så ingen särregel behövs
+			// där. Numeriskt värde vinner om båda är satta.
+			num := o.Value
+			if num == nil && o.BoolValue != nil {
+				num = new(float64)
+				*num = functions.BoolToFloat(*o.BoolValue)
+			}
 			if unitMismatch(prop.Unit, o.Unit) {
 				q = functions.QualityInvalid
 			}
-			if o.Value == nil {
+			if num == nil {
 				// Saknat värde får aldrig bli numeriskt noll (C6):
 				// behandla som invalid, spara i historik utan current/event.
 				q = functions.QualityInvalid
 			}
 			hw := HistoryWrite{
 				PropertyID: input,
-				Value:      cloneFloatPtr(o.Value),
+				Value:      cloneFloatPtr(num),
 				Quality:    q,
 				ObservedAt: o.ObservedAt,
 				ReceivedAt: rx,
@@ -186,14 +197,14 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 				curPtr = &cp
 			}
 			if ShouldBecomeCurrent(curPtr, ObservedInput{
-				Value:      o.Value,
+				Value:      num,
 				Quality:    q,
 				ObservedAt: o.ObservedAt,
 				ReceivedAt: rx,
 				Source:     o.Signal.ID(),
 			}) {
 				nv := CurrentValue{
-					Value:      cloneFloatPtr(o.Value),
+					Value:      cloneFloatPtr(num),
 					Quality:    q,
 					ObservedAt: o.ObservedAt,
 					ReceivedAt: rx,
@@ -213,8 +224,8 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 					ConfigRevision: configRevision,
 					MessageID:      messageID,
 				})
-				if o.Value != nil {
-					out.Events[len(out.Events)-1].Value = *o.Value
+				if num != nil {
+					out.Events[len(out.Events)-1].Value = *num
 				}
 			} else {
 				// Late markerar endast tidsmässigt passerade giltiga
@@ -331,6 +342,8 @@ func canonicalOperator(op string) string {
 		return "threshold"
 	case "active_time":
 		return "activeTime"
+	case "counterRising":
+		return "counter"
 	default:
 		return op
 	}
@@ -554,6 +567,51 @@ func runRecipe(cfg *catalog.EffectiveConfig, working map[string]CurrentValue, pr
 			return res, skip, nil, err
 		}
 		return res, false, &StoredProcessor{Operator: r.Operator, Version: r.Version, StateJSON: stateJSON}, nil
+	case "counter", "counterRising", "counterFalling", "counterBoth":
+		// Räknare (passager, pumpstarter): räknar flanker på en
+		// boolesk-ingång (0/1 via bool-ingest eller threshold) med
+		// beständigt tillstånd. Utdata = kumulativt antal. Dagsantal
+		// och andra fönster härleds via historikfrågor, inte via
+		// väggklocka i operatorn.
+		if len(vals) != 1 {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one input", r.Operator)
+		}
+		if len(r.Outputs) != 1 {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one output", r.Operator)
+		}
+		key := r.Outputs[0]
+		var persisted functions.CounterState
+		versionReset := false
+		if prev, ok := proc[key]; ok {
+			if canonicalOperator(prev.Operator) != canonicalOperator(r.Operator) || prev.Version != r.Version {
+				versionReset = true
+			} else if len(prev.StateJSON) > 0 {
+				if err := json.Unmarshal(prev.StateJSON, &persisted); err != nil {
+					return recipeResult{}, false, nil, fmt.Errorf("operator %q: decode state: %w", r.Operator, err)
+				}
+			}
+		}
+		edge := "rising"
+		switch canonicalOperator(r.Operator) {
+		case "counterFalling":
+			edge = "falling"
+		case "counterBoth":
+			edge = "both"
+		}
+		next, _ := functions.CountEdge(persisted, vals[0].Value != 0, edge)
+		quality := vals[0].Quality
+		if versionReset {
+			quality = functions.QualityUncertain
+		}
+		stateJSON, err := json.Marshal(next)
+		if err != nil {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q: encode state: %w", r.Operator, err)
+		}
+		res, skip, _, err := mk(float64(next.Count), quality)
+		if err != nil || skip {
+			return res, skip, nil, err
+		}
+		return res, false, &StoredProcessor{Operator: r.Operator, Version: r.Version, StateJSON: stateJSON}, nil
 	default:
 		return recipeResult{}, false, nil, fmt.Errorf("unknown operator %q", r.Operator)
 	}
@@ -614,6 +672,14 @@ func validateRecipeStatic(cfg *catalog.EffectiveConfig, r catalog.Recipe) error 
 		}
 		return needParams("high", "low")
 	case "activeTime", "active_time":
+		if err := needInputs(1); err != nil {
+			return err
+		}
+		if len(r.Outputs) != 1 {
+			return fmt.Errorf("operator %q needs exactly one output", r.Operator)
+		}
+		return nil
+	case "counter", "counterRising", "counterFalling", "counterBoth":
 		if err := needInputs(1); err != nil {
 			return err
 		}

@@ -11,6 +11,7 @@ import (
 const (
 	flowURNdistance = "urn:oma:lwm2m:ext:3330"
 	flowURNtemp     = "urn:oma:lwm2m:ext:3303"
+	flowURNpresence = "urn:oma:lwm2m:ext:3200"
 )
 
 //go:fix inline
@@ -105,6 +106,16 @@ func tempObs(device string, v float64, at time.Time) things.Observation {
 	return things.Observation{
 		Signal:     things.ParseSignalID(device, "", flowURNtemp, "5700"),
 		Value:      new(v),
+		Quality:    things.QualityOK,
+		ObservedAt: at,
+		ReceivedAt: at,
+	}
+}
+
+func boolObs(device, object, resource string, v bool, at time.Time) things.Observation {
+	return things.Observation{
+		Signal:     things.ParseSignalID(device, "", object, resource),
+		BoolValue:  &v,
 		Quality:    things.QualityOK,
 		ObservedAt: at,
 		ReceivedAt: at,
@@ -275,7 +286,46 @@ func TestInvalidNeverReplaces(t *testing.T) {
 	}
 }
 
+func TestBoolIngestDirect(t *testing.T) {
+	cfg := catalog.EffectiveConfig{
+		Properties: map[string]things.Property{"presence": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s1", Object: flowURNpresence, Resource: "5500", Input: "presence"},
+		},
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	out, err := EvaluateBatchFlow(&cfg, nil, nil,
+		[]things.Observation{boolObs("s1", flowURNpresence, "5500", true, base)}, base, "m1", 1)
+	if err != nil {
+		t.Fatalf("flow: %v", err)
+	}
+	cur, ok := out.Updated["presence"]
+	if !ok || cur.Value == nil || *cur.Value != 1 {
+		t.Fatalf("presence=%+v, want current 1", out.Updated)
+	}
+	if len(out.History) != 1 || out.History[0].Value == nil || *out.History[0].Value != 1 ||
+		out.History[0].Quality != "ok" {
+		t.Fatalf("history=%+v, want one ok row with 1", out.History)
+	}
+	if len(out.Events) != 1 || out.Events[0].Value != 1 {
+		t.Fatalf("events=%+v, want one event with 1", out.Events)
+	}
+
+	current := mergeCurrent(nil, out)
+	later := base.Add(time.Minute)
+	out, err = EvaluateBatchFlow(&cfg, current, nil,
+		[]things.Observation{boolObs("s1", flowURNpresence, "5500", false, later)}, later, "m2", 1)
+	if err != nil {
+		t.Fatalf("flow: %v", err)
+	}
+	if got := *out.Updated["presence"].Value; got != 0 {
+		t.Fatalf("presence=%v, want current 0", got)
+	}
+}
+
 func TestMissingInputSkipsMean(t *testing.T) {
+
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{

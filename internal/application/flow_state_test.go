@@ -679,3 +679,75 @@ func TestOperatorAliasNoSpuriousReset(t *testing.T) {
 		}
 	}
 }
+
+func counterCfg() catalog.EffectiveConfig {
+	return catalog.EffectiveConfig{
+		Properties: map[string]things.Property{"door": {}, "passages": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s", Object: flowURNpresence, Resource: "5500", Input: "door"},
+		},
+		Recipes: []catalog.Recipe{
+			{Name: "count-passages", Operator: "counter", Version: "v1",
+				Inputs: []string{"door"}, Outputs: []string{"passages"}},
+		},
+	}
+}
+
+// Livscykel: första aktiva räknas, upprepad aktiv räknas inte, ny flank
+// efter inaktiv räknas igen. Tillståndet är versionerat och överlever
+// omstart via ProcStates utan dubbelräkning.
+func TestCounterLifecycle(t *testing.T) {
+	cfg := counterCfg()
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	current := map[string]CurrentValue{}
+	proc := map[string]StoredProcessor{}
+	round := func(v bool, at time.Time, id string) *FlowOutcome {
+		t.Helper()
+		out, err := EvaluateBatchFlow(&cfg, current, proc,
+			[]things.Observation{boolObs("s", flowURNpresence, "5500", v, at)}, at, id, 1)
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		current, proc = mergeCurrent(current, out), mergeProc(proc, out)
+		return out
+	}
+
+	if out := round(false, base, "m0"); *out.Updated["passages"].Value != 0 {
+		t.Fatalf("t0 passages=%v, want 0", *out.Updated["passages"].Value)
+	}
+	if out := round(true, base.Add(time.Minute), "m1"); *out.Updated["passages"].Value != 1 {
+		t.Fatalf("t1 passages=%v, want 1", *out.Updated["passages"].Value)
+	}
+	if out := round(true, base.Add(2*time.Minute), "m2"); *out.Updated["passages"].Value != 1 {
+		t.Fatalf("t2 passages=%v, want still 1", *out.Updated["passages"].Value)
+	}
+	if out := round(false, base.Add(3*time.Minute), "m3"); *out.Updated["passages"].Value != 1 {
+		t.Fatalf("t3 passages=%v, want still 1", *out.Updated["passages"].Value)
+	}
+	if out := round(true, base.Add(4*time.Minute), "m4"); *out.Updated["passages"].Value != 2 {
+		t.Fatalf("t4 passages=%v, want 2", *out.Updated["passages"].Value)
+	}
+
+	var st functions.CounterState
+	if err := json.Unmarshal(proc["passages"].StateJSON, &st); err != nil {
+		t.Fatalf("decode counter state: %v", err)
+	}
+	if st.Count != 2 || !st.LastActive {
+		t.Fatalf("persisted state=%+v, want {2 true}", st)
+	}
+
+	// Versionsbyte nollställer och flaggar uncertain i stället för att
+	// tyst återanvända främmande tillstånd.
+	cfg2 := counterCfg()
+	cfg2.Recipes[0].Version = "v2"
+	out, err := EvaluateBatchFlow(&cfg2, current, proc,
+		[]things.Observation{boolObs("s", flowURNpresence, "5500", true, base.Add(5*time.Minute))},
+		base.Add(5*time.Minute), "m5", 1)
+	if err != nil {
+		t.Fatalf("v2 round: %v", err)
+	}
+	if q := out.Updated["passages"].Quality; q != "uncertain" {
+		t.Fatalf("version reset quality=%q, want uncertain", q)
+	}
+}

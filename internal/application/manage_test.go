@@ -1197,3 +1197,173 @@ func TestManageUnlink(t *testing.T) {
 		t.Fatalf("second unlink err=%v, want not found", err)
 	}
 }
+
+// Bool-typerna som ren konfiguration: desk/lifebuoy (presence),
+// passage (räknare + dörr), pumpingstation (bool -> aktiv tid),
+// watermeter (volym + flaggor) och sewer (nivå + bräddningstid).
+func TestManageBoolTypes(t *testing.T) {
+	const (
+		dinURN = "urn:oma:lwm2m:ext:3200"
+		wmURN  = "urn:oma:lwm2m:ext:3424"
+	)
+	mgr, _, _, rt := mgmtSetup(t)
+	ctx := context.Background()
+	publish := func(spec catalog.TemplateSpec) {
+		t.Helper()
+		if err := mgr.PublishTemplate(ctx, spec); err != nil {
+			t.Fatalf("publish %s: %v", spec.Template.ID, err)
+		}
+	}
+	publish(catalog.TemplateSpec{Template: things.Template{
+		ID: "desk", Version: "v1", Required: []string{"presence"},
+	}})
+	publish(catalog.TemplateSpec{Template: things.Template{
+		ID: "lifebuoy", Version: "v1", Required: []string{"presence"},
+	}})
+	publish(catalog.TemplateSpec{
+		Template: things.Template{ID: "passage", Version: "v1", Required: []string{"door", "passages"}},
+		Recipes: []catalog.Recipe{{Name: "count", Operator: "counter", Version: "v1",
+			Inputs: []string{"door"}, Outputs: []string{"passages"}}},
+	})
+	publish(catalog.TemplateSpec{
+		Template: things.Template{ID: "pumpingstation", Version: "v1", Required: []string{"run", "runTime"}},
+		Recipes: []catalog.Recipe{{Name: "run-time", Operator: "activeTime", Version: "v1",
+			Inputs: []string{"run"}, Outputs: []string{"runTime"}}},
+	})
+	publish(catalog.TemplateSpec{Template: things.Template{
+		ID: "watermeter", Version: "v1", Required: []string{"volume", "leakage", "backflow", "fraud"},
+	}})
+	publish(catalog.TemplateSpec{
+		Template: things.Template{ID: "sewer", Version: "v1", Required: []string{"distance", "overflow", "overflowTime"}},
+		Recipes: []catalog.Recipe{{Name: "overflow-time", Operator: "activeTime", Version: "v1",
+			Inputs: []string{"overflow"}, Outputs: []string{"overflowTime"}}},
+	})
+
+	mkBoolThing := func(id, tmpl, prop, device string) catalog.ObjectSpec {
+		return catalog.ObjectSpec{
+			ThingID: id, TemplateID: tmpl, TemplateVersion: "v1",
+			Properties: map[string]things.Property{prop: {}},
+			Bindings: []things.Binding{
+				{DeviceID: device, Object: dinURN, Resource: "5500", Input: prop},
+			},
+		}
+	}
+	for _, obj := range []catalog.ObjectSpec{
+		mkBoolThing("desk-1", "desk", "presence", "s-desk"),
+		mkBoolThing("lifebuoy-1", "lifebuoy", "presence", "s-lifebuoy"),
+		{
+			ThingID: "passage-1", TemplateID: "passage", TemplateVersion: "v1",
+			Properties: map[string]things.Property{"door": {}, "passages": {}},
+			Bindings: []things.Binding{
+				{DeviceID: "s-pass", Object: dinURN, Resource: "5500", Input: "door"},
+			},
+		},
+		{
+			ThingID: "pump-1", TemplateID: "pumpingstation", TemplateVersion: "v1",
+			Properties: map[string]things.Property{"run": {}, "runTime": {}},
+			Bindings: []things.Binding{
+				{DeviceID: "s-pump", Object: dinURN, Resource: "5500", Input: "run"},
+			},
+		},
+		{
+			ThingID: "water-1", TemplateID: "watermeter", TemplateVersion: "v1",
+			Properties: map[string]things.Property{
+				"volume": {}, "leakage": {}, "backflow": {}, "fraud": {},
+			},
+			Bindings: []things.Binding{
+				{DeviceID: "s-wm", Object: wmURN, Resource: "1", Input: "volume"},
+				{DeviceID: "s-wm", Object: wmURN, Resource: "10", Input: "leakage"},
+				{DeviceID: "s-wm", Object: wmURN, Resource: "11", Input: "backflow"},
+				{DeviceID: "s-wm", Object: wmURN, Resource: "13", Input: "fraud"},
+			},
+		},
+		{
+			ThingID: "sewer-1", TemplateID: "sewer", TemplateVersion: "v1",
+			Properties: map[string]things.Property{
+				"distance": {}, "overflow": {}, "overflowTime": {},
+			},
+			Bindings: []things.Binding{
+				{DeviceID: "s-sewer", Object: rtDistURN, Resource: "5700", Input: "distance"},
+				{DeviceID: "s-sewer", Object: dinURN, Resource: "5500", Input: "overflow"},
+			},
+		},
+	} {
+		if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+			t.Fatalf("create %s: %v", obj.ThingID, err)
+		}
+	}
+
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	batch := func(id string, obs []things.Observation, at time.Time) {
+		t.Helper()
+		if _, err := rt.HandleBatch(ctx, "t", id, obs, at); err != nil {
+			t.Fatalf("batch %s: %v", id, err)
+		}
+	}
+	val := func(thing, prop string) float64 {
+		t.Helper()
+		sum, err := mgr.GetObject(ctx, "t", thing)
+		if err != nil {
+			t.Fatalf("get %s: %v", thing, err)
+		}
+		pv, ok := sum.Values[prop]
+		if !ok || pv.Value == nil {
+			t.Fatalf("%s.%s missing: %+v", thing, prop, sum.Values)
+		}
+		return *pv.Value
+	}
+
+	// Desk + lifebuoy: presence 1/0.
+	batch("m1", []things.Observation{rtBoolObs("s-desk", dinURN, "5500", true, base)}, base)
+	batch("m2", []things.Observation{rtBoolObs("s-lifebuoy", dinURN, "5500", false, base)}, base)
+	if got := val("desk-1", "presence"); got != 1 {
+		t.Fatalf("desk presence=%v, want 1", got)
+	}
+	if got := val("lifebuoy-1", "presence"); got != 0 {
+		t.Fatalf("lifebuoy presence=%v, want 0", got)
+	}
+
+	// Passage: true, true, false, true -> 1, 1, 1, 2.
+	batch("p1", []things.Observation{rtBoolObs("s-pass", dinURN, "5500", true, base)}, base)
+	batch("p2", []things.Observation{rtBoolObs("s-pass", dinURN, "5500", true, base.Add(time.Minute))}, base.Add(time.Minute))
+	batch("p3", []things.Observation{rtBoolObs("s-pass", dinURN, "5500", false, base.Add(2*time.Minute))}, base.Add(2*time.Minute))
+	batch("p4", []things.Observation{rtBoolObs("s-pass", dinURN, "5500", true, base.Add(3*time.Minute))}, base.Add(3*time.Minute))
+	if got := val("passage-1", "passages"); got != 2 {
+		t.Fatalf("passages=%v, want 2", got)
+	}
+	if got := val("passage-1", "door"); got != 1 {
+		t.Fatalf("door=%v, want 1", got)
+	}
+
+	// Pump: 90 s drift.
+	batch("pu1", []things.Observation{rtBoolObs("s-pump", dinURN, "5500", true, base)}, base)
+	batch("pu2", []things.Observation{rtBoolObs("s-pump", dinURN, "5500", false, base.Add(90*time.Second))}, base.Add(90*time.Second))
+	if got := val("pump-1", "runTime"); got != 90 {
+		t.Fatalf("runTime=%v, want 90", got)
+	}
+
+	// Watermeter: volym + läckflagga i samma rapport.
+	vol := 12.5
+	batch("w1", []things.Observation{
+		{
+			Signal: things.ParseSignalID("s-wm", "", wmURN, "1"), Value: &vol,
+			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base,
+		},
+		rtBoolObs("s-wm", wmURN, "10", true, base),
+		rtBoolObs("s-wm", wmURN, "11", false, base),
+		rtBoolObs("s-wm", wmURN, "13", false, base),
+	}, base)
+	if got := val("water-1", "volume"); got != 12.5 {
+		t.Fatalf("volume=%v, want 12.5", got)
+	}
+	if got := val("water-1", "leakage"); got != 1 {
+		t.Fatalf("leakage=%v, want 1", got)
+	}
+
+	// Sewer: bräddning 60 s via bool-ingest -> activeTime.
+	batch("s1", []things.Observation{rtBoolObs("s-sewer", dinURN, "5500", true, base)}, base)
+	batch("s2", []things.Observation{rtBoolObs("s-sewer", dinURN, "5500", false, base.Add(time.Minute))}, base.Add(time.Minute))
+	if got := val("sewer-1", "overflowTime"); got != 60 {
+		t.Fatalf("overflowTime=%v, want 60", got)
+	}
+}

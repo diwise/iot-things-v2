@@ -558,6 +558,16 @@ func rtDistObs(device string, v float64, at time.Time) things.Observation {
 	}
 }
 
+func rtBoolObs(device, object, resource string, v bool, at time.Time) things.Observation {
+	return things.Observation{
+		Signal:     things.ParseSignalID(device, "", object, resource),
+		BoolValue:  &v,
+		Quality:    things.QualityOK,
+		ObservedAt: at,
+		ReceivedAt: at,
+	}
+}
+
 type fakePublisher struct {
 	mu     sync.Mutex
 	events []pkgtypes.ThingValuesEventV1

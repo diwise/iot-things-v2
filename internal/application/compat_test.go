@@ -24,6 +24,7 @@ const (
 	compatLuxURN  = "urn:oma:lwm2m:ext:3301"
 	compatDistURN = "urn:oma:lwm2m:ext:3330"
 	compatAQURN   = "urn:oma:lwm2m:ext:3428"
+	compatDinURN  = "urn:oma:lwm2m:ext:3200"
 )
 
 func parseAgentPack(t *testing.T, payload string, ref time.Time) []things.Observation {
@@ -382,5 +383,26 @@ func TestCompatRepeatedObservationKeptInOrder(t *testing.T) {
 		if !b.Matches(obs[i].Signal) {
 			t.Fatalf("obs %d matchar inte temp-bindning: %+v", i, obs[i].Signal)
 		}
+	}
+}
+
+// Digital ingång (dörr/pump/närvaro): boolesk SenML-post blir en
+// observation med BoolValue som flödet mappar till 1/0.
+func TestCompatBoolDigitalInput(t *testing.T) {
+	ref := time.Date(2024, 7, 3, 12, 0, 0, 0, time.UTC)
+	obs := parseAgentPack(t, `[
+		{"bn":"door1/3200/","bt":1720000000,"n":"0","vs":"urn:oma:lwm2m:ext:3200"},
+		{"n":"5500","vb":true}
+	]`, ref)
+	if len(obs) != 1 {
+		t.Fatalf("observations=%d, want 1", len(obs))
+	}
+	o := obs[0]
+	if o.Value != nil || o.BoolValue == nil || !*o.BoolValue {
+		t.Fatalf("bool observation=%+v, want BoolValue true utan Value", o)
+	}
+	b := things.Binding{DeviceID: "door1", Object: compatDinURN, Resource: "5500", Input: "door"}
+	if !b.Matches(o.Signal) {
+		t.Fatalf("bool matchar inte din-bindning: %+v", o.Signal)
 	}
 }

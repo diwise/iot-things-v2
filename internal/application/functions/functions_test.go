@@ -334,3 +334,38 @@ func TestActiveTimeBackwardsClockAccumulatesZero(t *testing.T) {
 		t.Fatalf("start ska nollställas efter avaktivering: %+v", s)
 	}
 }
+
+func TestBoolToFloat(t *testing.T) {
+	if BoolToFloat(true) != 1 || BoolToFloat(false) != 0 {
+		t.Fatal("bool mappar inte till 1/0")
+	}
+}
+
+func TestCountEdge(t *testing.T) {
+	// Rising (default): första aktiva räknas, upprepad aktiv räknas inte.
+	s, counted := CountEdge(CounterState{}, true, "rising")
+	if !counted || s.Count != 1 {
+		t.Fatalf("first rising=%v %+v, want count 1", counted, s)
+	}
+	if s, counted = CountEdge(s, true, "rising"); counted || s.Count != 1 {
+		t.Fatalf("repeated active=%v %+v, want no count", counted, s)
+	}
+	if s, counted = CountEdge(s, false, "rising"); counted || s.Count != 1 {
+		t.Fatalf("falling with rising edge=%v %+v, want no count", counted, s)
+	}
+	if s, counted = CountEdge(s, true, "rising"); !counted || s.Count != 2 {
+		t.Fatalf("second rising=%v %+v, want count 2", counted, s)
+	}
+	// Falling: endast aktiv->inaktiv räknas.
+	s, counted = CountEdge(CounterState{LastActive: true}, false, "falling")
+	if !counted || s.Count != 1 {
+		t.Fatalf("falling=%v %+v, want count 1", counted, s)
+	}
+	// Both: varje övergång räknas.
+	s = CounterState{}
+	s, _ = CountEdge(s, true, "both")
+	s, counted = CountEdge(s, false, "both")
+	if !counted || s.Count != 2 {
+		t.Fatalf("both=%v %+v, want count 2", counted, s)
+	}
+}
