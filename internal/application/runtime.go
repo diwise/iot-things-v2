@@ -66,7 +66,9 @@ type RuntimeStore interface {
 	ListThingIDs(tenant string) []string
 	ListTenants() []string
 	AppendHistory(tenant, thingID string, h HistoryWrite) bool
-	History(tenant, thingID, prop string, from, to time.Time, limit int) []HistoryWrite
+	// History läser egenskapshistorik äldst först. Noll-tid betyder ingen
+	// gräns; limit > 0 kapar, offset > 0 hoppar över de äldsta raderna.
+	History(tenant, thingID, prop string, from, to time.Time, limit, offset int) []HistoryWrite
 	PendingEvents(tenant, thingID string) []FlowEvent
 	StorePending(tenant, thingID string, events []FlowEvent)
 	ClearPendingIDs(tenant, thingID string, ids []string)

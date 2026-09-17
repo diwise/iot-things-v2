@@ -240,9 +240,10 @@ func (s *MemHistoryStore) AppendIdempotent(rec HistoryRecord) bool {
 // List filtrerar på tenant/thing/prop (exakt matchning på prop om angiven;
 // tom propID betyder alla egenskaper) och på ObservedAt.
 // Noll-tid i from/to betyder ingen undre/övre gräns (inklusive gränser).
-// limit > 0 kapar resultatet (äldst först), annars returneras allt.
+// limit > 0 kapar resultatet (äldst först), offset > 0 hoppar över de
+// äldsta raderna, annars returneras allt.
 // Sorterat på ObservedAt stigande.
-func (s *MemHistoryStore) List(tenant, thingID, propID string, from, to time.Time, limit int) []HistoryRecord {
+func (s *MemHistoryStore) List(tenant, thingID, propID string, from, to time.Time, limit, offset int) []HistoryRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []HistoryRecord
@@ -274,6 +275,12 @@ func (s *MemHistoryStore) List(tenant, thingID, propID string, from, to time.Tim
 		}
 		return out[i].ObservedAt.Before(out[j].ObservedAt)
 	})
+	if offset > 0 {
+		if offset >= len(out) {
+			return nil
+		}
+		out = out[offset:]
+	}
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}

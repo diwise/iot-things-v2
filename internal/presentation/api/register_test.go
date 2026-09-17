@@ -521,3 +521,102 @@ func TestV0HistoryUnknownIs404(t *testing.T) {
 		t.Fatalf("cross-tenant overview=%d, want 404", rr.Code)
 	}
 }
+
+func doGET2(fn func(http.ResponseWriter, *http.Request), ctx context.Context, id, version, query string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/x?"+query, nil)
+	req = req.WithContext(ctx)
+	if id != "" {
+		req.SetPathValue("id", id)
+	}
+	if version != "" {
+		req.SetPathValue("version", version)
+	}
+	rr := httptest.NewRecorder()
+	fn(rr, req)
+	return rr
+}
+
+// Katalog: hämta enstaka mall/variant; okänd version ger 404.
+func TestV0GetTemplateVariant(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+
+	rr := doGET2(h.getTemplate, ctx, "wastebin", "v1", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get template: %d %s", rr.Code, rr.Body.String())
+	}
+	var tmpl catalog.TemplateSpec
+	if err := json.Unmarshal(rr.Body.Bytes(), &tmpl); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if tmpl.Template.ID != "wastebin" {
+		t.Fatalf("template=%+v", tmpl)
+	}
+	if rr := doGET2(h.getTemplate, ctx, "wastebin", "v9", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown template=%d, want 404", rr.Code)
+	}
+	rr = doGET2(h.getVariant, ctx, "wastebin-B", "v1", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("get variant: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doGET2(h.getVariant, ctx, "nope", "v1", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown variant=%d, want 404", rr.Code)
+	}
+	if rr := doGET2(h.getTemplate, context.Background(), "wastebin", "v1", ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated=%d, want 401", rr.Code)
+	}
+}
+
+// Sök + historik: nya filter och offset-parametrar.
+func TestV0SearchAndHistoryPaging(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr := doGET(h.searchThings, ctx, "", "name=soptunna")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search name: %d %s", rr.Code, rr.Body.String())
+	}
+	var found []application.ThingSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("search name=%+v, want 1", found)
+	}
+	rr = doGET(h.searchThings, ctx, "", "variant=wastebin-B&templateVersion=v1")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search variant: %d %s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("search variant=%+v, want 1", found)
+	}
+	rr = doGET(h.searchThings, ctx, "", "limit=1&offset=1")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search page: %d %s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("search offset past end=%+v, want empty", found)
+	}
+	if rr := doGET(h.searchThings, ctx, "", "offset=nope"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad offset=%d, want 400", rr.Code)
+	}
+
+	rr = doGET(h.getHistory, ctx, "bin-42", "limit=5&offset=2")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("history offset: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doGET(h.getHistory, ctx, "bin-42", "offset=nope"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad history offset=%d, want 400", rr.Code)
+	}
+}

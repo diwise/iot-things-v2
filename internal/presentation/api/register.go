@@ -51,6 +51,8 @@ type Manager interface {
 	PublishVariant(ctx context.Context, spec catalog.VariantSpec) error
 	ListTemplates(ctx context.Context) []catalog.TemplateSpec
 	ListVariants(ctx context.Context) []catalog.VariantSpec
+	GetTemplate(ctx context.Context, id, version string) (catalog.TemplateSpec, error)
+	GetVariant(ctx context.Context, id, version string) (catalog.VariantSpec, error)
 	PreviewObject(ctx context.Context, tenant string, obj catalog.ObjectSpec) (*catalog.EffectiveConfig, error)
 	CreateObject(ctx context.Context, tenant string, obj catalog.ObjectSpec) (*catalog.EffectiveConfig, error)
 	UpdateObject(ctx context.Context, tenant string, obj catalog.ObjectSpec, revision int64) (*catalog.EffectiveConfig, error)
@@ -59,9 +61,9 @@ type Manager interface {
 	UpgradeObject(ctx context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string, force bool, revision int64) (catalog.Diff, []string, error)
 	DeleteObject(ctx context.Context, tenant, thingID string) error
 	MoveObject(ctx context.Context, tenant, childID, newParentID string, revision int64) error
-	History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit int) ([]application.HistoryWrite, error)
+	History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) ([]application.HistoryWrite, error)
 	GetObject(ctx context.Context, tenant, thingID string) (application.ThingSummary, error)
-	SearchObjects(ctx context.Context, tenant, templateID string, limit int) []application.ThingSummary
+	SearchObjects(ctx context.Context, tenant string, filter application.SearchFilter) []application.ThingSummary
 	Overview(ctx context.Context, tenant, thingID string) (application.Overview, error)
 }
 
@@ -93,7 +95,9 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, poli
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(ReadThings))
 			r.Get("templates", h.listTemplates)
+			r.Get("templates/{id}/{version}", h.getTemplate)
 			r.Get("variants", h.listVariants)
+			r.Get("variants/{id}/{version}", h.getVariant)
 		})
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(CreateThings))
@@ -247,6 +251,32 @@ func (h *handler) listVariants(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, h.mgr.ListVariants(r.Context()))
 }
 
+func (h *handler) getTemplate(w http.ResponseWriter, r *http.Request) {
+	if _, err := tenant(r, ReadThings); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	spec, err := h.mgr.GetTemplate(r.Context(), r.PathValue("id"), r.PathValue("version"))
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, spec)
+}
+
+func (h *handler) getVariant(w http.ResponseWriter, r *http.Request) {
+	if _, err := tenant(r, ReadThings); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	spec, err := h.mgr.GetVariant(r.Context(), r.PathValue("id"), r.PathValue("version"))
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, spec)
+}
+
 func (h *handler) createThing(w http.ResponseWriter, r *http.Request) {
 	t, err := tenant(r, CreateThings)
 	if err != nil {
@@ -279,12 +309,26 @@ func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
+	q := r.URL.Query()
 	limit, err := queryLimit(r, "limit")
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, h.mgr.SearchObjects(r.Context(), t, r.URL.Query().Get("template"), limit))
+	offset, err := queryLimit(r, "offset")
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	filter := application.SearchFilter{
+		TemplateID:      q.Get("template"),
+		TemplateVersion: q.Get("templateVersion"),
+		VariantID:       q.Get("variant"),
+		NameContains:    q.Get("name"),
+		Limit:           limit,
+		Offset:          offset,
+	}
+	writeJSON(w, http.StatusOK, h.mgr.SearchObjects(r.Context(), t, filter))
 }
 
 func (h *handler) getThing(w http.ResponseWriter, r *http.Request) {
@@ -514,6 +558,11 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
+	offset, err := queryLimit(r, "offset")
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
 	from, err := queryTime(q.Get("from"))
 	if err != nil {
 		writeAPIError(w, err)
@@ -524,7 +573,7 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	entries, err := h.mgr.History(r.Context(), t, r.PathValue("id"), q.Get("property"), from, to, limit)
+	entries, err := h.mgr.History(r.Context(), t, r.PathValue("id"), q.Get("property"), from, to, limit, offset)
 	if err != nil {
 		writeAPIError(w, err)
 		return

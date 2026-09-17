@@ -237,7 +237,7 @@ func TestAdapterHistoryLateAndEmptyProp(t *testing.T) {
 	if !a.AppendHistory("t", "bin-42", cur) {
 		t.Fatal("current append must store")
 	}
-	all := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0)
+	all := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0)
 	if len(all) != 2 {
 		t.Fatalf("empty prop must return all, got %d", len(all))
 	}

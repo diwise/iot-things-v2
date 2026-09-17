@@ -261,7 +261,7 @@ func (f *fakeStore) historyCount(tenant, thingID string) int {
 	return n
 }
 
-func (f *fakeStore) History(tenant, thingID, prop string, from, to time.Time, limit int) []HistoryWrite {
+func (f *fakeStore) History(tenant, thingID, prop string, from, to time.Time, limit, offset int) []HistoryWrite {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []HistoryWrite
@@ -289,6 +289,12 @@ func (f *fakeStore) History(tenant, thingID, prop string, from, to time.Time, li
 		}
 		return out[i].ObservedAt.Before(out[j].ObservedAt)
 	})
+	if offset > 0 {
+		if offset >= len(out) {
+			return nil
+		}
+		out = out[offset:]
+	}
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}

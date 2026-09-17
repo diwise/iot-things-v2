@@ -124,8 +124,8 @@ func (a *RuntimeAdapter) AppendHistory(tenant, thingID string, h application.His
 	})
 }
 
-func (a *RuntimeAdapter) History(tenant, thingID, prop string, from, to time.Time, limit int) []application.HistoryWrite {
-	recs := a.S.History.List(tenant, thingID, prop, from, to, limit)
+func (a *RuntimeAdapter) History(tenant, thingID, prop string, from, to time.Time, limit, offset int) []application.HistoryWrite {
+	recs := a.S.History.List(tenant, thingID, prop, from, to, limit, offset)
 	out := make([]application.HistoryWrite, 0, len(recs))
 	for _, r := range recs {
 		out = append(out, application.HistoryWrite{

@@ -98,7 +98,7 @@ func TestHistoryAppendIdempotentAndList(t *testing.T) {
 	if !s.AppendIdempotent(otherQ) {
 		t.Fatal("annan kvalitet ska ge ny rad")
 	}
-	got := s.List("acme", "t1", "temp", time.Time{}, time.Time{}, 0)
+	got := s.List("acme", "t1", "temp", time.Time{}, time.Time{}, 0, 0)
 	if len(got) != 4 {
 		t.Fatalf("väntat 4 rader, fick %d", len(got))
 	}
@@ -111,11 +111,11 @@ func TestHistoryAppendIdempotentAndList(t *testing.T) {
 	if !s.AppendIdempotent(later) {
 		t.Fatal("senare rad ska läggas till")
 	}
-	filtered := s.List("acme", "t1", "temp", base.Add(30*time.Minute), time.Time{}, 0)
+	filtered := s.List("acme", "t1", "temp", base.Add(30*time.Minute), time.Time{}, 0, 0)
 	if len(filtered) != 1 {
 		t.Fatalf("väntat 1 filtrerad rad, fick %d", len(filtered))
 	}
-	limited := s.List("acme", "t1", "temp", time.Time{}, time.Time{}, 2)
+	limited := s.List("acme", "t1", "temp", time.Time{}, time.Time{}, 2, 0)
 	if len(limited) != 2 {
 		t.Fatalf("väntat limit 2, fick %d", len(limited))
 	}
@@ -292,10 +292,10 @@ func TestTenantIsolationThingAndHistory(t *testing.T) {
 		ObservedAt: base, ReceivedAt: base, Value: new(float64(1)),
 		Quality: "ok", Source: "s1", MessageID: "m1",
 	})
-	if got := hs.List("t2", "thing-1", "temp", time.Time{}, time.Time{}, 0); len(got) != 0 {
+	if got := hs.List("t2", "thing-1", "temp", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("historik i annan tenant ska vara tom, fick %+v", got)
 	}
-	if got := hs.List("t1", "thing-1", "other-prop", time.Time{}, time.Time{}, 0); len(got) != 0 {
+	if got := hs.List("t1", "thing-1", "other-prop", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("fel property ska ge tomt resultat, fick %+v", got)
 	}
 }
@@ -370,10 +370,10 @@ func TestHistoryEmptyPropReturnsAll(t *testing.T) {
 			t.Fatalf("append %s ska lyckas", prop)
 		}
 	}
-	if got := s.List("acme", "bin-42", "", time.Time{}, time.Time{}, 0); len(got) != 3 {
+	if got := s.List("acme", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 3 {
 		t.Fatalf("tom propID ska ge alla 3 rader, fick %d", len(got))
 	}
-	if got := s.List("acme", "bin-42", "distance", time.Time{}, time.Time{}, 0); len(got) != 1 {
+	if got := s.List("acme", "bin-42", "distance", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("filtrerad prop ska ge 1 rad, fick %d", len(got))
 	}
 }
@@ -390,7 +390,7 @@ func TestHistoryLateRoundTrip(t *testing.T) {
 	if !s.AppendIdempotent(rec) {
 		t.Fatal("append ska lyckas")
 	}
-	got := s.List("acme", "t1", "temp", time.Time{}, time.Time{}, 0)
+	got := s.List("acme", "t1", "temp", time.Time{}, time.Time{}, 0, 0)
 	if len(got) != 1 || !got[0].Late {
 		t.Fatalf("Late tappades: %+v", got)
 	}
@@ -416,7 +416,7 @@ func TestHistoryNegZeroDedup(t *testing.T) {
 	if s.AppendIdempotent(mk(neg)) {
 		t.Fatal("-0 ska dedupliceras mot 0 (samma som pg)")
 	}
-	if got := s.List("acme", "t1", "p", time.Time{}, time.Time{}, 0); len(got) != 1 {
+	if got := s.List("acme", "t1", "p", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("rader=%d, want 1", len(got))
 	}
 }
@@ -477,7 +477,7 @@ func TestHistorySourceTieBreak(t *testing.T) {
 			t.Fatalf("append %s", src)
 		}
 	}
-	got := s.List("t", "x", "p", time.Time{}, time.Time{}, 0)
+	got := s.List("t", "x", "p", time.Time{}, time.Time{}, 0, 0)
 	if len(got) != 2 || got[0].Source != "s-a" || got[1].Source != "s-b" {
 		t.Fatalf("käll-tie-break saknas: %+v", got)
 	}

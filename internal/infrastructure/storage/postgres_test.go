@@ -111,7 +111,7 @@ func TestPostgresCommitBatchAtomic(t *testing.T) {
 	if a.CommitBatch("t", "gauge-1", 6, st, hist, pending) {
 		t.Fatal("conflicting fence must fail")
 	}
-	if got := a.History("t", "gauge-1", "", time.Time{}, time.Time{}, 0); len(got) != 0 {
+	if got := a.History("t", "gauge-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("history=%d after failed commit, want 0", len(got))
 	}
 	if pending := a.PendingEvents("t", "gauge-1"); len(pending) != 0 {
@@ -120,7 +120,7 @@ func TestPostgresCommitBatchAtomic(t *testing.T) {
 	if !a.CommitBatch("t", "gauge-1", 7, st, hist, pending) {
 		t.Fatal("matching fence must commit")
 	}
-	if got := a.History("t", "gauge-1", "", time.Time{}, time.Time{}, 0); len(got) != 1 {
+	if got := a.History("t", "gauge-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("history=%d after commit, want 1", len(got))
 	}
 	if pending := a.PendingEvents("t", "gauge-1"); len(pending) != 1 {
@@ -154,13 +154,13 @@ func TestPostgresHistoryDedup(t *testing.T) {
 	if a.AppendHistory("t", "room-a", nilHW) {
 		t.Fatal("nil duplicate must dedup")
 	}
-	if got := a.History("t", "room-a", "temperature.window", time.Time{}, time.Time{}, 0); len(got) != 2 {
+	if got := a.History("t", "room-a", "temperature.window", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
 		t.Fatalf("history=%d, want 2", len(got))
 	}
-	if got := a.History("t", "room-a", "", at, at, 0); len(got) != 1 {
+	if got := a.History("t", "room-a", "", at, at, 0, 0); len(got) != 1 {
 		t.Fatalf("ranged history=%d, want 1", len(got))
 	}
-	if got := a.History("t", "room-a", "", time.Time{}, time.Time{}, 1); len(got) != 1 {
+	if got := a.History("t", "room-a", "", time.Time{}, time.Time{}, 1, 0); len(got) != 1 {
 		t.Fatalf("limited history=%d, want 1", len(got))
 	}
 }
@@ -312,7 +312,7 @@ func TestPostgresRuntimeEndToEnd(t *testing.T) {
 	if len(out) != 1 || len(out[0].Outcome.Events) != 3 {
 		t.Fatalf("outcome=%+v", out)
 	}
-	if got := a.History("t", "bin-42", "fillRate", time.Time{}, time.Time{}, 0); len(got) != 1 {
+	if got := a.History("t", "bin-42", "fillRate", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("fillRate history=%d, want 1", len(got))
 	}
 	// Omstart: nytt Runtime över samma PgStore.
@@ -324,7 +324,7 @@ func TestPostgresRuntimeEndToEnd(t *testing.T) {
 	if !dup[0].Duplicate {
 		t.Fatal("dedup must survive restart")
 	}
-	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0); len(got) != 3 {
+	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 3 {
 		t.Fatalf("history=%d, want 3 (no double count)", len(got))
 	}
 	pub := &pgStubPublisher{}
@@ -398,7 +398,7 @@ func TestPostgresCrossInstanceConcurrency(t *testing.T) {
 		t.Fatal("thing missing")
 	}
 	_ = st
-	hist := a.History("t", "gauge-1", "distance", time.Time{}, time.Time{}, 0)
+	hist := a.History("t", "gauge-1", "distance", time.Time{}, time.Time{}, 0, 0)
 	if len(hist) != 10 {
 		t.Fatalf("history=%d, want 10 (no lost writes)", len(hist))
 	}
@@ -437,7 +437,7 @@ func TestPostgresHistoryLateRoundTrip(t *testing.T) {
 	if !a.AppendHistory("t", "bin-42", cur) {
 		t.Fatal("current append must store")
 	}
-	all := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0)
+	all := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0)
 	if len(all) != 2 {
 		t.Fatalf("empty prop must return all, got %d", len(all))
 	}
@@ -481,7 +481,7 @@ func TestPostgresHistoryNullVsNaN(t *testing.T) {
 	if a.AppendHistory("t", "thing-1", nanHW) {
 		t.Fatal("NaN duplicate must dedup")
 	}
-	if got := a.History("t", "thing-1", "p", time.Time{}, time.Time{}, 0); len(got) != 2 {
+	if got := a.History("t", "thing-1", "p", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
 		t.Fatalf("history=%d, want 2 (nil + NaN distinct)", len(got))
 	}
 }

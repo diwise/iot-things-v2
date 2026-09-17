@@ -35,7 +35,8 @@
 - [x] H1-H10 (minneslager + API-filter; DB-constraint återstår)
 - [x] C1-C10 (operatorer + regler; quality-tabell per operator återstår K1)
 - [x] L1-L7 (regler + minnes-outbox + PostgreSQL-PgStore med samma protokolltester; DLX/ack-verifiering i messaging-lib återstår), L8-L10 delvis
-- [x] P10-P13 delvis (kontrakt + health + thing/history/children; katalog-CRUD/sök/djup återstår)
+- [x] P1-P9 delvis: katalog publish/list/get enstaka (immutable, ingen update/delete), sak-CRUD, sökning med filter (mall/version/variant/namn) + limit/offset, historik med egenskap + from/to-intervall + limit/offset; underträd/djupgräns återstår
+- [x] P10-P13 delvis (kontrakt + health + thing/history/children; djup återstår)
 - [x] G1-G6, G8-G9 (kärna testbar utan broker/DB); G7 delvis (slog utan hemligheter, metrics/tracing återstår)
 - [x] E1 (fixtures); E2-E7 påbörjade (E3 flöde i engine, E4 minnespersistens; transportadapter återstår)
 - [x] A1/A3-A7 (struktur); A2/A8-A29 delvis via enhetstester (full E2E återstår)

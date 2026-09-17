@@ -86,6 +86,25 @@ func (m *Manager) ListVariants(_ context.Context) []catalog.VariantSpec {
 	return m.cat.ListVariants()
 }
 
+// GetTemplate läser en publicerad mallversion. Okänd version ger ErrNotFound.
+// Publicerade versioner är oföränderliga: ingen uppdatering/borttagning finns.
+func (m *Manager) GetTemplate(_ context.Context, id, version string) (catalog.TemplateSpec, error) {
+	spec, ok := m.cat.GetTemplate(id, version)
+	if !ok {
+		return catalog.TemplateSpec{}, fmt.Errorf("%w: template %s/%s", things.ErrNotFound, id, version)
+	}
+	return spec, nil
+}
+
+// GetVariant läser en publicerad variantversion. Okänd version ger ErrNotFound.
+func (m *Manager) GetVariant(_ context.Context, id, version string) (catalog.VariantSpec, error) {
+	spec, ok := m.cat.GetVariant(id, version)
+	if !ok {
+		return catalog.VariantSpec{}, fmt.Errorf("%w: variant %s/%s", things.ErrNotFound, id, version)
+	}
+	return spec, nil
+}
+
 // PreviewObject kompilerar utan att lagra: effektiv konfiguration med
 // paramursprung före skapande eller ändring.
 func (m *Manager) PreviewObject(_ context.Context, tenant string, obj catalog.ObjectSpec) (*catalog.EffectiveConfig, error) {
@@ -258,12 +277,13 @@ func (m *Manager) MoveObject(_ context.Context, tenant, childID, newParentID str
 
 // History läser tidsbegränsad egenskapshistorik (tom prop = alla).
 // Okänt thing ger ErrNotFound (404) i stället för tom 200-lista så att
-// tenant-isolering inte läcker via statuskoder.
-func (m *Manager) History(_ context.Context, tenant, thingID, prop string, from, to time.Time, limit int) ([]HistoryWrite, error) {
+// tenant-isolering inte läcker via statuskoder. limit > 0 kapar äldst
+// först, offset > 0 hoppar över de äldsta raderna (paging).
+func (m *Manager) History(_ context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) ([]HistoryWrite, error) {
 	if _, ok := m.store.LoadThing(tenant, thingID); !ok {
 		return nil, fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
 	}
-	return m.store.History(tenant, thingID, prop, from, to, limit), nil
+	return m.store.History(tenant, thingID, prop, from, to, limit, offset), nil
 }
 
 // GetObject läser en sammanfattning med aktuella värden.
@@ -279,8 +299,20 @@ func (m *Manager) GetObject(_ context.Context, tenant, thingID string) (ThingSum
 	return summarize(tenant, thingID, cfg, st), nil
 }
 
-// SearchObjects listar saker för tenant, valfritt filtrerat på mall.
-func (m *Manager) SearchObjects(_ context.Context, tenant, templateID string, limit int) []ThingSummary {
+// SearchFilter styr saklistning: exakta matchningar på mall/variant samt
+// skiftlägesokänslig delsträng på namn. Tomma fält filtrerar inget.
+// Limit > 0 kapar, Offset > 0 hoppar över de första (sorterat på thing-ID).
+type SearchFilter struct {
+	TemplateID      string
+	TemplateVersion string
+	VariantID       string
+	NameContains    string
+	Limit           int
+	Offset          int
+}
+
+// SearchObjects listar saker för tenant enligt filter, sorterat på thing-ID.
+func (m *Manager) SearchObjects(_ context.Context, tenant string, f SearchFilter) []ThingSummary {
 	var out []ThingSummary
 	for _, id := range m.store.ListThingIDs(tenant) {
 		st, ok := m.store.LoadThing(tenant, id)
@@ -291,14 +323,29 @@ func (m *Manager) SearchObjects(_ context.Context, tenant, templateID string, li
 		if err != nil {
 			continue
 		}
-		if templateID != "" && cfg.TemplateID != templateID {
+		if f.TemplateID != "" && cfg.TemplateID != f.TemplateID {
+			continue
+		}
+		if f.TemplateVersion != "" && cfg.TemplateVersion != f.TemplateVersion {
+			continue
+		}
+		if f.VariantID != "" && cfg.VariantID != f.VariantID {
+			continue
+		}
+		if f.NameContains != "" && !strings.Contains(strings.ToLower(cfg.Name), strings.ToLower(f.NameContains)) {
 			continue
 		}
 		out = append(out, summarize(tenant, id, cfg, st))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ThingID < out[j].ThingID })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
+	if f.Offset > 0 {
+		if f.Offset >= len(out) {
+			return nil
+		}
+		out = out[f.Offset:]
+	}
+	if f.Limit > 0 && len(out) > f.Limit {
+		out = out[:f.Limit]
 	}
 	return out
 }

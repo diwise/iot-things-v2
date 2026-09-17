@@ -115,7 +115,7 @@ func TestManageBinFlow(t *testing.T) {
 	if sum.ParamSources["sensorToBottom"] != things.ParamSourceThing {
 		t.Fatalf("param sources=%+v", sum.ParamSources)
 	}
-	hist, err := mgr.History(ctx, "t", "bin-42", "fillRate", time.Time{}, time.Time{}, 10)
+	hist, err := mgr.History(ctx, "t", "bin-42", "fillRate", time.Time{}, time.Time{}, 10, 0)
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
@@ -500,13 +500,13 @@ func TestManageSearchHistoryTenants(t *testing.T) {
 	if _, err := mgr.CreateObject(ctx, "t", roomObj); err != nil {
 		t.Fatalf("create room: %v", err)
 	}
-	if got := mgr.SearchObjects(ctx, "t", "", 0); len(got) != 2 {
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{}); len(got) != 2 {
 		t.Fatalf("search all=%d, want 2", len(got))
 	}
-	if got := mgr.SearchObjects(ctx, "t", "wastebin", 0); len(got) != 1 {
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{TemplateID: "wastebin"}); len(got) != 1 {
 		t.Fatalf("search wastebin=%d, want 1", len(got))
 	}
-	if got := mgr.SearchObjects(ctx, "t", "", 1); len(got) != 1 {
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Limit: 1}); len(got) != 1 {
 		t.Fatalf("search limit=%d, want 1", len(got))
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -518,7 +518,7 @@ func TestManageSearchHistoryTenants(t *testing.T) {
 		}
 	}
 	// Tre rundor -> tre distansrader (olika mättid/värde).
-	gotHist, err := mgr.History(ctx, "t", "bin-42", "distance", time.Time{}, time.Time{}, 0)
+	gotHist, err := mgr.History(ctx, "t", "bin-42", "distance", time.Time{}, time.Time{}, 0, 0)
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
@@ -526,14 +526,14 @@ func TestManageSearchHistoryTenants(t *testing.T) {
 		t.Fatalf("distance history=%d, want 3", len(gotHist))
 	}
 	// Tidsfönster över två rundor x tre egenskaper = 6 rader.
-	gotHist, err = mgr.History(ctx, "t", "bin-42", "", base.Add(time.Minute), base.Add(2*time.Minute), 0)
+	gotHist, err = mgr.History(ctx, "t", "bin-42", "", base.Add(time.Minute), base.Add(2*time.Minute), 0, 0)
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
 	if len(gotHist) != 6 {
 		t.Fatalf("ranged history=%d, want 6", len(gotHist))
 	}
-	gotHist, err = mgr.History(ctx, "t", "bin-42", "", time.Time{}, time.Time{}, 2)
+	gotHist, err = mgr.History(ctx, "t", "bin-42", "", time.Time{}, time.Time{}, 2, 0)
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
@@ -556,7 +556,7 @@ func TestManageHistoryUnknownThingIsNotFound(t *testing.T) {
 	mgr, _, _, _ := mgmtSetup(t)
 	ctx := context.Background()
 	mgmtWastebin(t, mgr)
-	if _, err := mgr.History(ctx, "t", "missing", "", time.Time{}, time.Time{}, 0); err == nil {
+	if _, err := mgr.History(ctx, "t", "missing", "", time.Time{}, time.Time{}, 0, 0); err == nil {
 		t.Fatal("history for unknown thing must fail")
 	} else if !errors.Is(err, things.ErrNotFound) {
 		t.Fatalf("history unknown err=%v, want not found", err)
@@ -580,7 +580,7 @@ func TestManageLateHistoryFlag(t *testing.T) {
 	if _, err := rt.HandleBatch(ctx, "t", "m2", []things.Observation{rtDistObs("milesight:214", 0.10, late)}, base.Add(time.Minute)); err != nil {
 		t.Fatalf("late batch: %v", err)
 	}
-	hist, err := mgr.History(ctx, "t", "bin-42", "distance", time.Time{}, time.Time{}, 0)
+	hist, err := mgr.History(ctx, "t", "bin-42", "distance", time.Time{}, time.Time{}, 0, 0)
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
@@ -812,5 +812,109 @@ func TestManageOverviewCrossTenantIsNotFound(t *testing.T) {
 	}
 	if _, err := mgr.Overview(ctx, "other", "building-a"); err == nil {
 		t.Fatal("cross-tenant overview must fail")
+	}
+}
+
+// Historik-paging: offset hoppar över de äldsta raderna (äldst först).
+func TestManageHistoryOffset(t *testing.T) {
+	mgr, _, _, rt := mgmtSetup(t)
+	ctx := context.Background()
+	mgmtWastebin(t, mgr)
+	if _, err := mgr.CreateObject(ctx, "t", mgmtBinObject()); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	for i := range 3 {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if _, err := rt.HandleBatch(ctx, "t", fmt.Sprintf("m%d", i),
+			[]things.Observation{rtDistObs("milesight:214", 0.3+float64(i)*0.1, at)}, at); err != nil {
+			t.Fatalf("batch: %v", err)
+		}
+	}
+	all, err := mgr.History(ctx, "t", "bin-42", "distance", time.Time{}, time.Time{}, 0, 0)
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("history=%d, want 3", len(all))
+	}
+	page, err := mgr.History(ctx, "t", "bin-42", "distance", time.Time{}, time.Time{}, 1, 1)
+	if err != nil {
+		t.Fatalf("history page: %v", err)
+	}
+	if len(page) != 1 || page[0].Value == nil || *page[0].Value < 0.399 || *page[0].Value > 0.401 {
+		t.Fatalf("paged history=%+v, want middle row 0.4", page)
+	}
+	if got, err := mgr.History(ctx, "t", "bin-42", "distance", time.Time{}, time.Time{}, 0, 9); err != nil || len(got) != 0 {
+		t.Fatalf("offset past end=%+v err=%v, want empty", got, err)
+	}
+}
+
+// Saklistning: filter på mall/version/variant/namn + limit/offset.
+func TestManageSearchFilterAndPaging(t *testing.T) {
+	mgr, _, _, _ := mgmtSetup(t)
+	ctx := context.Background()
+	mgmtWastebin(t, mgr)
+	mgmtRooms(t, mgr)
+	if _, err := mgr.CreateObject(ctx, "t", mgmtBinObject()); err != nil {
+		t.Fatalf("create bin: %v", err)
+	}
+	roomObj := catalog.ObjectSpec{
+		ThingID: "room-a", Tenant: "t", Name: "Kontorslandskap A",
+		TemplateID: "room", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"temperature.window": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s1", Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
+		},
+	}
+	if _, err := mgr.CreateObject(ctx, "t", roomObj); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{NameContains: "SOPTUNNA"}); len(got) != 1 || got[0].ThingID != "bin-42" {
+		t.Fatalf("name filter=%+v, want bin-42", got)
+	}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{VariantID: "wastebin-B"}); len(got) != 1 || got[0].ThingID != "bin-42" {
+		t.Fatalf("variant filter=%+v, want bin-42", got)
+	}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{TemplateVersion: "v1"}); len(got) != 2 {
+		t.Fatalf("version filter=%d, want 2", len(got))
+	}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{TemplateID: "room", NameContains: "kontors"}); len(got) != 1 {
+		t.Fatalf("combined filter=%d, want 1", len(got))
+	}
+	first := mgr.SearchObjects(ctx, "t", SearchFilter{Limit: 1})
+	second := mgr.SearchObjects(ctx, "t", SearchFilter{Limit: 1, Offset: 1})
+	if len(first) != 1 || len(second) != 1 || first[0].ThingID == second[0].ThingID {
+		t.Fatalf("paging first=%+v second=%+v, want distinct pages", first, second)
+	}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Offset: 9}); len(got) != 0 {
+		t.Fatalf("offset past end=%d, want 0", len(got))
+	}
+}
+
+// Katalogläsning: enstaka mall/variant, okänd version ger NotFound.
+func TestManageGetTemplateVariant(t *testing.T) {
+	mgr, _, _, _ := mgmtSetup(t)
+	ctx := context.Background()
+	mgmtWastebin(t, mgr)
+	tmpl, err := mgr.GetTemplate(ctx, "wastebin", "v1")
+	if err != nil {
+		t.Fatalf("get template: %v", err)
+	}
+	if tmpl.Template.ID != "wastebin" || len(tmpl.Recipes) != 2 {
+		t.Fatalf("template=%+v", tmpl)
+	}
+	variant, err := mgr.GetVariant(ctx, "wastebin-B", "v1")
+	if err != nil {
+		t.Fatalf("get variant: %v", err)
+	}
+	if variant.Variant.TemplateID != "wastebin" {
+		t.Fatalf("variant=%+v", variant)
+	}
+	if _, err := mgr.GetTemplate(ctx, "wastebin", "v9"); !errors.Is(err, things.ErrNotFound) {
+		t.Fatalf("unknown template err=%v, want not found", err)
+	}
+	if _, err := mgr.GetVariant(ctx, "nope", "v1"); !errors.Is(err, things.ErrNotFound) {
+		t.Fatalf("unknown variant err=%v, want not found", err)
 	}
 }

@@ -237,7 +237,7 @@ func (s *PgStore) AppendHistory(tenant, thingID string, h application.HistoryWri
 	return err == nil && tag.RowsAffected() == 1
 }
 
-func (s *PgStore) History(tenant, thingID, prop string, from, to time.Time, limit int) []application.HistoryWrite {
+func (s *PgStore) History(tenant, thingID, prop string, from, to time.Time, limit, offset int) []application.HistoryWrite {
 	ctx, cancel := s.ctx()
 	defer cancel()
 	query := `SELECT property_id, observed_at, received_at, value, quality, source, message_id, late
@@ -258,6 +258,9 @@ func (s *PgStore) History(tenant, thingID, prop string, from, to time.Time, limi
 	query += ` ORDER BY observed_at, received_at, source`
 	if limit > 0 {
 		query += fmt.Sprintf(` LIMIT %d`, limit)
+	}
+	if offset > 0 {
+		query += fmt.Sprintf(` OFFSET %d`, offset)
 	}
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
