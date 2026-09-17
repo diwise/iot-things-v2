@@ -1422,16 +1422,16 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if added != 19 || skipped != 0 {
-		t.Fatalf("seed added=%d skipped=%d, want 19/0", added, skipped)
+	if added != 20 || skipped != 0 {
+		t.Fatalf("seed added=%d skipped=%d, want 20/0", added, skipped)
 	}
 	// Idempotent: andra seedningen skippar allt.
 	added, skipped, err = mgr.SeedCatalog(ctx, seed)
 	if err != nil {
 		t.Fatalf("reseed: %v", err)
 	}
-	if added != 0 || skipped != 19 {
-		t.Fatalf("reseed added=%d skipped=%d, want 0/19", added, skipped)
+	if added != 0 || skipped != 20 {
+		t.Fatalf("reseed added=%d skipped=%d, want 0/20", added, skipped)
 	}
 
 	bind := func(device, object, resource, input string) things.Binding {
@@ -2008,5 +2008,133 @@ func TestManageGreenhouseTanks(t *testing.T) {
 	// Kategorisökning hittar båda tankarna.
 	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Category: "tank"}); len(got) != 2 {
 		t.Fatalf("tank search=%d, want 2", len(got))
+	}
+}
+
+// Primary: mallens primaryProperty upplöst mot aktuella värden (GUI:ns
+// huvuddata). Nil utan primaryProperty eller utan aktiverad egenskap,
+// följer nya observationer.
+func TestManagePrimaryResolved(t *testing.T) {
+	mgr, _, _, rt := mgmtSetup(t)
+	ctx := context.Background()
+	if err := mgr.PublishTemplate(ctx, catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "wastebin", Version: "v1",
+			Required:        []string{"distance", "level", "fillRate"},
+			Category:        "wastebin",
+			PrimaryProperty: "fillRate",
+		},
+		ParamDefaults: map[string]float64{"usableHeight": 1.0, "sensorToBottom": 1.5},
+		Overridable:   []string{"sensorToBottom"},
+		Recipes: []catalog.Recipe{
+			{Name: "wastebin-level", Operator: "distanceToLevel", Version: "v1",
+				Inputs: []string{"distance"}, Outputs: []string{"level"},
+				Params: []string{"sensorToBottom"}},
+			{Name: "fill-rate", Operator: "fillRate", Version: "v1",
+				Inputs: []string{"level"}, Outputs: []string{"fillRate"},
+				Params: []string{"usableHeight"}},
+		},
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	obj := mgmtBinObject()
+	obj.TemplateID = "wastebin"
+	obj.VariantID, obj.VariantVersion = "", ""
+	if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	// Före första mätningen: primary pekar på egenskapen utan värde.
+	sum, err := mgr.GetObject(ctx, "t", "bin-42")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sum.Primary == nil || sum.Primary.PropertyID != "fillRate" || sum.Primary.Value != nil {
+		t.Fatalf("primary before data=%+v, want fillRate without value", sum.Primary)
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	if _, err := rt.HandleBatch(ctx, "t", "m1", []things.Observation{rtDistObs("milesight:214", 0.30, base)}, base); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	sum, err = mgr.GetObject(ctx, "t", "bin-42")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	// Utan variant: usableHeight 1.0 ger 112 % flaggat uncertain.
+	if sum.Primary == nil || sum.Primary.Value == nil || *sum.Primary.Value < 111.9 || *sum.Primary.Value > 112.1 {
+		t.Fatalf("primary=%+v, want fillRate ~112", sum.Primary)
+	}
+	if sum.Primary.Unit != sum.Values["fillRate"].Unit || sum.Primary.Quality != "uncertain" {
+		t.Fatalf("primary=%+v, want unit+quality from value", sum.Primary)
+	}
+}
+
+// Primary är nil utan primaryProperty i mallen (GUI-fallback gäller).
+func TestManagePrimaryNilWithoutTemplateProperty(t *testing.T) {
+	mgr, _, _, _ := mgmtSetup(t)
+	ctx := context.Background()
+	if err := mgr.PublishTemplate(ctx, catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "sink", Version: "v1",
+			Optional: []string{"temperature"},
+			Category: "sink",
+		},
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	obj := catalog.ObjectSpec{
+		ThingID: "sink-1", Tenant: "t", Name: "Vask",
+		Location: rtLoc(), Metadata: rtMeta(),
+		TemplateID: "sink", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"temperature": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s", Object: rtTempURN, Resource: "5700", Input: "temperature"},
+		},
+	}
+	if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sum, err := mgr.GetObject(ctx, "t", "sink-1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sum.Primary != nil {
+		t.Fatalf("primary=%+v, want nil without template primaryProperty", sum.Primary)
+	}
+}
+
+// Primary är nil när egenskapen inte är aktiverad på saken (t.ex. rum
+// utan medeltemperatur), även om mallen pekar ut den.
+func TestManagePrimaryNilWhenNotActivated(t *testing.T) {
+	mgr, _, _, _ := mgmtSetup(t)
+	ctx := context.Background()
+	if err := mgr.PublishTemplate(ctx, catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "room2", Version: "v1",
+			RepeatGroups:    []string{"temperature."},
+			Optional:        []string{"temperature.average"},
+			Category:        "room",
+			PrimaryProperty: "temperature.average",
+		},
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	obj := catalog.ObjectSpec{
+		ThingID: "room-x", Tenant: "t", Name: "Rum X",
+		Location: rtLoc(), Metadata: rtMeta(),
+		TemplateID: "room2", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"temperature.window": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s", Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
+		},
+	}
+	if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	sum, err := mgr.GetObject(ctx, "t", "room-x")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sum.Primary != nil {
+		t.Fatalf("primary=%+v, want nil when property not activated", sum.Primary)
 	}
 }

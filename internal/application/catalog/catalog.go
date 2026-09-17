@@ -113,6 +113,7 @@ type EffectiveConfig struct {
 	Bindings        []things.Binding              `json:"bindings,omitempty"`
 	ParamValues     map[string]float64            `json:"paramValues,omitempty"`
 	ParamSources    map[string]things.ParamSource `json:"paramSources,omitempty"`
+	PrimaryProperty string                        `json:"primaryProperty,omitempty"`
 	Recipes         []Recipe                      `json:"recipes,omitempty"`
 	Relations       []ResolvedRelation            `json:"relations,omitempty"`
 }
@@ -678,6 +679,7 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 		Bindings:        append([]things.Binding(nil), obj.Bindings...),
 		ParamValues:     params,
 		ParamSources:    sources,
+		PrimaryProperty: t.PrimaryProperty,
 		Recipes:         cloneRecipes(tmpl.Recipes),
 		Relations:       relations,
 	}, nil

@@ -789,8 +789,8 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse seed: %v", err)
 	}
-	if len(seed.Templates) != 13 {
-		t.Fatalf("templates=%d, want 13 (11 iot-things-typer + greenhouse/tank)", len(seed.Templates))
+	if len(seed.Templates) != 14 {
+		t.Fatalf("templates=%d, want 14 (11 iot-things-typer + greenhouse/tank + poi/v2)", len(seed.Templates))
 	}
 	c := New()
 	for _, spec := range seed.Templates {
@@ -803,8 +803,8 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 			t.Fatalf("publish variant %s/%s: %v", spec.Variant.ID, spec.Variant.Version, err)
 		}
 	}
-	if got := c.ListTemplates(); len(got) != 13 {
-		t.Fatalf("listed=%d, want 13", len(got))
+	if got := c.ListTemplates(); len(got) != 14 {
+		t.Fatalf("listed=%d, want 14", len(got))
 	}
 	if got := c.ListVariants(); len(got) != 6 {
 		t.Fatalf("variants=%d, want 6 (wastebin A-D + 160L + 40L)", len(got))

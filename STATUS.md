@@ -12,6 +12,8 @@
   egenskapsdefinitioner (namn, enhet, kompatibla signaler; prefillas vid
   skapande) och parameterinfo (enhet, intervall valideras vid publicering,
   variant och override); mallista filtreras på `?category=`.
+- Huvuddata: `ThingSummary.primary` löser mallens `primaryProperty` mot
+  aktuella värden (nil utan primaryProperty/aktiverad egenskap).
 - `classification` heter `category` i kod/API (v2 ej i produktion;
   svenska dokument behåller "klassificering").
 - Fler-tenant-användare väljer tenant explicit med `?tenant=` på samtliga

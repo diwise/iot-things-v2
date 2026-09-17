@@ -717,6 +717,9 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/Recipe'
+            primaryProperty:
+              type: string
+              description: Mallens primaryProperty, ärvd till saken.
     PropertyValue:
       type: object
       required: [propertyId, observedAt]
@@ -752,6 +755,9 @@ components:
           type: object
           additionalProperties:
             $ref: '#/components/schemas/PropertyValue'
+        primary:
+          $ref: '#/components/schemas/PropertyValue'
+          description: "Mallens primaryProperty upplöst mot aktuella värden (GUI:ns huvuddata). Saknas när mallen saknar primaryProperty eller egenskapen inte är aktiverad."
         paramValues:
           type: object
           additionalProperties: { type: number }

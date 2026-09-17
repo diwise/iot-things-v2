@@ -34,20 +34,24 @@ type PropertyValue struct {
 // ThingSummary är läsytan för en sak: identitet, mallreferenser, aktuella
 // värden och effektiva parametrar med ursprung.
 type ThingSummary struct {
-	ThingID         string                        `json:"thingId"`
-	Tenant          string                        `json:"tenant"`
-	Name            string                        `json:"name,omitempty"`
-	Category        string                        `json:"category,omitempty"`
-	Location        *things.Location              `json:"location,omitempty"`
-	Metadata        map[string]string             `json:"metadata,omitempty"`
-	TemplateID      string                        `json:"templateId"`
-	TemplateVersion string                        `json:"templateVersion"`
-	VariantID       string                        `json:"variantId,omitempty"`
-	VariantVersion  string                        `json:"variantVersion,omitempty"`
-	Revision        int64                         `json:"revision"`
-	Values          map[string]PropertyValue      `json:"values,omitempty"`
-	ParamValues     map[string]float64            `json:"paramValues,omitempty"`
-	ParamSources    map[string]things.ParamSource `json:"paramSources,omitempty"`
+	ThingID         string                   `json:"thingId"`
+	Tenant          string                   `json:"tenant"`
+	Name            string                   `json:"name,omitempty"`
+	Category        string                   `json:"category,omitempty"`
+	Location        *things.Location         `json:"location,omitempty"`
+	Metadata        map[string]string        `json:"metadata,omitempty"`
+	TemplateID      string                   `json:"templateId"`
+	TemplateVersion string                   `json:"templateVersion"`
+	VariantID       string                   `json:"variantId,omitempty"`
+	VariantVersion  string                   `json:"variantVersion,omitempty"`
+	Revision        int64                    `json:"revision"`
+	Values          map[string]PropertyValue `json:"values,omitempty"`
+	// Primary är mallens primaryProperty upplöst mot aktuella värden
+	// (GUI:ns huvuddata i lista och karta). Nil när mallen saknar
+	// primaryProperty eller egenskapen inte är aktiverad.
+	Primary      *PropertyValue                `json:"primary,omitempty"`
+	ParamValues  map[string]float64            `json:"paramValues,omitempty"`
+	ParamSources map[string]things.ParamSource `json:"paramSources,omitempty"`
 }
 
 // Overview är en navigerbar sammanställning: förälder + direkta barns
@@ -630,6 +634,12 @@ func summarize(tenant, thingID string, cfg *catalog.EffectiveConfig, st StoredTh
 			pv.Source = cur.Source
 		}
 		sum.Values[id] = pv
+	}
+	if cfg.PrimaryProperty != "" {
+		if pv, ok := sum.Values[cfg.PrimaryProperty]; ok {
+			cp := pv
+			sum.Primary = &cp
+		}
 	}
 	return sum
 }

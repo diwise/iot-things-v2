@@ -109,6 +109,20 @@
     },
     {
       "template": {
+        "id": "pointofinterest",
+        "version": "v2",
+        "optional": ["temperature"],
+        "category": "pointofinterest",
+        "primaryProperty": "temperature",
+        "displayName": "Intressepunkt",
+        "description": "Punkt med valfri temperaturmätning. v2 lägger till primaryProperty för GUI:ns huvuddata.",
+        "propertyDefs": {
+          "temperature": {"displayName": "Temperatur", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]}
+        }
+      }
+    },
+    {
+      "template": {
         "id": "desk",
         "version": "v1",
         "required": ["presence"],
