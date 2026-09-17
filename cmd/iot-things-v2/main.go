@@ -198,16 +198,6 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 				return fmt.Errorf("unable to seed catalog: %w", err)
 			}
 
-			log.Debug("importing things...")
-			if err := importThings(ctx, thingsPath, mgr); err != nil {
-				if backend != nil {
-					backend.Close()
-					backend = nil
-				}
-				owned.storage = nil
-				return fmt.Errorf("unable to import things: %w", err)
-			}
-
 			if migrateBindingsEnabled(flags) {
 				n, err := app.MigrateBindings(ctx)
 				if err != nil {
@@ -254,6 +244,14 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 			err = msgCtx.Start(ctx)
 			if err != nil {
 				return fmt.Errorf("failed to start messenger: %w", err)
+			}
+
+			// Sakimporten körs här (inte i oninit): den dränerar
+			// livscykelhändelser inline och kräver startad messenger.
+			// Katalogseeden ligger kvar i oninit (ingen publicering).
+			log.Debug("importing things...")
+			if err := importThings(ctx, thingsPath, mgr); err != nil {
+				return fmt.Errorf("unable to import things: %w", err)
 			}
 
 			log.Debug("register topic handler...")

@@ -240,7 +240,7 @@ func (m *Manager) csvRow(record []string) (catalog.ObjectSpec, string) {
 		}
 	}
 
-	overrides, failText := csvArgs(record[9])
+	overrides, meta, failText := csvArgs(record[9])
 	if failText != "" {
 		return fail("%s", failText)
 	}
@@ -255,6 +255,9 @@ func (m *Manager) csvRow(record []string) (catalog.ObjectSpec, string) {
 	}
 
 	md := map[string]string{}
+	for k, v := range meta {
+		md[k] = v
+	}
 	if sub := strings.TrimSpace(record[2]); sub != "" {
 		md["subType"] = sub
 	}
@@ -310,22 +313,28 @@ func csvBindings(col string, inputs []csvInput) ([]things.Binding, string) {
 
 // csvArgs maps LevelConfig args to parameter overrides. maxd/maxl become
 // sensorToBottom/usableHeight; angle/meanl/offset other than 0 cannot be
-// expressed and reject the row.
-func csvArgs(col string) (map[string]float64, string) {
+// expressed and reject the row. String values are annotations, not
+// parameters: they are preserved as metadata instead of rejected.
+func csvArgs(col string) (map[string]float64, map[string]string, string) {
 	col = strings.TrimSpace(col)
 	if col == "" || col == "{}" {
-		return nil, ""
+		return nil, nil, ""
 	}
 	normalised := strings.ReplaceAll(col, "'", "\"")
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(normalised), &raw); err != nil {
-		return nil, fmt.Sprintf("invalid args %q", col)
+		return nil, nil, fmt.Sprintf("invalid args %q", col)
 	}
 	out := map[string]float64{}
+	meta := map[string]string{}
 	for k, v := range raw {
 		num, ok := v.(float64)
 		if !ok {
-			return nil, fmt.Sprintf("args %q: %q must be numeric", col, k)
+			if s, ok := v.(string); ok {
+				meta[k] = s
+				continue
+			}
+			return nil, nil, fmt.Sprintf("args %q: %q must be numeric or string", col, k)
 		}
 		switch k {
 		case "maxd":
@@ -334,13 +343,13 @@ func csvArgs(col string) (map[string]float64, string) {
 			out["usableHeight"] = num
 		case "angle", "meanl", "offset":
 			if num != 0 {
-				return nil, fmt.Sprintf("args %q: %q=%v cannot be expressed (no angle/offset operator)", col, k, num)
+				return nil, nil, fmt.Sprintf("args %q: %q=%v cannot be expressed (no angle/offset operator)", col, k, num)
 			}
 		default:
-			return nil, fmt.Sprintf("args %q: unknown key %q", col, k)
+			return nil, nil, fmt.Sprintf("args %q: unknown numeric key %q", col, k)
 		}
 	}
-	return out, ""
+	return out, meta, ""
 }
 
 // csvLocation parses "lat,lon". Empty or 0,0 means unknown location (v1

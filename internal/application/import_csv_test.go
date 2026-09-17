@@ -20,6 +20,7 @@ angle-bin;Container;;;;59,18;default;;milesight:9;{'maxd':0.94,'maxl':0.79,'angl
 bad-loc;Desk;;D;;not-a-place;default;;s-d;
 no-tenant;Desk;;D;;59,18;;;s-d;
 bad-bind;Desk;;D;;59,18;default;test;s-d|oops;
+poi-1;PointOfInterest;Beach;Aborrviken;;62.369550,17.275410;default;;fa9869d8-7c25-48ef-9274-0eb4c050bc82;{'alternativeName':'Alternativt namn'}
 `
 
 func importSeededManager(t *testing.T) *Manager {
@@ -50,8 +51,8 @@ func TestImportCSV(t *testing.T) {
 	for _, f := range failures {
 		t.Logf("row %d (%s): %s", f.Row, f.ID, f.Error)
 	}
-	if added != 4 || skipped != 0 {
-		t.Fatalf("added=%d skipped=%d, want 4/0", added, skipped)
+	if added != 5 || skipped != 0 {
+		t.Fatalf("added=%d skipped=%d, want 5/0", added, skipped)
 	}
 	if len(failures) != 5 {
 		t.Fatalf("failures=%+v, want 5", failures)
@@ -71,8 +72,8 @@ func TestImportCSV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
-	if added != 0 || skipped != 4 || len(failures) != 5 {
-		t.Fatalf("reimport added=%d skipped=%d failures=%d, want 0/4/5", added, skipped, len(failures))
+	if added != 0 || skipped != 5 || len(failures) != 5 {
+		t.Fatalf("reimport added=%d skipped=%d failures=%d, want 0/5/5", added, skipped, len(failures))
 	}
 
 	// Tunnan bär subtyp/taggar i metadata och får mått som overrides.
@@ -82,6 +83,14 @@ func TestImportCSV(t *testing.T) {
 	}
 	if sum.Metadata["tags"] != "160L" || sum.Metadata["subType"] != "WasteContainer" {
 		t.Fatalf("metadata=%+v, want tags+subType", sum.Metadata)
+	}
+	// Sträng-args bevaras som metadata i stället för att neka raden.
+	poi, err := mgr.GetObject(ctx, "default", "poi-1")
+	if err != nil {
+		t.Fatalf("get poi: %v", err)
+	}
+	if poi.Metadata["alternativeName"] != "Alternativt namn" {
+		t.Fatalf("poi metadata=%+v, want alternativeName", poi.Metadata)
 	}
 	if sum.ParamSources["usableHeight"] != things.ParamSourceThing ||
 		sum.ParamSources["sensorToBottom"] != things.ParamSourceThing {
