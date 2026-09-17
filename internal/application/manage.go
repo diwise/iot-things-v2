@@ -36,6 +36,9 @@ type ThingSummary struct {
 	ThingID         string                        `json:"thingId"`
 	Tenant          string                        `json:"tenant"`
 	Name            string                        `json:"name,omitempty"`
+	Classification  string                        `json:"classification,omitempty"`
+	Location        *things.Location              `json:"location,omitempty"`
+	Metadata        map[string]string             `json:"metadata,omitempty"`
 	TemplateID      string                        `json:"templateId"`
 	TemplateVersion string                        `json:"templateVersion"`
 	VariantID       string                        `json:"variantId,omitempty"`
@@ -339,6 +342,9 @@ type SearchFilter struct {
 	TemplateVersion string
 	VariantID       string
 	NameContains    string
+	Classification  string
+	Metadata        map[string]string
+	BBox            *things.BBox
 	Limit           int
 	Offset          int
 }
@@ -366,6 +372,26 @@ func (m *Manager) SearchObjects(_ context.Context, tenant string, f SearchFilter
 		}
 		if f.NameContains != "" && !strings.Contains(strings.ToLower(cfg.Name), strings.ToLower(f.NameContains)) {
 			continue
+		}
+		if f.Classification != "" && cfg.Classification != f.Classification {
+			continue
+		}
+		if len(f.Metadata) > 0 {
+			match := true
+			for k, v := range f.Metadata {
+				if got, ok := cfg.Metadata[k]; !ok || got != v {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+		}
+		if f.BBox != nil {
+			if cfg.Location == nil || !cfg.Location.IntersectsBBox(*f.BBox) {
+				continue
+			}
 		}
 		out = append(out, summarize(tenant, id, cfg, st))
 	}
@@ -406,6 +432,9 @@ func summarize(tenant, thingID string, cfg *catalog.EffectiveConfig, st StoredTh
 		ThingID:         thingID,
 		Tenant:          tenant,
 		Name:            cfg.Name,
+		Classification:  cfg.Classification,
+		Location:        cfg.Location,
+		Metadata:        cfg.Metadata,
 		TemplateID:      cfg.TemplateID,
 		TemplateVersion: cfg.TemplateVersion,
 		VariantID:       cfg.VariantID,
@@ -448,6 +477,9 @@ func (m *Manager) reconstructSpec(tenant, thingID string) (catalog.ObjectSpec, e
 		ThingID:         thingID,
 		Tenant:          tenant,
 		Name:            cfg.Name,
+		Classification:  cfg.Classification,
+		Location:        cfg.Location,
+		Metadata:        cfg.Metadata,
 		TemplateID:      cfg.TemplateID,
 		TemplateVersion: cfg.TemplateVersion,
 		VariantID:       cfg.VariantID,

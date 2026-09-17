@@ -1,6 +1,7 @@
 package things
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -248,5 +249,56 @@ func TestEffectiveParamPrecedence(t *testing.T) {
 	}
 	if v, src, ok := bare.EffectiveParam("onlyTemplate", tmplDefaults, variant); !ok || v != 9 || src != ParamSourceTemplate {
 		t.Fatalf("onlyTemplate = (%v, %q, %v), want (9, template, true)", v, src, ok)
+	}
+}
+
+func locPoint(coords string) Location {
+	return Location{Type: "Point", Coordinates: json.RawMessage(coords)}
+}
+
+func TestLocationPoint(t *testing.T) {
+	if err := locPoint(`[18.06,59.33]`).Validate(); err != nil {
+		t.Fatalf("valid point: %v", err)
+	}
+	if err := locPoint(`[18.06,59.33,12.5]`).Validate(); err != nil {
+		t.Fatalf("point with alt: %v", err)
+	}
+	for _, coords := range []string{`[181,0]`, `[0,91]`, `[18]`, `[18,59,1,2]`, `"x"`} {
+		if err := locPoint(coords).Validate(); err == nil {
+			t.Fatalf("point %s must fail", coords)
+		}
+	}
+}
+
+func TestLocationPolygon(t *testing.T) {
+	closed := Location{Type: "Polygon", Coordinates: json.RawMessage(
+		`[[[18.0,59.3],[18.1,59.3],[18.1,59.4],[18.0,59.4],[18.0,59.3]]]`)}
+	if err := closed.Validate(); err != nil {
+		t.Fatalf("valid polygon: %v", err)
+	}
+	open := Location{Type: "Polygon", Coordinates: json.RawMessage(
+		`[[[18.0,59.3],[18.1,59.3],[18.1,59.4],[18.0,59.4]]]`)}
+	if err := open.Validate(); err == nil {
+		t.Fatal("open ring must fail")
+	}
+	if err := (Location{Type: "Circle", Coordinates: json.RawMessage(`[18,59]`)}).Validate(); err == nil {
+		t.Fatal("unknown type must fail")
+	}
+}
+
+func TestLocationIntersectsBBox(t *testing.T) {
+	inside := BBox{MinLon: 17, MinLat: 59, MaxLon: 19, MaxLat: 60}
+	if !locPoint(`[18.06,59.33]`).IntersectsBBox(inside) {
+		t.Fatal("point inside must intersect")
+	}
+	outside := BBox{MinLon: 0, MinLat: 0, MaxLon: 1, MaxLat: 1}
+	if locPoint(`[18.06,59.33]`).IntersectsBBox(outside) {
+		t.Fatal("point outside must not intersect")
+	}
+	poly := Location{Type: "Polygon", Coordinates: json.RawMessage(
+		`[[[18.0,59.3],[20.0,59.3],[20.0,60.0],[18.0,60.0],[18.0,59.3]]]`)}
+	overlap := BBox{MinLon: 19, MinLat: 59.5, MaxLon: 21, MaxLat: 61}
+	if !poly.IntersectsBBox(overlap) {
+		t.Fatal("overlapping polygon must intersect")
 	}
 }

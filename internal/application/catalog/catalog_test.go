@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -689,5 +690,75 @@ func TestRestore(t *testing.T) {
 	dst.Restore([]TemplateSpec{{Template: things.Template{}}}, nil)
 	if _, ok := dst.GetTemplate("wastebin", "v1"); !ok {
 		t.Fatal("valid entry must survive restore with invalid rows")
+	}
+}
+
+func TestCompileLocationMetadataClassification(t *testing.T) {
+	c := New()
+	tmpl := wastebinTemplate()
+	tmpl.Template.Classification = "wastebin"
+	tmpl.Template.Labels = []string{"Avfall"}
+	if err := c.PutTemplate(tmpl); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	obj := ObjectSpec{
+		ThingID: "bin-42", Tenant: "t",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		Name:     "Soptunna 42",
+		Location: &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+		Metadata: map[string]string{"district": "centrum"},
+		Properties: map[string]things.Property{
+			"distance": {}, "level": {}, "fillRate": {},
+		},
+	}
+	cfg, err := c.Compile(obj)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if cfg.Classification != "wastebin" {
+		t.Fatalf("classification=%q, want inherited wastebin", cfg.Classification)
+	}
+	if cfg.Location == nil || cfg.Location.Type != "Point" {
+		t.Fatalf("location=%+v, want point", cfg.Location)
+	}
+	if cfg.Metadata["district"] != "centrum" {
+		t.Fatalf("metadata=%+v", cfg.Metadata)
+	}
+
+	bad := obj
+	bad.ThingID = "bad-loc"
+	bad.Location = &things.Location{Type: "Point", Coordinates: json.RawMessage(`[999,0]`)}
+	if _, err := c.Compile(bad); err == nil {
+		t.Fatal("out-of-range location must fail")
+	}
+	badMeta := obj
+	badMeta.ThingID = "bad-meta"
+	badMeta.Location = nil
+	badMeta.Metadata = map[string]string{"": "x"}
+	if _, err := c.Compile(badMeta); err == nil {
+		t.Fatal("empty metadata key must fail")
+	}
+	override := obj
+	override.ThingID = "bin-43"
+	override.Classification = "custom"
+	cfg2, err := c.Compile(override)
+	if err != nil {
+		t.Fatalf("compile override: %v", err)
+	}
+	if cfg2.Classification != "custom" {
+		t.Fatalf("classification=%q, want custom", cfg2.Classification)
+	}
+}
+
+func TestPutTemplatePrimaryProperty(t *testing.T) {
+	c := New()
+	tmpl := wastebinTemplate()
+	tmpl.Template.PrimaryProperty = "nope"
+	if err := c.PutTemplate(tmpl); err == nil {
+		t.Fatal("unknown primary property must fail")
+	}
+	tmpl.Template.PrimaryProperty = "level"
+	if err := c.PutTemplate(tmpl); err != nil {
+		t.Fatalf("valid primary property: %v", err)
 	}
 }

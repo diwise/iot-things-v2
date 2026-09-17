@@ -64,6 +64,9 @@ type ObjectSpec struct {
 	ThingID         string                     `json:"thingId"`
 	Tenant          string                     `json:"tenant,omitempty"`
 	Name            string                     `json:"name,omitempty"`
+	Classification  string                     `json:"classification,omitempty"`
+	Location        *things.Location           `json:"location,omitempty"`
+	Metadata        map[string]string          `json:"metadata,omitempty"`
 	TemplateID      string                     `json:"templateId"`
 	TemplateVersion string                     `json:"templateVersion"`
 	VariantID       string                     `json:"variantId,omitempty"`
@@ -87,6 +90,9 @@ type ResolvedRelation struct {
 type EffectiveConfig struct {
 	ThingID         string                        `json:"thingId,omitempty"`
 	Name            string                        `json:"name,omitempty"`
+	Classification  string                        `json:"classification,omitempty"`
+	Location        *things.Location              `json:"location,omitempty"`
+	Metadata        map[string]string             `json:"metadata,omitempty"`
 	TemplateID      string                        `json:"templateId"`
 	TemplateVersion string                        `json:"templateVersion"`
 	VariantID       string                        `json:"variantId,omitempty"`
@@ -182,6 +188,19 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
+// cloneLocation deep-copies a location so compiled configs never alias
+// caller memory.
+func cloneLocation(in *things.Location) *things.Location {
+	if in == nil {
+		return nil
+	}
+	out := &things.Location{Type: in.Type}
+	if in.Coordinates != nil {
+		out.Coordinates = append([]byte(nil), in.Coordinates...)
+	}
+	return out
+}
+
 func cloneRecipes(in []Recipe) []Recipe {
 	if in == nil {
 		return nil
@@ -206,6 +225,7 @@ func cloneTemplateSpec(spec TemplateSpec) TemplateSpec {
 	t.Optional = cloneStrings(t.Optional)
 	t.RepeatGroups = cloneStrings(t.RepeatGroups)
 	t.AllowedQuantities = cloneStrings(t.AllowedQuantities)
+	t.Labels = cloneStrings(t.Labels)
 	if t.Relations != nil {
 		rels := make([]things.RelationSpec, len(t.Relations))
 		for i, r := range t.Relations {
@@ -288,6 +308,11 @@ func (c *Catalog) PutTemplate(spec TemplateSpec) error {
 	for p := range spec.ParamDefaults {
 		if p == "" {
 			return fmt.Errorf("%w: template %s/%s has empty parameter name", things.ErrValidation, t.ID, t.Version)
+		}
+	}
+	if spec.Template.PrimaryProperty != "" {
+		if err := t.ValidatePropertyID(spec.Template.PrimaryProperty); err != nil {
+			return fmt.Errorf("%w: template %s/%s primary property: %w", things.ErrValidation, t.ID, t.Version, err)
 		}
 	}
 	overridable := make(map[string]struct{}, len(spec.Overridable))
@@ -497,6 +522,14 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 			return nil, fmt.Errorf("%w: object %q misses required property %q", things.ErrValidation, obj.ThingID, req)
 		}
 	}
+	if obj.Location != nil {
+		if err := obj.Location.Validate(); err != nil {
+			return nil, fmt.Errorf("%w: object %q: %w", things.ErrValidation, obj.ThingID, err)
+		}
+	}
+	if err := validateMetadata(obj.ThingID, obj.Metadata); err != nil {
+		return nil, err
+	}
 	for id, prop := range obj.Properties {
 		if err := t.ValidatePropertyID(id); err != nil {
 			return nil, fmt.Errorf("%w: object %q: %w", things.ErrValidation, obj.ThingID, err)
@@ -527,9 +560,17 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 		props[id] = prop
 	}
 
+	classification := obj.Classification
+	if classification == "" {
+		classification = t.Classification
+	}
+
 	return &EffectiveConfig{
 		ThingID:         obj.ThingID,
 		Name:            obj.Name,
+		Classification:  classification,
+		Location:        cloneLocation(obj.Location),
+		Metadata:        cloneStringMap(obj.Metadata),
 		TemplateID:      obj.TemplateID,
 		TemplateVersion: obj.TemplateVersion,
 		VariantID:       variantID,
@@ -541,6 +582,30 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 		Recipes:         cloneRecipes(tmpl.Recipes),
 		Relations:       relations,
 	}, nil
+}
+
+// Metadata caps keep free-form annotations bounded without schema
+// bureaucracy: descriptive only, never structural.
+const (
+	maxMetadataEntries = 32
+	maxMetadataKeyLen  = 64
+	maxMetadataValueLn = 512
+)
+
+func validateMetadata(thingID string, md map[string]string) error {
+	if len(md) > maxMetadataEntries {
+		return fmt.Errorf("%w: object %q has %d metadata entries, max %d",
+			things.ErrValidation, thingID, len(md), maxMetadataEntries)
+	}
+	for k, v := range md {
+		if k == "" {
+			return fmt.Errorf("%w: object %q has empty metadata key", things.ErrValidation, thingID)
+		}
+		if len(k) > maxMetadataKeyLen || len(v) > maxMetadataValueLn {
+			return fmt.Errorf("%w: object %q metadata entry %q too long", things.ErrValidation, thingID, k)
+		}
+	}
+	return nil
 }
 
 func resolveParams(tmpl TemplateSpec, variant things.Variant, obj ObjectSpec) (map[string]float64, map[string]things.ParamSource, error) {

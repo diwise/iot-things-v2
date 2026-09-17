@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application"
@@ -325,8 +326,27 @@ func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
 		TemplateVersion: q.Get("templateVersion"),
 		VariantID:       q.Get("variant"),
 		NameContains:    q.Get("name"),
+		Classification:  q.Get("classification"),
 		Limit:           limit,
 		Offset:          offset,
+	}
+	for key, vals := range q {
+		name, ok := strings.CutPrefix(key, "meta.")
+		if !ok || name == "" || len(vals) == 0 {
+			continue
+		}
+		if filter.Metadata == nil {
+			filter.Metadata = make(map[string]string)
+		}
+		filter.Metadata[name] = vals[0]
+	}
+	if raw := q.Get("bbox"); raw != "" {
+		box, err := parseBBox(raw)
+		if err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		filter.BBox = &box
 	}
 	writeJSON(w, http.StatusOK, h.mgr.SearchObjects(r.Context(), t, filter))
 }
@@ -631,4 +651,26 @@ func queryTime(raw string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%w: invalid time %q (want RFC3339)", things.ErrValidation, raw)
 	}
 	return ts, nil
+}
+
+// parseBBox parses "minLon,minLat,maxLon,maxLat" (WGS84) for location search.
+func parseBBox(raw string) (things.BBox, error) {
+	parts := strings.Split(raw, ",")
+	if len(parts) != 4 {
+		return things.BBox{}, fmt.Errorf("%w: invalid bbox %q (want minLon,minLat,maxLon,maxLat)", things.ErrValidation, raw)
+	}
+	nums := make([]float64, 4)
+	for i, p := range parts {
+		v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
+		if err != nil {
+			return things.BBox{}, fmt.Errorf("%w: invalid bbox %q: %v", things.ErrValidation, raw, err)
+		}
+		nums[i] = v
+	}
+	box := things.BBox{MinLon: nums[0], MinLat: nums[1], MaxLon: nums[2], MaxLat: nums[3]}
+	if box.MinLon < -180 || box.MaxLon > 180 || box.MinLat < -90 || box.MaxLat > 90 ||
+		box.MinLon > box.MaxLon || box.MinLat > box.MaxLat {
+		return things.BBox{}, fmt.Errorf("%w: invalid bbox %q (WGS84, min <= max)", things.ErrValidation, raw)
+	}
+	return box, nil
 }

@@ -620,3 +620,65 @@ func TestV0SearchAndHistoryPaging(t *testing.T) {
 		t.Fatalf("bad history offset=%d, want 400", rr.Code)
 	}
 }
+
+// Sök på klassificering/metadata/bbox; felaktig bbox ger 400.
+func TestV0SearchLocationMetadata(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+	obj := v0binObject()
+	obj.Classification = "wastebin"
+	obj.Metadata = map[string]string{"district": "centrum"}
+	obj.Location = &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)}
+	if rr := doJSON(h.createThing, ctx, "", obj, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr := doGET(h.searchThings, ctx, "", "classification=wastebin")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search classification: %d %s", rr.Code, rr.Body.String())
+	}
+	var found []application.ThingSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 1 || found[0].Location == nil {
+		t.Fatalf("search classification=%+v, want bin with location", found)
+	}
+	rr = doGET(h.searchThings, ctx, "", "meta.district=centrum")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search meta: %d %s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("search meta=%+v, want 1", found)
+	}
+	rr = doGET(h.searchThings, ctx, "", "meta.district=s%C3%B6der")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search meta miss: %d", rr.Code)
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("search meta miss=%+v, want empty", found)
+	}
+	rr = doGET(h.searchThings, ctx, "", "bbox=17,59,19,60")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search bbox: %d %s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("search bbox=%+v, want 1", found)
+	}
+	if rr := doGET(h.searchThings, ctx, "", "bbox=17,59"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad bbox=%d, want 400", rr.Code)
+	}
+	if rr := doGET(h.searchThings, ctx, "", "bbox=19,60,17,59"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("inverted bbox=%d, want 400", rr.Code)
+	}
+}

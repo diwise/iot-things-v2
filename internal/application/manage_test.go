@@ -1002,3 +1002,73 @@ func TestManageGetTemplateVariant(t *testing.T) {
 		t.Fatalf("unknown variant err=%v, want not found", err)
 	}
 }
+
+// Plats/metadata/klassificering: lagras, returneras, filtreras och
+// överlever uppdatering (reconstructSpec tappar dem inte).
+func TestManageLocationMetadataSearch(t *testing.T) {
+	mgr, _, _, _ := mgmtSetup(t)
+	ctx := context.Background()
+	mgmtWastebin(t, mgr)
+	mgmtRooms(t, mgr)
+
+	bin := mgmtBinObject()
+	bin.Location = &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)}
+	bin.Metadata = map[string]string{"district": "centrum"}
+	bin.Classification = "wastebin"
+	if _, err := mgr.CreateObject(ctx, "t", bin); err != nil {
+		t.Fatalf("create bin: %v", err)
+	}
+	roomObj := catalog.ObjectSpec{
+		ThingID: "room-a", Tenant: "t", Name: "Kontorslandskap A",
+		TemplateID: "room", TemplateVersion: "v1",
+		Classification: "room",
+		Metadata:       map[string]string{"district": "söder"},
+		Properties:     map[string]things.Property{"temperature.window": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s1", Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
+		},
+	}
+	if _, err := mgr.CreateObject(ctx, "t", roomObj); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+
+	sum, err := mgr.GetObject(ctx, "t", "bin-42")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sum.Location == nil || sum.Location.Type != "Point" {
+		t.Fatalf("location=%+v, want point", sum.Location)
+	}
+	if sum.Metadata["district"] != "centrum" || sum.Classification != "wastebin" {
+		t.Fatalf("summary=%+v", sum)
+	}
+
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Classification: "room"}); len(got) != 1 || got[0].ThingID != "room-a" {
+		t.Fatalf("classification filter=%+v, want room-a", got)
+	}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Metadata: map[string]string{"district": "centrum"}}); len(got) != 1 || got[0].ThingID != "bin-42" {
+		t.Fatalf("metadata filter=%+v, want bin-42", got)
+	}
+	stockholm := things.BBox{MinLon: 17, MinLat: 59, MaxLon: 19, MaxLat: 60}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{BBox: &stockholm}); len(got) != 1 || got[0].ThingID != "bin-42" {
+		t.Fatalf("bbox filter=%+v, want bin-42", got)
+	}
+	farNorth := things.BBox{MinLon: 17, MinLat: 65, MaxLon: 19, MaxLat: 68}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{BBox: &farNorth}); len(got) != 0 {
+		t.Fatalf("far bbox=%d, want 0", len(got))
+	}
+
+	// Uppdatering med nytt namn tappar inte plats/metadata.
+	upd := bin
+	upd.Name = "Soptunna 42 flyttad"
+	if _, err := mgr.UpdateObject(ctx, "t", upd, 1); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	sum, err = mgr.GetObject(ctx, "t", "bin-42")
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if sum.Location == nil || sum.Metadata["district"] != "centrum" {
+		t.Fatalf("update dropped location/metadata: %+v", sum)
+	}
+}

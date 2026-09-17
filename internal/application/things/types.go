@@ -8,8 +8,10 @@
 package things
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -128,9 +130,144 @@ type RelationSpec struct {
 	Max            int      `json:"max,omitempty"`
 }
 
+// Location is a GeoJSON Point or Polygon in lon/lat (WGS84): a Point
+// marks the thing, a Polygon its extent (e.g. a room or container bay).
+type Location struct {
+	Type        string          `json:"type"`
+	Coordinates json.RawMessage `json:"coordinates"`
+}
+
+// BBox is a lon/lat bounding box used for location search.
+type BBox struct {
+	MinLon, MinLat, MaxLon, MaxLat float64
+}
+
+// Validate checks type, coordinate shape and WGS84 ranges. Numbers must
+// be finite (no NaN/Inf).
+func (l Location) Validate() error {
+	switch l.Type {
+	case "Point":
+		var c []float64
+		if err := json.Unmarshal(l.Coordinates, &c); err != nil {
+			return fmt.Errorf("%w: point coordinates must be [lon,lat(,alt)]: %v", ErrValidation, err)
+		}
+		if len(c) < 2 || len(c) > 3 {
+			return fmt.Errorf("%w: point needs 2-3 numbers, got %d", ErrValidation, len(c))
+		}
+		if err := checkLonLat(c[0], c[1]); err != nil {
+			return err
+		}
+		for _, v := range c {
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return fmt.Errorf("%w: coordinates must be finite", ErrValidation)
+			}
+		}
+		return nil
+	case "Polygon":
+		var rings [][][]float64
+		if err := json.Unmarshal(l.Coordinates, &rings); err != nil {
+			return fmt.Errorf("%w: polygon coordinates must be rings: %v", ErrValidation, err)
+		}
+		if len(rings) == 0 {
+			return fmt.Errorf("%w: polygon needs at least one ring", ErrValidation)
+		}
+		for _, ring := range rings {
+			if len(ring) < 4 {
+				return fmt.Errorf("%w: polygon ring needs >= 4 positions, got %d", ErrValidation, len(ring))
+			}
+			for _, p := range ring {
+				if len(p) < 2 {
+					return fmt.Errorf("%w: polygon position needs lon/lat", ErrValidation)
+				}
+				if err := checkLonLat(p[0], p[1]); err != nil {
+					return err
+				}
+				for _, v := range p {
+					if math.IsNaN(v) || math.IsInf(v, 0) {
+						return fmt.Errorf("%w: coordinates must be finite", ErrValidation)
+					}
+				}
+			}
+			first, last := ring[0], ring[len(ring)-1]
+			if first[0] != last[0] || first[1] != last[1] {
+				return fmt.Errorf("%w: polygon ring is not closed", ErrValidation)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: location type %q (want Point/Polygon)", ErrValidation, l.Type)
+	}
+}
+
+func checkLonLat(lon, lat float64) error {
+	if math.IsNaN(lon) || math.IsNaN(lat) || math.IsInf(lon, 0) || math.IsInf(lat, 0) {
+		return fmt.Errorf("%w: coordinates must be finite", ErrValidation)
+	}
+	if lon < -180 || lon > 180 || lat < -90 || lat > 90 {
+		return fmt.Errorf("%w: lon/lat [%v,%v] outside WGS84", ErrValidation, lon, lat)
+	}
+	return nil
+}
+
+// positions returns all lon/lat pairs of the location.
+func (l Location) positions() [][2]float64 {
+	var out [][2]float64
+	switch l.Type {
+	case "Point":
+		var c []float64
+		if err := json.Unmarshal(l.Coordinates, &c); err != nil || len(c) < 2 {
+			return nil
+		}
+		out = append(out, [2]float64{c[0], c[1]})
+	case "Polygon":
+		var rings [][][]float64
+		if err := json.Unmarshal(l.Coordinates, &rings); err != nil {
+			return nil
+		}
+		for _, ring := range rings {
+			for _, p := range ring {
+				if len(p) >= 2 {
+					out = append(out, [2]float64{p[0], p[1]})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// Bounds returns the bounding box of the location.
+func (l Location) Bounds() (BBox, bool) {
+	pos := l.positions()
+	if len(pos) == 0 {
+		return BBox{}, false
+	}
+	b := BBox{MinLon: pos[0][0], MinLat: pos[0][1], MaxLon: pos[0][0], MaxLat: pos[0][1]}
+	for _, p := range pos[1:] {
+		b.MinLon = min(b.MinLon, p[0])
+		b.MinLat = min(b.MinLat, p[1])
+		b.MaxLon = max(b.MaxLon, p[0])
+		b.MaxLat = max(b.MaxLat, p[1])
+	}
+	return b, true
+}
+
+// IntersectsBBox reports whether the location overlaps the box. Points
+// must lie inside; polygons overlap by bounding boxes (cheap prefilter,
+// no exact polygon clipping in v1).
+func (l Location) IntersectsBBox(b BBox) bool {
+	lb, ok := l.Bounds()
+	if !ok {
+		return false
+	}
+	return lb.MinLon <= b.MaxLon && lb.MaxLon >= b.MinLon &&
+		lb.MinLat <= b.MaxLat && lb.MaxLat >= b.MinLat
+}
+
 // Template is a versioned closed definition of allowed properties.
 // Required and Optional hold exact property IDs. RepeatGroups holds
 // repeatable measurement-point prefixes such as "temperature.".
+// Classification is the business classification (e.g. "wastebin",
+// "room"); Labels and PrimaryProperty are presentation hints.
 type Template struct {
 	ID                string         `json:"id"`
 	Version           string         `json:"version"`
@@ -139,6 +276,9 @@ type Template struct {
 	RepeatGroups      []string       `json:"repeatGroups,omitempty"`
 	AllowedQuantities []string       `json:"allowedQuantities,omitempty"`
 	Relations         []RelationSpec `json:"relations,omitempty"`
+	Classification    string         `json:"classification,omitempty"`
+	Labels            []string       `json:"labels,omitempty"`
+	PrimaryProperty   string         `json:"primaryProperty,omitempty"`
 }
 
 // ValidatePropertyID reports whether id is allowed by the closed
@@ -191,6 +331,9 @@ type Thing struct {
 	ID              string                 `json:"id"`
 	Tenant          string                 `json:"tenant"`
 	Name            string                 `json:"name,omitempty"`
+	Classification  string                 `json:"classification,omitempty"`
+	Location        *Location              `json:"location,omitempty"`
+	Metadata        map[string]string      `json:"metadata,omitempty"`
 	TemplateID      string                 `json:"templateId"`
 	TemplateVersion string                 `json:"templateVersion"`
 	VariantID       string                 `json:"variantId,omitempty"`
