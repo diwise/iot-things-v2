@@ -717,6 +717,32 @@ func TestV0SearchLocationMetadata(t *testing.T) {
 	if rr := doGET(h.searchThings, ctx, "", "bbox=19,60,17,59"); rr.Code != http.StatusBadRequest {
 		t.Fatalf("inverted bbox=%d, want 400", rr.Code)
 	}
+	rr = doGET(h.searchThings, ctx, "", "near=18.06,59.33,100")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search near: %d %s", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 1 {
+		t.Fatalf("search near=%+v, want 1", found)
+	}
+	rr = doGET(h.searchThings, ctx, "", "near=0,0,100")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search far near: %d", rr.Code)
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 0 {
+		t.Fatalf("search far near=%+v, want empty", found)
+	}
+	if rr := doGET(h.searchThings, ctx, "", "near=17,59"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad near=%d, want 400", rr.Code)
+	}
+	if rr := doGET(h.searchThings, ctx, "", "near=18.06,59.33,-5"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("negative radius=%d, want 400", rr.Code)
+	}
 }
 
 // Träd, bortkoppling och X-Total-Count.

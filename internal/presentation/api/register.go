@@ -362,6 +362,14 @@ func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.BBox = &box
 	}
+	if raw := q.Get("near"); raw != "" {
+		near, err := parseNear(raw)
+		if err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		filter.Near = &near
+	}
 	// Total före paging i X-Total-Count (egen ofiltrerad räkning;
 	// dyr vid stora kataloger, men korrekt utan separat count-väg).
 	totalFilter := filter
@@ -726,6 +734,7 @@ func queryTime(raw string) (time.Time, error) {
 
 // parseBBox parses "minLon,minLat,maxLon,maxLat" (WGS84) for location search.
 func parseBBox(raw string) (things.BBox, error) {
+
 	parts := strings.Split(raw, ",")
 	if len(parts) != 4 {
 		return things.BBox{}, fmt.Errorf("%w: invalid bbox %q (want minLon,minLat,maxLon,maxLat)", things.ErrValidation, raw)
@@ -744,4 +753,25 @@ func parseBBox(raw string) (things.BBox, error) {
 		return things.BBox{}, fmt.Errorf("%w: invalid bbox %q (WGS84, min <= max)", things.ErrValidation, raw)
 	}
 	return box, nil
+}
+
+// parseNear parses "lon,lat,radiusMeters" (WGS84, radius > 0) for radius search.
+func parseNear(raw string) (things.NearFilter, error) {
+	parts := strings.Split(raw, ",")
+	if len(parts) != 3 {
+		return things.NearFilter{}, fmt.Errorf("%w: invalid near %q (want lon,lat,radiusMeters)", things.ErrValidation, raw)
+	}
+	nums := make([]float64, 3)
+	for i, p := range parts {
+		v, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
+		if err != nil {
+			return things.NearFilter{}, fmt.Errorf("%w: invalid near %q: %v", things.ErrValidation, raw, err)
+		}
+		nums[i] = v
+	}
+	near := things.NearFilter{Lon: nums[0], Lat: nums[1], RadiusMeters: nums[2]}
+	if near.Lon < -180 || near.Lon > 180 || near.Lat < -90 || near.Lat > 90 || near.RadiusMeters <= 0 {
+		return things.NearFilter{}, fmt.Errorf("%w: invalid near %q (WGS84, radius > 0)", things.ErrValidation, raw)
+	}
+	return near, nil
 }

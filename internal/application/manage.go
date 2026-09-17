@@ -446,6 +446,7 @@ type SearchFilter struct {
 	Category        string
 	Metadata        map[string]string
 	BBox            *things.BBox
+	Near            *things.NearFilter
 	Limit           int
 	Offset          int
 }
@@ -491,6 +492,11 @@ func (m *Manager) SearchObjects(_ context.Context, tenant string, f SearchFilter
 		}
 		if f.BBox != nil {
 			if cfg.Location == nil || !cfg.Location.IntersectsBBox(*f.BBox) {
+				continue
+			}
+		}
+		if f.Near != nil {
+			if cfg.Location == nil || !cfg.Location.WithinRadius(f.Near.Lon, f.Near.Lat, f.Near.RadiusMeters) {
 				continue
 			}
 		}

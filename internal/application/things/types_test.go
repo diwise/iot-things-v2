@@ -249,3 +249,30 @@ func TestLocationIntersectsBBox(t *testing.T) {
 		t.Fatal("overlapping polygon must intersect")
 	}
 }
+
+func TestLocationWithinRadius(t *testing.T) {
+	// En latitudgrad är ca 111195 m.
+	if d := haversineMeters(18.0, 59.0, 18.0, 60.0); d < 111190 || d > 111200 {
+		t.Fatalf("degree=%v, want ~111195", d)
+	}
+	if d := haversineMeters(18.06, 59.33, 18.06, 59.33); d != 0 {
+		t.Fatalf("same point=%v, want 0", d)
+	}
+	if !locPoint(`[18.06,59.33]`).WithinRadius(18.06, 59.33, 100) {
+		t.Fatal("same point within 100 m")
+	}
+	if locPoint(`[18.06,59.33]`).WithinRadius(0, 0, 1000) {
+		t.Fatal("far point must not match")
+	}
+	if locPoint(`[18.06,59.33]`).WithinRadius(18.06, 59.33, 0) {
+		t.Fatal("zero radius must not match")
+	}
+	if locPoint(`[18.06,59.33]`).WithinRadius(18.06, 59.33, -5) {
+		t.Fatal("negative radius must not match")
+	}
+	poly := Location{Type: "Polygon", Coordinates: json.RawMessage(
+		`[[[18.0,59.3],[20.0,59.3],[20.0,60.0],[18.0,60.0],[18.0,59.3]]]`)}
+	if !poly.WithinRadius(19.0, 59.6, 100) {
+		t.Fatal("center inside polygon must match")
+	}
+}

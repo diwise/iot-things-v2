@@ -141,6 +141,10 @@ paths:
           in: query
           description: minLon,minLat,maxLon,maxLat (WGS84).
           schema: { type: string }
+        - name: near
+          in: query
+          description: lon,lat,radiusMeters (WGS84, radie > 0). PostGIS används ej; haversine i minnet.
+          schema: { type: string }
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Offset'
       responses:

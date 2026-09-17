@@ -284,6 +284,48 @@ func (l Location) IntersectsBBox(b BBox) bool {
 		lb.MinLat <= b.MaxLat && lb.MaxLat >= b.MinLat
 }
 
+// NearFilter selects things within radiusMeters of lon/lat.
+type NearFilter struct {
+	Lon, Lat     float64
+	RadiusMeters float64
+}
+
+// haversineMeters returns the great-circle distance in meters (WGS84
+// mean earth radius). Sufficient for radius search; no PostGIS needed
+// at this scale (locations are filtered in memory like bbox).
+func haversineMeters(lon1, lat1, lon2, lat2 float64) float64 {
+	const earthRadiusM = 6371000.0
+	toRad := func(d float64) float64 { return d * math.Pi / 180 }
+	dLat := toRad(lat2 - lat1)
+	dLon := toRad(lon2 - lon1)
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(toRad(lat1))*math.Cos(toRad(lat2))*math.Sin(dLon/2)*math.Sin(dLon/2)
+	return 2 * earthRadiusM * math.Asin(math.Sqrt(a))
+}
+
+// WithinRadius reports whether the location is within radiusMeters of
+// lon/lat. Points use haversine distance; polygons match on any vertex
+// within radius or when their bounding box contains the center (cheap
+// approximation for large areas, no exact polygon clipping in v1).
+func (l Location) WithinRadius(lon, lat, radiusMeters float64) bool {
+	if radiusMeters <= 0 {
+		return false
+	}
+	for _, p := range l.positions() {
+		if haversineMeters(lon, lat, p[0], p[1]) <= radiusMeters {
+			return true
+		}
+	}
+	if l.Type == "Polygon" {
+		if lb, ok := l.Bounds(); ok &&
+			lb.MinLon <= lon && lon <= lb.MaxLon &&
+			lb.MinLat <= lat && lat <= lb.MaxLat {
+			return true
+		}
+	}
+	return false
+}
+
 // Template is a versioned closed definition of allowed properties.
 // Required and Optional hold exact property IDs. RepeatGroups holds
 // repeatable measurement-point prefixes such as "temperature.".
