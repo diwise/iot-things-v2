@@ -1392,16 +1392,16 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if added != 15 || skipped != 0 {
-		t.Fatalf("seed added=%d skipped=%d, want 15/0", added, skipped)
+	if added != 16 || skipped != 0 {
+		t.Fatalf("seed added=%d skipped=%d, want 16/0", added, skipped)
 	}
 	// Idempotent: andra seedningen skippar allt.
 	added, skipped, err = mgr.SeedCatalog(ctx, seed)
 	if err != nil {
 		t.Fatalf("reseed: %v", err)
 	}
-	if added != 0 || skipped != 15 {
-		t.Fatalf("reseed added=%d skipped=%d, want 0/15", added, skipped)
+	if added != 0 || skipped != 16 {
+		t.Fatalf("reseed added=%d skipped=%d, want 0/16", added, skipped)
 	}
 
 	bind := func(device, object, resource, input string) things.Binding {
@@ -1528,5 +1528,110 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 	}
 	if got := *sum.Values["passages"].Value; got != 2 {
 		t.Fatalf("seed passage count=%v, want 2", got)
+	}
+}
+
+// Migrering från v1-seed: tre 160L-tunnor (GATA Soptunnor punkt 203-205).
+// Mappning: maxl -> variantens usableHeight (0.79, 100% vid 79 cm sopor),
+// maxd -> sensorToBottom-override (0.94), "lat,lon" -> Point [lon,lat],
+// tagg 160L -> metadata, device -> distance-bindning.
+func TestManageMigrate160LBins(t *testing.T) {
+	const distURN = "urn:oma:lwm2m:ext:3330"
+	type v1bin struct {
+		id, name, latlon, device string
+	}
+	bins := []v1bin{
+		{"a6921a85-1f40-4e43-9719-4dabdb349075", "GATA_Soptunnor_punkt.203", "62.387232,17.316830", "milesight:203"},
+		{"41e19a70-aa18-4019-8b47-8b21775b799f", "GATA_Soptunnor_punkt.204", "62.298636,17.378277", "milesight:204"},
+		{"2bf440f4-65a9-46f1-8e57-a04825e636c8", "GATA_Soptunnor_punkt.205", "62.298782,17.378005", "milesight:205"},
+	}
+	raw, err := os.ReadFile("../../assets/config/catalog-seed.json")
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	seed, err := catalog.ParseSeed(raw)
+	if err != nil {
+		t.Fatalf("parse seed: %v", err)
+	}
+	mgr, _, _, rt := mgmtSetup(t)
+	ctx := context.Background()
+	if _, _, err := mgr.SeedCatalog(ctx, seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	for _, b := range bins {
+		var lat, lon float64
+		if _, err := fmt.Sscanf(b.latlon, "%f,%f", &lat, &lon); err != nil {
+			t.Fatalf("parse location: %v", err)
+		}
+		loc, _ := json.Marshal([]float64{lon, lat})
+		obj := catalog.ObjectSpec{
+			ThingID: b.id, Tenant: "default", Name: b.name,
+			TemplateID: "wastebin", TemplateVersion: "v1",
+			VariantID: "wastebin-160L", VariantVersion: "v1",
+			Location: &things.Location{Type: "Point", Coordinates: loc},
+			Metadata: map[string]string{"capacity": "160L"},
+			Properties: map[string]things.Property{
+				"distance": {}, "level": {}, "fillRate": {},
+			},
+			Bindings: []things.Binding{
+				{DeviceID: b.device, Object: distURN, Resource: "5700", Input: "distance"},
+			},
+			ParamOverrides: map[string]float64{"sensorToBottom": 0.94},
+		}
+		if _, err := mgr.CreateObject(ctx, "default", obj); err != nil {
+			t.Fatalf("create %s: %v", b.name, err)
+		}
+	}
+
+	// Plats + metadata + paramursprung bevaras för 203:an.
+	sum, err := mgr.GetObject(ctx, "default", bins[0].id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if sum.Location == nil || sum.Metadata["capacity"] != "160L" {
+		t.Fatalf("summary=%+v, want location + capacity", sum)
+	}
+	if sum.ParamSources["usableHeight"] != things.ParamSourceVariant ||
+		sum.ParamSources["sensorToBottom"] != things.ParamSourceThing {
+		t.Fatalf("param sources=%+v, want variant/thing", sum.ParamSources)
+	}
+
+	// 15 cm avstånd -> nivå 0.79 -> 100% (full vid 79 cm sopor).
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	full := 0.15
+	for i, b := range bins {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if _, err := rt.HandleBatch(ctx, "default", fmt.Sprintf("m-full-%d", i), []things.Observation{
+			{Signal: things.ParseSignalID(b.device, "", distURN, "5700"), Value: &full,
+				Quality: things.QualityOK, ObservedAt: at, ReceivedAt: at},
+		}, at); err != nil {
+			t.Fatalf("batch %s: %v", b.name, err)
+		}
+	}
+	for _, b := range bins {
+		sum, err := mgr.GetObject(ctx, "default", b.id)
+		if err != nil {
+			t.Fatalf("get %s: %v", b.name, err)
+		}
+		if got := *sum.Values["fillRate"].Value; got < 99.99 || got > 100.01 {
+			t.Fatalf("%s fillRate=%v, want 100", b.name, got)
+		}
+	}
+
+	// Tom tunna: 94 cm avstånd -> nivå 0 -> 0%.
+	empty := 0.94
+	at := base.Add(time.Hour)
+	if _, err := rt.HandleBatch(ctx, "default", "m-empty", []things.Observation{
+		{Signal: things.ParseSignalID("milesight:203", "", distURN, "5700"), Value: &empty,
+			Quality: things.QualityOK, ObservedAt: at, ReceivedAt: at},
+	}, at); err != nil {
+		t.Fatalf("empty batch: %v", err)
+	}
+	sum, err = mgr.GetObject(ctx, "default", bins[0].id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got := *sum.Values["fillRate"].Value; got != 0 {
+		t.Fatalf("empty fillRate=%v, want 0", got)
 	}
 }

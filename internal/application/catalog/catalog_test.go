@@ -791,7 +791,7 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 	if got := c.ListTemplates(); len(got) != 11 {
 		t.Fatalf("listed=%d, want 11", len(got))
 	}
-	if got := c.ListVariants(); len(got) != 4 {
-		t.Fatalf("variants=%d, want 4 (wastebin A-D)", len(got))
+	if got := c.ListVariants(); len(got) != 5 {
+		t.Fatalf("variants=%d, want 5 (wastebin A-D + 160L)", len(got))
 	}
 }
