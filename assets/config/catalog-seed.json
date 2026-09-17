@@ -359,6 +359,15 @@
         "templateVersion": "v1",
         "paramValues": {"usableHeight": 0.79}
       }
+    },
+    {
+      "variant": {
+        "id": "wastebin-40L",
+        "version": "v1",
+        "templateId": "wastebin",
+        "templateVersion": "v1",
+        "paramValues": {"usableHeight": 0.40}
+      }
     }
   ]
 }
