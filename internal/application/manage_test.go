@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -1365,5 +1366,167 @@ func TestManageBoolTypes(t *testing.T) {
 	batch("s2", []things.Observation{rtBoolObs("s-sewer", dinURN, "5500", false, base.Add(time.Minute))}, base.Add(time.Minute))
 	if got := val("sewer-1", "overflowTime"); got != 60 {
 		t.Fatalf("overflowTime=%v, want 60", got)
+	}
+}
+
+// Startkatalogen end-to-end: seed -> en sak per mall -> beräkningar.
+// Motbevisar att seed-mallarna går att skapa saker från och att deras
+// recept är korrekt wired (soptunna fyllnadsgrad, passage-räknare).
+func TestManageSeedCatalogEndToEnd(t *testing.T) {
+	const (
+		seedDinURN  = "urn:oma:lwm2m:ext:3200"
+		seedDistURN = "urn:oma:lwm2m:ext:3330"
+		seedTempURN = "urn:oma:lwm2m:ext:3303"
+	)
+	raw, err := os.ReadFile("../../assets/config/catalog-seed.json")
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	seed, err := catalog.ParseSeed(raw)
+	if err != nil {
+		t.Fatalf("parse seed: %v", err)
+	}
+	mgr, _, fs, rt := mgmtSetup(t)
+	ctx := context.Background()
+	added, skipped, err := mgr.SeedCatalog(ctx, seed)
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if added != 15 || skipped != 0 {
+		t.Fatalf("seed added=%d skipped=%d, want 15/0", added, skipped)
+	}
+	// Idempotent: andra seedningen skippar allt.
+	added, skipped, err = mgr.SeedCatalog(ctx, seed)
+	if err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+	if added != 0 || skipped != 15 {
+		t.Fatalf("reseed added=%d skipped=%d, want 0/15", added, skipped)
+	}
+
+	bind := func(device, object, resource, input string) things.Binding {
+		return things.Binding{DeviceID: device, Object: object, Resource: resource, Input: input}
+	}
+	props := func(ids ...string) map[string]things.Property {
+		out := make(map[string]things.Property, len(ids))
+		for _, id := range ids {
+			out[id] = things.Property{}
+		}
+		return out
+	}
+	objects := []catalog.ObjectSpec{
+		{
+			ThingID: "bin-1", TemplateID: "wastebin", TemplateVersion: "v1",
+			VariantID: "wastebin-B", VariantVersion: "v1",
+			Properties:     props("distance", "level", "fillRate"),
+			Bindings:       []things.Binding{bind("s-bin", seedDistURN, "5700", "distance")},
+			ParamOverrides: map[string]float64{"sensorToBottom": 1.5},
+		},
+		{
+			ThingID: "room-1", TemplateID: "room", TemplateVersion: "v1",
+			Properties: props("temperature.window", "temperature.center", "temperature.door", "temperature.average"),
+			Bindings: []things.Binding{
+				bind("s-r1", seedTempURN, "5700", "temperature.window"),
+				bind("s-r2", seedTempURN, "5700", "temperature.center"),
+				bind("s-r3", seedTempURN, "5700", "temperature.door"),
+			},
+		},
+		{
+			ThingID: "building-1", TemplateID: "building", TemplateVersion: "v1",
+			Properties: props("energy", "power", "temperature"),
+			Bindings: []things.Binding{
+				bind("s-b", seedTempURN, "5700", "temperature"),
+			},
+		},
+		{
+			ThingID: "poi-1", TemplateID: "pointofinterest", TemplateVersion: "v1",
+			Properties: props("temperature"),
+			Bindings:   []things.Binding{bind("s-poi", seedTempURN, "5700", "temperature")},
+		},
+		{
+			ThingID: "desk-1", TemplateID: "desk", TemplateVersion: "v1",
+			Properties: props("presence"),
+			Bindings:   []things.Binding{bind("s-desk", seedDinURN, "5500", "presence")},
+		},
+		{
+			ThingID: "lifebuoy-1", TemplateID: "lifebuoy", TemplateVersion: "v1",
+			Properties: props("presence"),
+			Bindings:   []things.Binding{bind("s-life", seedDinURN, "5500", "presence")},
+		},
+		{
+			ThingID: "passage-1", TemplateID: "passage", TemplateVersion: "v1",
+			Properties: props("door", "passages"),
+			Bindings:   []things.Binding{bind("s-pass", seedDinURN, "5500", "door")},
+		},
+		{
+			ThingID: "pump-1", TemplateID: "pumpingstation", TemplateVersion: "v1",
+			Properties: props("run", "runTime"),
+			Bindings:   []things.Binding{bind("s-pump", seedDinURN, "5500", "run")},
+		},
+		{
+			ThingID: "sewer-1", TemplateID: "sewer", TemplateVersion: "v1",
+			Properties: props("distance", "level", "fillRate", "overflow", "overflowTime"),
+			Bindings: []things.Binding{
+				bind("s-sewer", seedDistURN, "5700", "distance"),
+				bind("s-sewer", seedDinURN, "5500", "overflow"),
+			},
+			ParamOverrides: map[string]float64{"usableHeight": 2.0, "sensorToBottom": 2.5},
+		},
+		{
+			ThingID: "water-1", TemplateID: "watermeter", TemplateVersion: "v1",
+			Properties: props("volume", "leakage", "backflow", "fraud"),
+			Bindings: []things.Binding{
+				bind("s-wm", "urn:oma:lwm2m:ext:3424", "1", "volume"),
+				bind("s-wm", "urn:oma:lwm2m:ext:3424", "10", "leakage"),
+				bind("s-wm", "urn:oma:lwm2m:ext:3424", "11", "backflow"),
+				bind("s-wm", "urn:oma:lwm2m:ext:3424", "13", "fraud"),
+			},
+		},
+		{
+			ThingID: "sink-1", TemplateID: "sink", TemplateVersion: "v1",
+			Properties: props("temperature", "presence"),
+			Bindings: []things.Binding{
+				bind("s-sink", seedTempURN, "5700", "temperature"),
+				bind("s-sink", seedDinURN, "5500", "presence"),
+			},
+		},
+	}
+	_ = fs
+	for _, obj := range objects {
+		if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+			t.Fatalf("create %s: %v", obj.ThingID, err)
+		}
+	}
+
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	dist := 0.3
+	if _, err := rt.HandleBatch(ctx, "t", "m1", []things.Observation{
+		{Signal: things.ParseSignalID("s-bin", "", seedDistURN, "5700"), Value: &dist,
+			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+	}, base); err != nil {
+		t.Fatalf("bin batch: %v", err)
+	}
+	sum, err := mgr.GetObject(ctx, "t", "bin-1")
+	if err != nil {
+		t.Fatalf("get bin: %v", err)
+	}
+	if got := *sum.Values["fillRate"].Value; got < 99.99 || got > 100.01 {
+		t.Fatalf("seed bin fillRate=%v, want 100", got)
+	}
+	for i, open := range []bool{true, true, false, true} {
+		at := base.Add(time.Duration(i) * time.Minute)
+		if _, err := rt.HandleBatch(ctx, "t", fmt.Sprintf("seed-p%d", i), []things.Observation{
+			{Signal: things.ParseSignalID("s-pass", "", seedDinURN, "5500"), BoolValue: &open,
+				Quality: things.QualityOK, ObservedAt: at, ReceivedAt: at},
+		}, at); err != nil {
+			t.Fatalf("passage batch: %v", err)
+		}
+	}
+	sum, err = mgr.GetObject(ctx, "t", "passage-1")
+	if err != nil {
+		t.Fatalf("get passage: %v", err)
+	}
+	if got := *sum.Values["passages"].Value; got != 2 {
+		t.Fatalf("seed passage count=%v, want 2", got)
 	}
 }

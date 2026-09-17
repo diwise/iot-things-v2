@@ -3,6 +3,7 @@ package catalog
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -760,5 +761,37 @@ func TestPutTemplatePrimaryProperty(t *testing.T) {
 	tmpl.Template.PrimaryProperty = "level"
 	if err := c.PutTemplate(tmpl); err != nil {
 		t.Fatalf("valid primary property: %v", err)
+	}
+}
+
+// Startkatalogen: seed-filen parsar och varje mall publiceras utan fel.
+func TestSeedFileParsesAndPublishes(t *testing.T) {
+	raw, err := os.ReadFile("../../../assets/config/catalog-seed.json")
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	seed, err := ParseSeed(raw)
+	if err != nil {
+		t.Fatalf("parse seed: %v", err)
+	}
+	if len(seed.Templates) != 11 {
+		t.Fatalf("templates=%d, want 11 (en per iot-things-typ)", len(seed.Templates))
+	}
+	c := New()
+	for _, spec := range seed.Templates {
+		if err := c.PutTemplate(spec); err != nil {
+			t.Fatalf("publish %s/%s: %v", spec.Template.ID, spec.Template.Version, err)
+		}
+	}
+	for _, spec := range seed.Variants {
+		if err := c.PutVariant(spec); err != nil {
+			t.Fatalf("publish variant %s/%s: %v", spec.Variant.ID, spec.Variant.Version, err)
+		}
+	}
+	if got := c.ListTemplates(); len(got) != 11 {
+		t.Fatalf("listed=%d, want 11", len(got))
+	}
+	if got := c.ListVariants(); len(got) != 4 {
+		t.Fatalf("variants=%d, want 4 (wastebin A-D)", len(got))
 	}
 }

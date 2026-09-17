@@ -40,6 +40,6 @@
 - [x] G1-G6, G8-G9 (kärna testbar utan broker/DB); G7 delvis (slog utan hemligheter, metrics/tracing återstår)
 - [x] E1-E6 (E6-resten: beständig katalog, plats/metadata/sök, träd/detach/total, OpenAPI); E7 påbörjad (isolerad drill + kontraktstester; konsumentomställning återstår)
 - [x] A1/A3-A7 (struktur); A2/A8-A29 delvis via enhetstester (full E2E återstår)
-- [ ] K1-K6 kvarstår delvis: K4-backend + beständig katalog klara (retention + övervakning återstår); övriga se kod-TODO + THNGS_NEW.md kap 12
+- [ ] K1-K6 kvarstår delvis: K4-backend + beständig katalog + startkatalog klara (retention + övervakning återstår); övriga se kod-TODO + THNGS_NEW.md kap 12
 
 Review 2026-09-16: 10 fynd fixade (bare-prefix, device-krav, ok/uncertain-strikthet, dedup-tenant, outbox-idempotens, historik-kvalitet, cykelskydd, relationsvalidering, kontrakt-tid/version, API-tester). `gofmt`/`vet`/`test` grönt.

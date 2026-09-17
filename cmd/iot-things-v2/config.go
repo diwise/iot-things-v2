@@ -24,6 +24,7 @@ const (
 	authzAccessObject
 	thingsFile
 	configFile
+	catalogSeedFile
 	migrateBindings
 
 	logLevel

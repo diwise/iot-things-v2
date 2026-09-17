@@ -12,6 +12,7 @@
 package catalog
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -875,4 +876,23 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// SeedFile is the on-disk start catalog (assets/config/catalog-seed.json):
+// API-shaped specs, one entry per thing type in iot-things. Published
+// versions are immutable: never change a shipped version, add a new one.
+type SeedFile struct {
+	Description string         `json:"description,omitempty"`
+	Templates   []TemplateSpec `json:"templates"`
+	Variants    []VariantSpec  `json:"variants,omitempty"`
+}
+
+// ParseSeed decodes a seed file. Validation happens at publish time
+// (SeedCatalog), so malformed specs surface with their template identity.
+func ParseSeed(data []byte) (SeedFile, error) {
+	var seed SeedFile
+	if err := json.Unmarshal(data, &seed); err != nil {
+		return SeedFile{}, fmt.Errorf("catalog: invalid seed file: %w", err)
+	}
+	return seed, nil
 }

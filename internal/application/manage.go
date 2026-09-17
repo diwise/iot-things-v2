@@ -9,6 +9,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -118,6 +119,36 @@ func (m *Manager) PublishVariant(_ context.Context, spec catalog.VariantSpec) er
 		}
 	}
 	return nil
+}
+
+// SeedCatalog publishes seed file versions, skipping already-published
+// ones. Idempotent across restarts: restore loads persisted versions
+// first, so re-seeding only fills gaps. Real errors abort with the
+// offending identity; conflicts count as skipped.
+func (m *Manager) SeedCatalog(ctx context.Context, seed catalog.SeedFile) (added, skipped int, err error) {
+	for _, spec := range seed.Templates {
+		if err := m.PublishTemplate(ctx, spec); err != nil {
+			if errors.Is(err, things.ErrConflict) {
+				skipped++
+				continue
+			}
+			return added, skipped, fmt.Errorf("seed template %s/%s: %w",
+				spec.Template.ID, spec.Template.Version, err)
+		}
+		added++
+	}
+	for _, spec := range seed.Variants {
+		if err := m.PublishVariant(ctx, spec); err != nil {
+			if errors.Is(err, things.ErrConflict) {
+				skipped++
+				continue
+			}
+			return added, skipped, fmt.Errorf("seed variant %s/%s: %w",
+				spec.Variant.ID, spec.Variant.Version, err)
+		}
+		added++
+	}
+	return added, skipped, nil
 }
 
 // ListTemplates returnerar publicerade mallversioner sorterade på id/version.

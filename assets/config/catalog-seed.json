@@ -1,0 +1,226 @@
+{
+  "description": "Startkatalog för iot-things-v2: en mall per saktyp i iot-things (config.yaml), uttryckt med generiska operatorer. Container/WasteContainer/Sandstorage täcks av wastebin-mallen med modellvarianter; övriga typer har egna mallar. Formatet är exakt API-form (TemplateSpec/VariantSpec) så filen kan även POSTas mot /api/v1/catalog. Publicerade versioner är oföränderliga: ändra aldrig en version i denna fil, lägg till en ny.",
+  "templates": [
+    {
+      "template": {
+        "id": "wastebin",
+        "version": "v1",
+        "required": ["distance", "level", "fillRate"],
+        "classification": "container",
+        "labels": ["Avfall"],
+        "primaryProperty": "fillRate"
+      },
+      "paramDefaults": {
+        "usableHeight": 1.0,
+        "sensorToBottom": 1.5
+      },
+      "overridable": ["usableHeight", "sensorToBottom"],
+      "recipes": [
+        {
+          "name": "wastebin-level",
+          "operator": "distanceToLevel",
+          "version": "v1",
+          "inputs": ["distance"],
+          "outputs": ["level"],
+          "params": ["sensorToBottom"]
+        },
+        {
+          "name": "fill-rate",
+          "operator": "fillRate",
+          "version": "v1",
+          "inputs": ["level"],
+          "outputs": ["fillRate"],
+          "params": ["usableHeight"]
+        }
+      ]
+    },
+    {
+      "template": {
+        "id": "room",
+        "version": "v1",
+        "optional": ["temperature.window", "temperature.center", "temperature.door", "temperature.average", "humidity", "illuminance", "co2"],
+        "repeatGroups": ["temperature."],
+        "classification": "room",
+        "labels": ["Inomhusklimat"],
+        "primaryProperty": "temperature.average"
+      },
+      "recipes": [
+        {
+          "name": "mean-temp",
+          "operator": "mean",
+          "version": "v1",
+          "inputs": ["temperature.window", "temperature.center", "temperature.door"],
+          "outputs": ["temperature.average"]
+        }
+      ]
+    },
+    {
+      "template": {
+        "id": "building",
+        "version": "v1",
+        "optional": ["energy", "power", "temperature"],
+        "classification": "building",
+        "labels": ["Byggnad"],
+        "primaryProperty": "temperature"
+      }
+    },
+    {
+      "template": {
+        "id": "pointofinterest",
+        "version": "v1",
+        "optional": ["temperature"],
+        "classification": "pointofinterest",
+        "primaryProperty": "temperature"
+      }
+    },
+    {
+      "template": {
+        "id": "desk",
+        "version": "v1",
+        "required": ["presence"],
+        "classification": "desk",
+        "primaryProperty": "presence"
+      }
+    },
+    {
+      "template": {
+        "id": "lifebuoy",
+        "version": "v1",
+        "required": ["presence"],
+        "classification": "lifebuoy",
+        "primaryProperty": "presence"
+      }
+    },
+    {
+      "template": {
+        "id": "passage",
+        "version": "v1",
+        "required": ["door", "passages"],
+        "classification": "passage",
+        "primaryProperty": "passages"
+      },
+      "recipes": [
+        {
+          "name": "count-passages",
+          "operator": "counter",
+          "version": "v1",
+          "inputs": ["door"],
+          "outputs": ["passages"]
+        }
+      ]
+    },
+    {
+      "template": {
+        "id": "pumpingstation",
+        "version": "v1",
+        "required": ["run", "runTime"],
+        "classification": "pumpingstation",
+        "primaryProperty": "runTime"
+      },
+      "recipes": [
+        {
+          "name": "run-time",
+          "operator": "activeTime",
+          "version": "v1",
+          "inputs": ["run"],
+          "outputs": ["runTime"]
+        }
+      ]
+    },
+    {
+      "template": {
+        "id": "sewer",
+        "version": "v1",
+        "required": ["distance", "level", "fillRate", "overflow", "overflowTime"],
+        "classification": "sewer",
+        "labels": ["Avlopp"],
+        "primaryProperty": "fillRate"
+      },
+      "paramDefaults": {
+        "usableHeight": 1.0,
+        "sensorToBottom": 1.0
+      },
+      "overridable": ["usableHeight", "sensorToBottom"],
+      "recipes": [
+        {
+          "name": "sewer-level",
+          "operator": "distanceToLevel",
+          "version": "v1",
+          "inputs": ["distance"],
+          "outputs": ["level"],
+          "params": ["sensorToBottom"]
+        },
+        {
+          "name": "sewer-fill",
+          "operator": "fillRate",
+          "version": "v1",
+          "inputs": ["level"],
+          "outputs": ["fillRate"],
+          "params": ["usableHeight"]
+        },
+        {
+          "name": "overflow-time",
+          "operator": "activeTime",
+          "version": "v1",
+          "inputs": ["overflow"],
+          "outputs": ["overflowTime"]
+        }
+      ]
+    },
+    {
+      "template": {
+        "id": "watermeter",
+        "version": "v1",
+        "required": ["volume", "leakage", "backflow", "fraud"],
+        "classification": "watermeter",
+        "primaryProperty": "volume"
+      }
+    },
+    {
+      "template": {
+        "id": "sink",
+        "version": "v1",
+        "optional": ["temperature", "presence", "power", "energy", "distance", "digitalInput", "illuminance", "humidity"],
+        "classification": "sink"
+      }
+    }
+  ],
+  "variants": [
+    {
+      "variant": {
+        "id": "wastebin-A",
+        "version": "v1",
+        "templateId": "wastebin",
+        "templateVersion": "v1",
+        "paramValues": {"usableHeight": 0.8}
+      }
+    },
+    {
+      "variant": {
+        "id": "wastebin-B",
+        "version": "v1",
+        "templateId": "wastebin",
+        "templateVersion": "v1",
+        "paramValues": {"usableHeight": 1.2}
+      }
+    },
+    {
+      "variant": {
+        "id": "wastebin-C",
+        "version": "v1",
+        "templateId": "wastebin",
+        "templateVersion": "v1",
+        "paramValues": {"usableHeight": 1.5}
+      }
+    },
+    {
+      "variant": {
+        "id": "wastebin-D",
+        "version": "v1",
+        "templateId": "wastebin",
+        "templateVersion": "v1",
+        "paramValues": {"usableHeight": 1.8}
+      }
+    }
+  ]
+}

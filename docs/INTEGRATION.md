@@ -80,8 +80,10 @@ enbart things-kontrakten.
 
 ## 5. Driftsättning (förslag)
 
-1. Deploya v2 mot isolerad broker + tom DB (drill nedan). Katalog
-   publiceras via `/api/v1/catalog/*`, saker skapas via `/api/v1/things`.
+1. Deploya v2 mot isolerad broker + tom DB (drill nedan). Startkatalogen
+   (en mall per iot-things-typ + wastebin-varianter) seedas automatiskt
+   från `assets/config/catalog-seed.json`; egna mallar publiceras via
+   `/api/v1/catalog/*`, saker skapas via `/api/v1/things`.
 2. Anslut mot delad broker (read-only på `message.accepted`) bredvid v1.
    Verifiera att v1 flödar oförändrat + att v2 beräknar samma värden
    (jämför stickprov v1-`thing.updated` mot v2-översikter).

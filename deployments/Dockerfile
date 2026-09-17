@@ -23,6 +23,7 @@ WORKDIR /opt/diwise
 COPY --from=builder --chown=1001 /app/assets/config/config.yaml /opt/diwise/config/config.yaml
 COPY --chown=1001 assets/config/authz.rego /opt/diwise/config/authz.rego
 COPY --chown=1001 assets/config/things.csv /opt/diwise/config/things.csv
+COPY --from=builder --chown=1001 /app/assets/config/catalog-seed.json /opt/diwise/config/catalog-seed.json
 COPY --from=builder --chown=1001 /app/cmd/iot-things-v2/iot-things-v2 /opt/diwise
 
 RUN chown 1001 /opt/diwise

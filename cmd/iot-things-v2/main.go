@@ -47,6 +47,7 @@ func defaultFlags() flagMap {
 		authzAccessObject: "false",
 		thingsFile:        "/opt/diwise/config/things.csv",
 		configFile:        "/opt/diwise/config/config.yaml",
+		catalogSeedFile:   "/opt/diwise/config/catalog-seed.json",
 		migrateBindings:   "true",
 
 		logLevel: "debug",
@@ -185,6 +186,16 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 				}
 				owned.storage = nil
 				return fmt.Errorf("unable to seed things: %w", err)
+			}
+
+			log.Debug("seeding catalog...")
+			if err := seedCatalog(ctx, flags[catalogSeedFile], mgr); err != nil {
+				if backend != nil {
+					backend.Close()
+					backend = nil
+				}
+				owned.storage = nil
+				return fmt.Errorf("unable to seed catalog: %w", err)
 			}
 
 			if migrateBindingsEnabled(flags) {
@@ -352,6 +363,7 @@ func parseExternalConfig(ctx context.Context, flags flagMap) (context.Context, f
 	flags[authzAccessObject] = envOrDef(ctx, "AUTHZ_ACCESS_OBJECT_ENABLED", flags[authzAccessObject])
 	flags[thingsFile] = envOrDef(ctx, "THINGS_FILE", flags[thingsFile])
 	flags[configFile] = envOrDef(ctx, "CONFIG_FILE", flags[configFile])
+	flags[catalogSeedFile] = envOrDef(ctx, "CATALOG_SEED_FILE", flags[catalogSeedFile])
 	flags[migrateBindings] = envOrDef(ctx, "THINGS_MIGRATE_BINDINGS", flags[migrateBindings])
 
 	flags[dbHost] = envOrDef(ctx, "POSTGRES_HOST", flags[dbHost])
@@ -375,6 +387,7 @@ func parseExternalConfig(ctx context.Context, flags flagMap) (context.Context, f
 	flag.Func("authz-access-object", "enable access-object authorization policy result model", apply(authzAccessObject))
 	flag.Func("things", "list of known things", apply(thingsFile))
 	flag.Func("config", "a yaml file with configuration", apply(configFile))
+	flag.Func("catalog-seed", "seed file with start catalog (templates/variants)", apply(catalogSeedFile))
 	flag.Func("loglevel", "set the log level", apply(logLevel))
 	flag.Parse()
 
@@ -422,6 +435,29 @@ func newApp(ctx context.Context, r application.ThingsReader, w application.Thing
 
 func seed(ctx context.Context, fp io.Reader, a application.ThingsApp) error {
 	return a.Seed(ctx, fp)
+}
+
+// seedCatalog publishes the start catalog (one template per iot-things
+// type) idempotently: already-published versions are skipped, so restarts
+// only fill gaps. A missing file warns and continues (publishing via API
+// remains); corrupt or invalid content fails startup.
+func seedCatalog(ctx context.Context, path string, mgr *application.Manager) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		logging.GetFromContext(ctx).Warn("catalog seed file not loaded, starting with restorable catalog only",
+			"path", path, "err", err.Error())
+		return nil
+	}
+	seed, err := catalog.ParseSeed(raw)
+	if err != nil {
+		return err
+	}
+	added, skipped, err := mgr.SeedCatalog(ctx, seed)
+	if err != nil {
+		return err
+	}
+	logging.GetFromContext(ctx).Info("catalog seed applied", "added", added, "skipped", skipped)
+	return nil
 }
 
 func exitIf(err error, logger *slog.Logger, msg string, args ...any) {
