@@ -402,7 +402,15 @@ func newApp(ctx context.Context, r application.ThingsReader, w application.Thing
 	// (dränering utan omberäkning). Manager: katalog + objektlivscykel.
 	rt := application.NewRuntime(store)
 	pub := &application.TopicPublisher{MsgCtx: m}
-	mgr := application.NewManager(catalog.New(), rt, store)
+	cat := catalog.New()
+	var opts []application.ManagerOption
+	if cs, ok := store.(catalog.Store); ok {
+		// Beständig katalog: återställ publicerade versioner så att
+		// saker överlever omstart med sina mallreferenser intakta.
+		cat.Restore(cs.LoadTemplates(), cs.LoadVariants())
+		opts = append(opts, application.WithCatalogStore(cs))
+	}
+	mgr := application.NewManager(cat, rt, store, opts...)
 	a := application.New(r, w, m, rt, pub)
 	err := a.LoadConfig(ctx, cfg)
 	if err != nil {

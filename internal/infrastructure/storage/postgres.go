@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application"
+	"github.com/diwise/iot-things-v2/internal/application/catalog"
+	"github.com/diwise/iot-things-v2/internal/application/things"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -563,4 +565,97 @@ func (s *PgStore) PutThing(tenant, id string, data []byte, revision int64) int64
 		 ON CONFLICT(tenant, id) DO UPDATE SET revision=EXCLUDED.revision, data=EXCLUDED.data, updated_at=now()`,
 		tenant, id, revision, raw)
 	return revision
+}
+
+// SaveTemplate persists one published template version. An already stored
+// version reports ErrConflict (immutable); parallel publishers converge via
+// ON CONFLICT DO NOTHING.
+func (s *PgStore) SaveTemplate(spec catalog.TemplateSpec) error {
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := s.ctx()
+	defer cancel()
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO templates_v2(id, version, spec) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`,
+		spec.Template.ID, spec.Template.Version, raw)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: template %s/%s already published",
+			things.ErrConflict, spec.Template.ID, spec.Template.Version)
+	}
+	return nil
+}
+
+// SaveVariant persists one published variant version (same semantics as
+// SaveTemplate).
+func (s *PgStore) SaveVariant(spec catalog.VariantSpec) error {
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := s.ctx()
+	defer cancel()
+	tag, err := s.pool.Exec(ctx,
+		`INSERT INTO variants_v2(id, version, spec) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`,
+		spec.Variant.ID, spec.Variant.Version, raw)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: variant %s/%s already published",
+			things.ErrConflict, spec.Variant.ID, spec.Variant.Version)
+	}
+	return nil
+}
+
+// LoadTemplates returns all persisted template versions for catalog restore.
+func (s *PgStore) LoadTemplates() []catalog.TemplateSpec {
+	ctx, cancel := s.ctx()
+	defer cancel()
+	rows, err := s.pool.Query(ctx, `SELECT spec FROM templates_v2 ORDER BY id, version`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []catalog.TemplateSpec
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return out
+		}
+		var spec catalog.TemplateSpec
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			continue
+		}
+		out = append(out, spec)
+	}
+	return out
+}
+
+// LoadVariants returns all persisted variant versions for catalog restore.
+func (s *PgStore) LoadVariants() []catalog.VariantSpec {
+	ctx, cancel := s.ctx()
+	defer cancel()
+	rows, err := s.pool.Query(ctx, `SELECT spec FROM variants_v2 ORDER BY id, version`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []catalog.VariantSpec
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return out
+		}
+		var spec catalog.VariantSpec
+		if err := json.Unmarshal(raw, &spec); err != nil {
+			continue
+		}
+		out = append(out, spec)
+	}
+	return out
 }

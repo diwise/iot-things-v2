@@ -55,25 +55,57 @@ type Overview struct {
 
 // Manager samordnar katalog, runtime och läsningar.
 type Manager struct {
-	cat   *catalog.Catalog
-	rt    *Runtime
-	store RuntimeStore
+	cat      *catalog.Catalog
+	rt       *Runtime
+	store    RuntimeStore
+	catStore catalog.Store
+}
+
+// ManagerOption configures a Manager.
+type ManagerOption func(*Manager)
+
+// WithCatalogStore persists published versions across restarts (nil =
+// memory-only catalog, lost on restart).
+func WithCatalogStore(s catalog.Store) ManagerOption {
+	return func(m *Manager) { m.catStore = s }
 }
 
 // NewManager skapar ett hanteringslager. cat får delas med anroparen vid
 // test (samma pekare).
-func NewManager(cat *catalog.Catalog, rt *Runtime, store RuntimeStore) *Manager {
-	return &Manager{cat: cat, rt: rt, store: store}
+func NewManager(cat *catalog.Catalog, rt *Runtime, store RuntimeStore, opts ...ManagerOption) *Manager {
+	m := &Manager{cat: cat, rt: rt, store: store}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
-// PublishTemplate publicerar en mallversion (oföränderlig efter publicering).
+// PublishTemplate publicerar en mallversion (oföränderlig efter publicering)
+// och persisterar den vid konfigurerad kataloglagring.
 func (m *Manager) PublishTemplate(_ context.Context, spec catalog.TemplateSpec) error {
-	return m.cat.PutTemplate(spec)
+	if err := m.cat.PutTemplate(spec); err != nil {
+		return err
+	}
+	if m.catStore != nil {
+		if err := m.catStore.SaveTemplate(spec); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// PublishVariant publicerar en variantversion låst till exakt mallversion.
+// PublishVariant publicerar en variantversion låst till exakt mallversion
+// och persisterar den vid konfigurerad kataloglagring.
 func (m *Manager) PublishVariant(_ context.Context, spec catalog.VariantSpec) error {
-	return m.cat.PutVariant(spec)
+	if err := m.cat.PutVariant(spec); err != nil {
+		return err
+	}
+	if m.catStore != nil {
+		if err := m.catStore.SaveVariant(spec); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListTemplates returnerar publicerade mallversioner sorterade på id/version.

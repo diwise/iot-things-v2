@@ -815,6 +815,89 @@ func TestManageOverviewCrossTenantIsNotFound(t *testing.T) {
 	}
 }
 
+// memCatalogStore är ett testbart catalog.Store i minnet.
+type memCatalogStore struct {
+	templates []catalog.TemplateSpec
+	variants  []catalog.VariantSpec
+}
+
+func (s *memCatalogStore) SaveTemplate(spec catalog.TemplateSpec) error {
+	for _, prev := range s.templates {
+		if prev.Template.ID == spec.Template.ID && prev.Template.Version == spec.Template.Version {
+			return fmt.Errorf("%w: template %s/%s already published",
+				things.ErrConflict, spec.Template.ID, spec.Template.Version)
+		}
+	}
+	s.templates = append(s.templates, spec)
+	return nil
+}
+
+func (s *memCatalogStore) SaveVariant(spec catalog.VariantSpec) error {
+	for _, prev := range s.variants {
+		if prev.Variant.ID == spec.Variant.ID && prev.Variant.Version == spec.Variant.Version {
+			return fmt.Errorf("%w: variant %s/%s already published",
+				things.ErrConflict, spec.Variant.ID, spec.Variant.Version)
+		}
+	}
+	s.variants = append(s.variants, spec)
+	return nil
+}
+
+func (s *memCatalogStore) LoadTemplates() []catalog.TemplateSpec {
+	return append([]catalog.TemplateSpec(nil), s.templates...)
+}
+
+func (s *memCatalogStore) LoadVariants() []catalog.VariantSpec {
+	return append([]catalog.VariantSpec(nil), s.variants...)
+}
+
+// Beständig katalog: publicering skriver igenom till storet och en ny
+// katalog återställd från storet kan skapa saker utan ompublicering
+// (omstartsprotokollet i cmd/newApp).
+func TestManageCatalogPersistence(t *testing.T) {
+	ctx := context.Background()
+	cs := &memCatalogStore{}
+	fs := newFakeStore()
+	mgr := NewManager(catalog.New(), NewRuntime(fs), fs, WithCatalogStore(cs))
+
+	tmpl := catalog.TemplateSpec{
+		Template:      things.Template{ID: "wastebin", Version: "v1", Required: []string{"distance"}},
+		ParamDefaults: map[string]float64{"usableHeight": 1.0},
+	}
+	if err := mgr.PublishTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	variant := catalog.VariantSpec{Variant: things.Variant{
+		ID: "wastebin-B", Version: "v1",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		ParamValues: map[string]float64{"usableHeight": 1.2},
+	}}
+	if err := mgr.PublishVariant(ctx, variant); err != nil {
+		t.Fatalf("publish variant: %v", err)
+	}
+	if len(cs.templates) != 1 || len(cs.variants) != 1 {
+		t.Fatalf("write-through templates=%d variants=%d, want 1/1", len(cs.templates), len(cs.variants))
+	}
+
+	restored := catalog.New()
+	restored.Restore(cs.LoadTemplates(), cs.LoadVariants())
+	mgr2 := NewManager(restored, NewRuntime(fs), fs, WithCatalogStore(cs))
+	if _, err := mgr2.GetTemplate(ctx, "wastebin", "v1"); err != nil {
+		t.Fatalf("restored template: %v", err)
+	}
+	obj := catalog.ObjectSpec{
+		ThingID: "bin-42", TemplateID: "wastebin", TemplateVersion: "v1",
+		VariantID: "wastebin-B", VariantVersion: "v1",
+		Properties: map[string]things.Property{"distance": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s1", Object: rtTempURN, Resource: "5700", Input: "distance"},
+		},
+	}
+	if _, err := mgr2.CreateObject(ctx, "t", obj); err != nil {
+		t.Fatalf("create from restored catalog: %v", err)
+	}
+}
+
 // Historik-paging: offset hoppar över de äldsta raderna (äldst först).
 func TestManageHistoryOffset(t *testing.T) {
 	mgr, _, _, rt := mgmtSetup(t)
@@ -894,6 +977,7 @@ func TestManageSearchFilterAndPaging(t *testing.T) {
 
 // Katalogläsning: enstaka mall/variant, okänd version ger NotFound.
 func TestManageGetTemplateVariant(t *testing.T) {
+
 	mgr, _, _, _ := mgmtSetup(t)
 	ctx := context.Background()
 	mgmtWastebin(t, mgr)

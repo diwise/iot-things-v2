@@ -116,6 +116,17 @@ type Catalog struct {
 	variants  map[string]VariantSpec
 }
 
+// Store persists published versions across restarts. Memory-only
+// deployments pass nil and lose the catalog on restart (dev/test).
+// The database is source of truth on conflicts: published versions are
+// immutable, so equal keys must carry equal content.
+type Store interface {
+	SaveTemplate(spec TemplateSpec) error
+	SaveVariant(spec VariantSpec) error
+	LoadTemplates() []TemplateSpec
+	LoadVariants() []VariantSpec
+}
+
 // New returns an empty catalog.
 func New() *Catalog {
 	return &Catalog{
@@ -408,6 +419,26 @@ func (c *Catalog) GetVariant(id, version string) (VariantSpec, bool) {
 		return VariantSpec{}, false
 	}
 	return cloneVariantSpec(spec), true
+}
+
+// Restore loads previously published versions from a Store at startup.
+// Specs were validated at publish time; restore overwrites without
+// validation or conflict errors (the database is source of truth).
+func (c *Catalog) Restore(templates []TemplateSpec, variants []VariantSpec) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, spec := range templates {
+		if spec.Template.ID == "" || spec.Template.Version == "" {
+			continue
+		}
+		c.templates[versionKey(spec.Template.ID, spec.Template.Version)] = cloneTemplateSpec(spec)
+	}
+	for _, spec := range variants {
+		if spec.Variant.ID == "" || spec.Variant.Version == "" {
+			continue
+		}
+		c.variants[versionKey(spec.Variant.ID, spec.Variant.Version)] = cloneVariantSpec(spec)
+	}
 }
 
 // Compile materializes the effective configuration for obj: required

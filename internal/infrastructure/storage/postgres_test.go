@@ -44,7 +44,7 @@ func pgTestStore(t *testing.T) *PgStore {
 	t.Cleanup(func() { s.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	for _, table := range []string{"history_v2", "relations_v2", "outbox_v2", "outbox_seen_v2", "dedup_v2", "things_v2"} {
+	for _, table := range []string{"history_v2", "relations_v2", "outbox_v2", "outbox_seen_v2", "dedup_v2", "things_v2", "templates_v2", "variants_v2"} {
 		if _, err := s.pool.Exec(ctx, `DELETE FROM `+table); err != nil {
 			t.Fatalf("truncate %s: %v", table, err)
 		}
@@ -52,7 +52,41 @@ func pgTestStore(t *testing.T) *PgStore {
 	return s
 }
 
+func TestPostgresCatalog(t *testing.T) {
+	s := pgTestStore(t)
+	tmpl := catalog.TemplateSpec{
+		Template:      things.Template{ID: "wastebin", Version: "v1", Required: []string{"distance"}},
+		ParamDefaults: map[string]float64{"usableHeight": 1.0},
+	}
+	if err := s.SaveTemplate(tmpl); err != nil {
+		t.Fatalf("save template: %v", err)
+	}
+	if err := s.SaveTemplate(tmpl); err == nil {
+		t.Fatal("duplicate template save must conflict")
+	}
+	variant := catalog.VariantSpec{Variant: things.Variant{
+		ID: "wastebin-B", Version: "v1",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		ParamValues: map[string]float64{"usableHeight": 1.2},
+	}}
+	if err := s.SaveVariant(variant); err != nil {
+		t.Fatalf("save variant: %v", err)
+	}
+	if err := s.SaveVariant(variant); err == nil {
+		t.Fatal("duplicate variant save must conflict")
+	}
+	templates := s.LoadTemplates()
+	if len(templates) != 1 || templates[0].Template.ID != "wastebin" {
+		t.Fatalf("templates=%+v, want wastebin/v1", templates)
+	}
+	variants := s.LoadVariants()
+	if len(variants) != 1 || variants[0].Variant.ParamValues["usableHeight"] != 1.2 {
+		t.Fatalf("variants=%+v, want wastebin-B/v1", variants)
+	}
+}
+
 func TestPostgresThingCAS(t *testing.T) {
+
 	s := pgTestStore(t)
 	a := application.RuntimeStore(s)
 	st := application.StoredThingState{ConfigJSON: []byte(`{"a":1}`), Revision: 1, DataRevision: 1}

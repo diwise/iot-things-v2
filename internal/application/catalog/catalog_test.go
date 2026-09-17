@@ -667,3 +667,27 @@ func TestConcurrentReadWrite(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestRestore(t *testing.T) {
+	src := New()
+	if err := src.PutTemplate(wastebinTemplate()); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	dst := New()
+	if _, ok := dst.GetTemplate("wastebin", "v1"); ok {
+		t.Fatal("dst must start empty")
+	}
+	dst.Restore(src.ListTemplates(), src.ListVariants())
+	got, ok := dst.GetTemplate("wastebin", "v1")
+	if !ok {
+		t.Fatal("restored template missing")
+	}
+	if len(got.Recipes) != len(wastebinTemplate().Recipes) {
+		t.Fatalf("recipes=%d, want %d", len(got.Recipes), len(wastebinTemplate().Recipes))
+	}
+	// Ogiltiga poster ignoreras, giltiga lastas.
+	dst.Restore([]TemplateSpec{{Template: things.Template{}}}, nil)
+	if _, ok := dst.GetTemplate("wastebin", "v1"); !ok {
+		t.Fatal("valid entry must survive restore with invalid rows")
+	}
+}
