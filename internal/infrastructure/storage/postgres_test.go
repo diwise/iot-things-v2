@@ -119,6 +119,32 @@ func TestPostgresThingCAS(t *testing.T) {
 	}
 }
 
+// Config lagras läsbar (jsonb-objekt, inte base64) med revision som kolumn.
+func TestPostgresReadableConfig(t *testing.T) {
+	s := pgTestStore(t)
+	a := application.RuntimeStore(s)
+	st := application.StoredThingState{
+		ConfigJSON: []byte(`{"thingId":"x","templateId":"wastebin","templateVersion":"v1"}`),
+		Revision:   3, DataRevision: 5,
+	}
+	if !a.InsertThing("t", "x", st) {
+		t.Fatal("insert must store")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var kind, templateID string
+	var configRev int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT jsonb_typeof(data->'config'), data->'config'->>'templateId', config_revision
+		 FROM things_v2 WHERE tenant='t' AND id='x'`).Scan(&kind, &templateID, &configRev)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if kind != "object" || templateID != "wastebin" || configRev != 3 {
+		t.Fatalf("config=%s template=%s rev=%d, want object/wastebin/3", kind, templateID, configRev)
+	}
+}
+
 // CommitBatch är atomär även mot PostgreSQL: staketkonflikt lämnar
 // varken blob, historik eller pending efter sig.
 func TestPostgresCommitBatchAtomic(t *testing.T) {

@@ -119,7 +119,7 @@ func (s *PgStore) LoadThing(tenant, thingID string) (application.StoredThingStat
 		return application.StoredThingState{}, false
 	}
 	// Kolumnen är skrivstaketet (auktoritativ); konfigurationsrevisionen
-	// kommer ur JSON-blobben.
+	// kommer ur JSON-blobben (config_revision-kolumnen är en frågebar kopia).
 	st.DataRevision = dataRev
 	return st, true
 }
@@ -129,8 +129,8 @@ func (s *PgStore) InsertThing(tenant, thingID string, st application.StoredThing
 	defer cancel()
 	raw, _ := json.Marshal(st)
 	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO things_v2(tenant, id, revision, data) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`,
-		tenant, thingID, st.DataRevision, raw)
+		`INSERT INTO things_v2(tenant, id, revision, config_revision, data) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+		tenant, thingID, st.DataRevision, st.Revision, raw)
 	return err == nil && tag.RowsAffected() == 1
 }
 
@@ -139,8 +139,8 @@ func (s *PgStore) SaveThingCAS(tenant, thingID string, expected int64, st applic
 	defer cancel()
 	raw, _ := json.Marshal(st)
 	tag, err := s.pool.Exec(ctx,
-		`UPDATE things_v2 SET revision=$1, data=$2, updated_at=now() WHERE tenant=$3 AND id=$4 AND revision=$5`,
-		st.DataRevision, raw, tenant, thingID, expected)
+		`UPDATE things_v2 SET revision=$1, config_revision=$2, data=$3, updated_at=now() WHERE tenant=$4 AND id=$5 AND revision=$6`,
+		st.DataRevision, st.Revision, raw, tenant, thingID, expected)
 	return err == nil && tag.RowsAffected() == 1
 }
 
@@ -429,8 +429,8 @@ func (s *PgStore) CommitBatch(tenant, thingID, messageID string, expected int64,
 	}
 	defer tx.Rollback(ctx)
 	tag, err := tx.Exec(ctx,
-		`UPDATE things_v2 SET revision=$1, data=$2, updated_at=now() WHERE tenant=$3 AND id=$4 AND revision=$5`,
-		st.DataRevision, raw, tenant, thingID, expected)
+		`UPDATE things_v2 SET revision=$1, config_revision=$2, data=$3, updated_at=now() WHERE tenant=$4 AND id=$5 AND revision=$6`,
+		st.DataRevision, st.Revision, raw, tenant, thingID, expected)
 	if err != nil || tag.RowsAffected() != 1 {
 		return false
 	}
@@ -647,9 +647,9 @@ func (s *PgStore) PutThing(tenant, id string, data []byte, revision int64) int64
 	ctx, cancel := s.ctx()
 	defer cancel()
 	_, _ = s.pool.Exec(ctx,
-		`INSERT INTO things_v2(tenant, id, revision, data) VALUES($1,$2,$3,$4)
-		 ON CONFLICT(tenant, id) DO UPDATE SET revision=EXCLUDED.revision, data=EXCLUDED.data, updated_at=now()`,
-		tenant, id, revision, raw)
+		`INSERT INTO things_v2(tenant, id, revision, config_revision, data) VALUES($1,$2,$3,$4,$5)
+		 ON CONFLICT(tenant, id) DO UPDATE SET revision=EXCLUDED.revision, config_revision=EXCLUDED.config_revision, data=EXCLUDED.data, updated_at=now()`,
+		tenant, id, revision, st.Revision, raw)
 	return revision
 }
 

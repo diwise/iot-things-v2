@@ -38,7 +38,9 @@ import (
 // skrivstaketet för CAS (bumpas vid varje blob-skrivning, även batchar
 // utan configändring) så att samtidiga skribenter upptäcks.
 type StoredThingState struct {
-	ConfigJSON      []byte                     `json:"config"`
+	// ConfigJSON är den effektiva konfigurationen som läsbar JSON
+	// (json.RawMessage bäddas in utan base64).
+	ConfigJSON      json.RawMessage            `json:"config"`
 	Revision        int64                      `json:"revision"`
 	DataRevision    int64                      `json:"dataRev"`
 	Current         map[string]CurrentValue    `json:"current,omitempty"`
