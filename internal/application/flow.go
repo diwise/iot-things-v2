@@ -267,11 +267,14 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 		if err != nil {
 			return nil, fmt.Errorf("flow: recipe %q: %w", r.Name, err)
 		}
+		if stateOut != nil && len(r.Outputs) > 0 {
+			// Tillstånd sparas även vid skip (t.ex. deltats första
+			// seedningsrunda ger inget resultat men måste minnas).
+			// Övriga operatorer sätter aldrig state vid skip.
+			out.ProcStates[r.Outputs[0]] = *stateOut
+		}
 		if skip {
 			continue // Saknad ingång: inget resultat och inget event (B4).
-		}
-		if stateOut != nil && len(r.Outputs) > 0 {
-			out.ProcStates[r.Outputs[0]] = *stateOut
 		}
 		for _, output := range r.Outputs {
 			nv := CurrentValue{
@@ -344,6 +347,10 @@ func canonicalOperator(op string) string {
 		return "activeTime"
 	case "counterRising":
 		return "counter"
+	case "difference":
+		return "delta"
+	case "accumulate":
+		return "sum"
 	default:
 		return op
 	}
@@ -612,6 +619,91 @@ func runRecipe(cfg *catalog.EffectiveConfig, working map[string]CurrentValue, pr
 			return res, skip, nil, err
 		}
 		return res, false, &StoredProcessor{Operator: r.Operator, Version: r.Version, StateJSON: stateJSON}, nil
+	case "delta", "difference":
+		// Differens (förbrukning per period ur kumulativa mätare):
+		// utdata = ingång - föregående ingång. Första observationen
+		// seedar endast tillståndet och ger inget resultat.
+		if len(vals) != 1 {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one input", r.Operator)
+		}
+		if len(r.Outputs) != 1 {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one output", r.Operator)
+		}
+		key := r.Outputs[0]
+		var persisted functions.DeltaState
+		versionReset := false
+		if prev, ok := proc[key]; ok {
+			if canonicalOperator(prev.Operator) != canonicalOperator(r.Operator) || prev.Version != r.Version {
+				versionReset = true
+			} else if len(prev.StateJSON) > 0 {
+				if err := json.Unmarshal(prev.StateJSON, &persisted); err != nil {
+					return recipeResult{}, false, nil, fmt.Errorf("operator %q: decode state: %w", r.Operator, err)
+				}
+			}
+		}
+		if versionReset {
+			persisted = functions.DeltaState{}
+		}
+		next, d, ok := functions.DeltaNext(persisted, vals[0].Value)
+		if !ok {
+			stateJSON, err := json.Marshal(next)
+			if err != nil {
+				return recipeResult{}, false, nil, fmt.Errorf("operator %q: encode state: %w", r.Operator, err)
+			}
+			return recipeResult{}, true, &StoredProcessor{Operator: r.Operator, Version: r.Version, StateJSON: stateJSON}, nil
+		}
+		quality := vals[0].Quality
+		if versionReset {
+			quality = functions.QualityUncertain
+		}
+		stateJSON, err := json.Marshal(next)
+		if err != nil {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q: encode state: %w", r.Operator, err)
+		}
+		res, skip, _, err := mk(d, quality)
+		if err != nil || skip {
+			return res, skip, nil, err
+		}
+		return res, false, &StoredProcessor{Operator: r.Operator, Version: r.Version, StateJSON: stateJSON}, nil
+	case "sum", "accumulate":
+		// Summa (nederbörd, energipulser): adderar observerat värde per
+		// utvärderad runda till löpande total. För kumulativa mätare
+		// används delta i stället.
+		if len(vals) != 1 {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one input", r.Operator)
+		}
+		if len(r.Outputs) != 1 {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one output", r.Operator)
+		}
+		key := r.Outputs[0]
+		var persisted functions.SumState
+		versionReset := false
+		if prev, ok := proc[key]; ok {
+			if canonicalOperator(prev.Operator) != canonicalOperator(r.Operator) || prev.Version != r.Version {
+				versionReset = true
+			} else if len(prev.StateJSON) > 0 {
+				if err := json.Unmarshal(prev.StateJSON, &persisted); err != nil {
+					return recipeResult{}, false, nil, fmt.Errorf("operator %q: decode state: %w", r.Operator, err)
+				}
+			}
+		}
+		if versionReset {
+			persisted = functions.SumState{}
+		}
+		next := functions.SumNext(persisted, vals[0].Value)
+		quality := vals[0].Quality
+		if versionReset {
+			quality = functions.QualityUncertain
+		}
+		stateJSON, err := json.Marshal(next)
+		if err != nil {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q: encode state: %w", r.Operator, err)
+		}
+		res, skip, _, err := mk(next.Total, quality)
+		if err != nil || skip {
+			return res, skip, nil, err
+		}
+		return res, false, &StoredProcessor{Operator: r.Operator, Version: r.Version, StateJSON: stateJSON}, nil
 	default:
 		return recipeResult{}, false, nil, fmt.Errorf("unknown operator %q", r.Operator)
 	}
@@ -680,6 +772,14 @@ func validateRecipeStatic(cfg *catalog.EffectiveConfig, r catalog.Recipe) error 
 		}
 		return nil
 	case "counter", "counterRising", "counterFalling", "counterBoth":
+		if err := needInputs(1); err != nil {
+			return err
+		}
+		if len(r.Outputs) != 1 {
+			return fmt.Errorf("operator %q needs exactly one output", r.Operator)
+		}
+		return nil
+	case "delta", "difference", "sum", "accumulate":
 		if err := needInputs(1); err != nil {
 			return err
 		}

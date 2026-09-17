@@ -369,3 +369,28 @@ func TestCountEdge(t *testing.T) {
 		t.Fatalf("both=%v %+v, want count 2", counted, s)
 	}
 }
+
+func TestDeltaNext(t *testing.T) {
+	// Första observationen seedar utan resultat.
+	s, d, ok := DeltaNext(DeltaState{}, 12.5)
+	if ok || d != 0 || !s.HasLast || s.LastValue != 12.5 {
+		t.Fatalf("seed=(%v,%v,%v), want (seed,0,false)", d, ok, s)
+	}
+	s, d, ok = DeltaNext(s, 13.0)
+	if !ok || d != 0.5 {
+		t.Fatalf("delta=(%v,%v), want (0.5,true)", d, ok)
+	}
+	s, d, ok = DeltaNext(s, 12.0)
+	if !ok || d != -1.0 {
+		t.Fatalf("negative delta=(%v,%v), want (-1.0,true)", d, ok)
+	}
+}
+
+func TestSumNext(t *testing.T) {
+	s := SumNext(SumState{}, 0.2)
+	s = SumNext(s, 0.2)
+	s = SumNext(s, 0.5)
+	if s.Total < 0.899 || s.Total > 0.901 {
+		t.Fatalf("total=%v, want ~0.9", s.Total)
+	}
+}

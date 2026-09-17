@@ -246,3 +246,40 @@ func CountEdge(state CounterState, active bool, edge string) (CounterState, bool
 
 	return state, counted
 }
+
+// DeltaState is the persistent state for the delta operator: the previous
+// input value. The first observation only seeds the state and yields no
+// result (like a missing required input).
+type DeltaState struct {
+	HasLast   bool
+	LastValue float64
+}
+
+// DeltaNext advances DeltaState with the new observed value and reports
+// the difference (value - previous). ok is false on the first observation
+// (no previous yet) and on operator version reset, where the state is
+// discarded rather than silently reused.
+func DeltaNext(state DeltaState, value float64) (DeltaState, float64, bool) {
+	if !state.HasLast {
+		return DeltaState{HasLast: true, LastValue: value}, 0, false
+	}
+
+	return DeltaState{HasLast: true, LastValue: value}, value - state.LastValue, true
+}
+
+// SumState is the persistent state for the sum operator: the running total.
+//
+// Each evaluated round adds the observed input value once, so the operator
+// suits increment-per-report sensors (rain gauge tips, energy pulses). For
+// cumulative meters use delta instead: re-reported levels would otherwise
+// be added repeatedly.
+type SumState struct {
+	Total float64
+}
+
+// SumNext advances SumState by adding the new observed value.
+func SumNext(state SumState, value float64) SumState {
+	state.Total += value
+
+	return state
+}

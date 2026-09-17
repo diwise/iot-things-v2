@@ -751,3 +751,91 @@ func TestCounterLifecycle(t *testing.T) {
 		t.Fatalf("version reset quality=%q, want uncertain", q)
 	}
 }
+
+func meterCfg(op string) catalog.EffectiveConfig {
+	out := "consumption"
+	if op == "sum" {
+		out = "total"
+	}
+	return catalog.EffectiveConfig{
+		Properties: map[string]things.Property{"volume": {}, out: {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s", Object: flowURNtemp, Resource: "5700", Input: "volume"},
+		},
+		Recipes: []catalog.Recipe{
+			{Name: "meter-" + op, Operator: op, Version: "v1",
+				Inputs: []string{"volume"}, Outputs: []string{out}},
+		},
+	}
+}
+
+// Delta: första rundan seedar utan resultat, sedan differenser
+// (även negativa). Tillståndet överlever omstart via ProcStates.
+func TestDeltaLifecycle(t *testing.T) {
+	cfg := meterCfg("delta")
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	current := map[string]CurrentValue{}
+	proc := map[string]StoredProcessor{}
+	round := func(v float64, at time.Time, id string) *FlowOutcome {
+		t.Helper()
+		out, err := EvaluateBatchFlow(&cfg, current, proc,
+			[]things.Observation{sigObs("s", v, at)}, at, id, 1)
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		current, proc = mergeCurrent(current, out), mergeProc(proc, out)
+		return out
+	}
+
+	if out := round(12.5, base, "m0"); len(out.Updated) != 1 {
+		t.Fatalf("seed updated=%+v, want only direct volume", out.Updated)
+	} else if _, ok := out.Updated["consumption"]; ok {
+		t.Fatal("seed must not produce consumption")
+	}
+	if out := round(13.0, base.Add(time.Minute), "m1"); *out.Updated["consumption"].Value != 0.5 {
+		t.Fatalf("consumption=%v, want 0.5", *out.Updated["consumption"].Value)
+	}
+	if out := round(12.0, base.Add(2*time.Minute), "m2"); *out.Updated["consumption"].Value != -1.0 {
+		t.Fatalf("consumption=%v, want -1.0", *out.Updated["consumption"].Value)
+	}
+
+	var st functions.DeltaState
+	if err := json.Unmarshal(proc["consumption"].StateJSON, &st); err != nil {
+		t.Fatalf("decode delta state: %v", err)
+	}
+	if !st.HasLast || st.LastValue != 12.0 {
+		t.Fatalf("persisted state=%+v, want {true 12.0}", st)
+	}
+}
+
+// Summa: löpande total över rapporter, bevarad över omstart.
+func TestSumLifecycle(t *testing.T) {
+	cfg := meterCfg("sum")
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+
+	current := map[string]CurrentValue{}
+	proc := map[string]StoredProcessor{}
+	total := 0.0
+	for i, v := range []float64{0.2, 0.2, 0.5} {
+		at := base.Add(time.Duration(i) * time.Minute)
+		out, err := EvaluateBatchFlow(&cfg, current, proc,
+			[]things.Observation{sigObs("s", v, at)}, at, "m", 1)
+		if err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+		total += v
+		current, proc = mergeCurrent(current, out), mergeProc(proc, out)
+		if got := *out.Updated["total"].Value; got < total-1e-9 || got > total+1e-9 {
+			t.Fatalf("round %d total=%v, want %v", i, got, total)
+		}
+	}
+
+	var st functions.SumState
+	if err := json.Unmarshal(proc["total"].StateJSON, &st); err != nil {
+		t.Fatalf("decode sum state: %v", err)
+	}
+	if st.Total < 0.899 || st.Total > 0.901 {
+		t.Fatalf("persisted total=%v, want ~0.9", st.Total)
+	}
+}
