@@ -795,3 +795,13 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 		t.Fatalf("variants=%d, want 5 (wastebin A-D + 160L)", len(got))
 	}
 }
+
+// Gräns: seed-filen får aldrig innehålla saker (objects); de skapas via API.
+func TestSeedFileRejectsObjects(t *testing.T) {
+	if _, err := ParseSeed([]byte(`{"templates": [], "objects": [{"thingId": "x"}]}`)); err == nil {
+		t.Fatal("objects in seed must fail")
+	}
+	if _, err := ParseSeed([]byte(`{"templates": []}`)); err != nil {
+		t.Fatalf("templates-only seed: %v", err)
+	}
+}
