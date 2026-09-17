@@ -170,9 +170,21 @@ func (m *Manager) SeedCatalog(ctx context.Context, seed catalog.SeedFile) (added
 	return added, skipped, nil
 }
 
-// ListTemplates returnerar publicerade mallversioner sorterade på id/version.
-func (m *Manager) ListTemplates(_ context.Context) []catalog.TemplateSpec {
-	return m.cat.ListTemplates()
+// ListTemplates returnerar publicerade mallversioner sorterade på id/version,
+// valfritt filtrerat på kategori (tom = alla). GUI:n listar t.ex. bara
+// tank-mallar i en tankdialog.
+func (m *Manager) ListTemplates(_ context.Context, category string) []catalog.TemplateSpec {
+	all := m.cat.ListTemplates()
+	if category == "" {
+		return all
+	}
+	out := all[:0]
+	for _, spec := range all {
+		if spec.Template.Category == category {
+			out = append(out, spec)
+		}
+	}
+	return out
 }
 
 // ListVariants returnerar publicerade variantversioner sorterade på id/version.

@@ -1,5 +1,5 @@
 {
-  "description": "Startkatalog för iot-things-v2: en mall per saktyp i iot-things (config.yaml) samt greenhouse/tank för växthus med tankar, uttryckt med generiska operatorer. Container/WasteContainer/Sandstorage täcks av wastebin-mallen med modellvarianter; övriga typer har egna mallar. Formatet är exakt API-form (TemplateSpec/VariantSpec) så filen kan även POSTas mot /api/v1/catalog. Publicerade versioner är oföränderliga: ändra aldrig en version i denna fil, lägg till en ny.",
+  "description": "Startkatalog för iot-things-v2: en mall per saktyp i iot-things (config.yaml) samt greenhouse/tank för växthus med tankar, uttryckt med generiska operatorer. Container/WasteContainer/Sandstorage täcks av wastebin-mallen med modellvarianter; övriga typer har egna mallar. Mallarna bär visningsnamn, egenskapsdefinitioner (GUI-formulär: namn, enhet, kompatibla signaler) och parameterinfo (enhet, intervall). Formatet är exakt API-form (TemplateSpec/VariantSpec) så filen kan även POSTas mot /api/v1/catalog. Publicerade versioner är oföränderliga: ändra aldrig en version i denna fil, lägg till en ny.",
   "templates": [
     {
       "template": {
@@ -8,13 +8,24 @@
         "required": ["distance", "level", "fillRate"],
         "category": "container",
         "labels": ["Avfall"],
-        "primaryProperty": "fillRate"
+        "primaryProperty": "fillRate",
+        "displayName": "Soptunna",
+        "description": "Behållare med distansmätning. Nivå och fyllnadsgrad beräknas från spiritsensorns avstånd; modellmått väljs via variant.",
+        "propertyDefs": {
+          "distance": {"displayName": "Avstånd", "description": "Avstånd från sensor till yta", "dataType": "number", "quantity": "distance", "unit": "m", "signals": [{"object": "urn:oma:lwm2m:ext:3330", "resource": "5700"}]},
+          "level": {"displayName": "Nivå", "description": "Beräknad nivå över tom botten", "dataType": "number", "quantity": "distance", "unit": "m"},
+          "fillRate": {"displayName": "Fyllnadsgrad", "description": "Beräknad fyllnadsgrad i höjdprocent", "dataType": "number", "quantity": "fillRate", "unit": "%"}
+        }
       },
       "paramDefaults": {
         "usableHeight": 1.0,
         "sensorToBottom": 1.5
       },
       "overridable": ["usableHeight", "sensorToBottom"],
+      "paramInfo": {
+        "usableHeight": {"unit": "m", "description": "Användbar höjd (100 % fylld)", "min": 0.05, "max": 50},
+        "sensorToBottom": {"unit": "m", "description": "Avstånd från sensor till tom botten", "min": 0.05, "max": 50}
+      },
       "recipes": [
         {
           "name": "wastebin-level",
@@ -42,7 +53,19 @@
         "repeatGroups": ["temperature."],
         "category": "room",
         "labels": ["Inomhusklimat"],
-        "primaryProperty": "temperature.average"
+        "primaryProperty": "temperature.average",
+        "displayName": "Rum",
+        "description": "Rum med valfria temperaturmätpunkter (upprepningsbara), luftfuktighet, ljus och co2. Medeltemperatur beräknas över uttryckligen valda punkter.",
+        "propertyDefs": {
+          "temperature": {"displayName": "Temperatur", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]},
+          "temperature.window": {"displayName": "Temperatur vid fönstret", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]},
+          "temperature.center": {"displayName": "Temperatur mitt i rummet", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]},
+          "temperature.door": {"displayName": "Temperatur vid dörren", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]},
+          "temperature.average": {"displayName": "Medeltemperatur", "description": "Beräknat medel över valda punkter", "dataType": "number", "quantity": "temperature", "unit": "Cel"},
+          "humidity": {"displayName": "Luftfuktighet", "dataType": "number", "quantity": "humidity", "unit": "%RH", "signals": [{"object": "urn:oma:lwm2m:ext:3304", "resource": "5700"}]},
+          "illuminance": {"displayName": "Belysningsstyrka", "dataType": "number", "quantity": "illuminance", "unit": "lux", "signals": [{"object": "urn:oma:lwm2m:ext:3301", "resource": "5700"}]},
+          "co2": {"displayName": "CO2", "dataType": "number", "quantity": "co2", "unit": "PPM", "signals": [{"object": "urn:oma:lwm2m:ext:3428", "resource": "17"}]}
+        }
       },
       "recipes": [
         {
@@ -61,7 +84,14 @@
         "optional": ["energy", "power", "temperature"],
         "category": "building",
         "labels": ["Byggnad"],
-        "primaryProperty": "temperature"
+        "primaryProperty": "temperature",
+        "displayName": "Byggnad",
+        "description": "Byggnad med valfri energi-, effekt- och temperaturmätning. Energi förväntas i kWh och effekt i kW.",
+        "propertyDefs": {
+          "energy": {"displayName": "Energi", "dataType": "number", "quantity": "energy", "unit": "kWh", "signals": [{"object": "urn:oma:lwm2m:ext:3331", "resource": "5700"}]},
+          "power": {"displayName": "Effekt", "dataType": "number", "quantity": "power", "unit": "kW", "signals": [{"object": "urn:oma:lwm2m:ext:3328", "resource": "5700"}]},
+          "temperature": {"displayName": "Temperatur", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]}
+        }
       }
     },
     {
@@ -70,7 +100,11 @@
         "version": "v1",
         "optional": ["temperature"],
         "category": "pointofinterest",
-        "primaryProperty": "temperature"
+        "displayName": "Intressepunkt",
+        "description": "Punkt med valfri temperaturmätning.",
+        "propertyDefs": {
+          "temperature": {"displayName": "Temperatur", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]}
+        }
       }
     },
     {
@@ -79,7 +113,12 @@
         "version": "v1",
         "required": ["presence"],
         "category": "desk",
-        "primaryProperty": "presence"
+        "primaryProperty": "presence",
+        "displayName": "Skrivbord",
+        "description": "Skrivbord med närvarodetektering.",
+        "propertyDefs": {
+          "presence": {"displayName": "Närvaro", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3200", "resource": "5500"}, {"object": "urn:oma:lwm2m:ext:3302", "resource": "5500"}]}
+        }
       }
     },
     {
@@ -88,7 +127,12 @@
         "version": "v1",
         "required": ["presence"],
         "category": "lifebuoy",
-        "primaryProperty": "presence"
+        "primaryProperty": "presence",
+        "displayName": "Livboj",
+        "description": "Livboj med närvarodetektering (kvar på plats eller ej).",
+        "propertyDefs": {
+          "presence": {"displayName": "På plats", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3200", "resource": "5500"}, {"object": "urn:oma:lwm2m:ext:3302", "resource": "5500"}]}
+        }
       }
     },
     {
@@ -97,7 +141,13 @@
         "version": "v1",
         "required": ["door", "passages"],
         "category": "passage",
-        "primaryProperty": "passages"
+        "primaryProperty": "passages",
+        "displayName": "Passage",
+        "description": "Passage med dörrkontakt; antal passager räknas på stigande flank. Dagsantal via historikfråga.",
+        "propertyDefs": {
+          "door": {"displayName": "Dörr öppen", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3200", "resource": "5500"}]},
+          "passages": {"displayName": "Antal passager", "description": "Kumulativt antal sedan start", "dataType": "number", "quantity": "count"}
+        }
       },
       "recipes": [
         {
@@ -115,7 +165,13 @@
         "version": "v1",
         "required": ["run", "runTime"],
         "category": "pumpingstation",
-        "primaryProperty": "runTime"
+        "primaryProperty": "runTime",
+        "displayName": "Pumpstation",
+        "description": "Pump med driftindikering; drifttid ackumuleras medan insignalen är aktiv.",
+        "propertyDefs": {
+          "run": {"displayName": "Drift", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3200", "resource": "5500"}]},
+          "runTime": {"displayName": "Drifttid", "description": "Ackumulerade driftsekunder", "dataType": "number", "quantity": "time", "unit": "s"}
+        }
       },
       "recipes": [
         {
@@ -134,13 +190,26 @@
         "required": ["distance", "level", "fillRate", "overflow", "overflowTime"],
         "category": "sewer",
         "labels": ["Avlopp"],
-        "primaryProperty": "fillRate"
+        "primaryProperty": "fillRate",
+        "displayName": "Avlopp",
+        "description": "Avlopp med nivåmätning och bräddningsdetektering via digital ingång. Flera distansgivare kräver egen mall med per-recept-parametrar.",
+        "propertyDefs": {
+          "distance": {"displayName": "Avstånd", "description": "Avstånd från sensor till yta", "dataType": "number", "quantity": "distance", "unit": "m", "signals": [{"object": "urn:oma:lwm2m:ext:3330", "resource": "5700"}]},
+          "level": {"displayName": "Nivå", "description": "Beräknad nivå", "dataType": "number", "quantity": "distance", "unit": "m"},
+          "fillRate": {"displayName": "Fyllnadsgrad", "dataType": "number", "quantity": "fillRate", "unit": "%"},
+          "overflow": {"displayName": "Bräddning", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3200", "resource": "5500"}]},
+          "overflowTime": {"displayName": "Bräddningstid", "description": "Ackumulerade bräddningssekunder", "dataType": "number", "quantity": "time", "unit": "s"}
+        }
       },
       "paramDefaults": {
         "usableHeight": 1.0,
         "sensorToBottom": 1.0
       },
       "overridable": ["usableHeight", "sensorToBottom"],
+      "paramInfo": {
+        "usableHeight": {"unit": "m", "description": "Användbar höjd (100 % fylld)", "min": 0.05, "max": 50},
+        "sensorToBottom": {"unit": "m", "description": "Avstånd från sensor till tom botten", "min": 0.05, "max": 50}
+      },
       "recipes": [
         {
           "name": "sewer-level",
@@ -173,7 +242,15 @@
         "version": "v1",
         "required": ["volume", "leakage", "backflow", "fraud"],
         "category": "watermeter",
-        "primaryProperty": "volume"
+        "primaryProperty": "volume",
+        "displayName": "Vattenmätare",
+        "description": "Vattenmätare med kumulativ volym och larmflaggor.",
+        "propertyDefs": {
+          "volume": {"displayName": "Volym", "description": "Kumulativ volym", "dataType": "number", "quantity": "volume", "unit": "m3", "signals": [{"object": "urn:oma:lwm2m:ext:3424", "resource": "1"}]},
+          "leakage": {"displayName": "Läckage", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3424", "resource": "10"}]},
+          "backflow": {"displayName": "Backflöde", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3424", "resource": "11"}]},
+          "fraud": {"displayName": "Sabotage", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3424", "resource": "13"}]}
+        }
       }
     },
     {
@@ -181,7 +258,19 @@
         "id": "sink",
         "version": "v1",
         "optional": ["temperature", "presence", "power", "energy", "distance", "digitalInput", "illuminance", "humidity"],
-        "category": "sink"
+        "category": "sink",
+        "displayName": "Vask",
+        "description": "Multisensor med valfria mätpunkter (råa direktvärden utan recept).",
+        "propertyDefs": {
+          "temperature": {"displayName": "Temperatur", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]},
+          "presence": {"displayName": "Närvaro", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3302", "resource": "5500"}]},
+          "power": {"displayName": "Effekt", "dataType": "number", "quantity": "power", "unit": "kW", "signals": [{"object": "urn:oma:lwm2m:ext:3328", "resource": "5700"}]},
+          "energy": {"displayName": "Energi", "dataType": "number", "quantity": "energy", "unit": "kWh", "signals": [{"object": "urn:oma:lwm2m:ext:3331", "resource": "5700"}]},
+          "distance": {"displayName": "Avstånd", "dataType": "number", "quantity": "distance", "unit": "m", "signals": [{"object": "urn:oma:lwm2m:ext:3330", "resource": "5700"}]},
+          "digitalInput": {"displayName": "Digital ingång", "dataType": "boolean", "signals": [{"object": "urn:oma:lwm2m:ext:3200", "resource": "5500"}]},
+          "illuminance": {"displayName": "Belysningsstyrka", "dataType": "number", "quantity": "illuminance", "unit": "lux", "signals": [{"object": "urn:oma:lwm2m:ext:3301", "resource": "5700"}]},
+          "humidity": {"displayName": "Luftfuktighet", "dataType": "number", "quantity": "humidity", "unit": "%RH", "signals": [{"object": "urn:oma:lwm2m:ext:3304", "resource": "5700"}]}
+        }
       }
     },
     {
@@ -192,7 +281,15 @@
         "repeatGroups": ["temperature."],
         "category": "greenhouse",
         "labels": ["Växthus"],
-        "primaryProperty": "temperature"
+        "primaryProperty": "temperature",
+        "displayName": "Växthus",
+        "description": "Växthus med rummets mätpunkter. Tankar kopplas som underobjekt.",
+        "propertyDefs": {
+          "temperature": {"displayName": "Lufttemperatur", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]},
+          "humidity": {"displayName": "Luftfuktighet", "dataType": "number", "quantity": "humidity", "unit": "%RH", "signals": [{"object": "urn:oma:lwm2m:ext:3304", "resource": "5700"}]},
+          "co2": {"displayName": "CO2", "dataType": "number", "quantity": "co2", "unit": "PPM", "signals": [{"object": "urn:oma:lwm2m:ext:3428", "resource": "17"}]},
+          "illuminance": {"displayName": "Belysningsstyrka", "dataType": "number", "quantity": "illuminance", "unit": "lux", "signals": [{"object": "urn:oma:lwm2m:ext:3301", "resource": "5700"}]}
+        }
       }
     },
     {
@@ -203,6 +300,14 @@
         "category": "tank",
         "labels": ["Tank"],
         "primaryProperty": "waterLevel",
+        "displayName": "Tank",
+        "description": "Tank med pH, co2, temperatur och vattennivå. Kopplas till växthus via partOf.",
+        "propertyDefs": {
+          "ph": {"displayName": "pH", "description": "Surhetsgrad", "dataType": "number", "quantity": "ph"},
+          "co2": {"displayName": "CO2", "dataType": "number", "quantity": "co2", "unit": "PPM"},
+          "temperature": {"displayName": "Temperatur", "dataType": "number", "quantity": "temperature", "unit": "Cel", "signals": [{"object": "urn:oma:lwm2m:ext:3303", "resource": "5700"}]},
+          "waterLevel": {"displayName": "Vattennivå", "dataType": "number", "quantity": "distance", "unit": "m"}
+        },
         "relations": [
           {"name": "partOf", "allowedTargets": ["greenhouse"], "min": 0, "max": 1}
         ]

@@ -870,3 +870,108 @@ func TestCompileRequiresDescriptiveFields(t *testing.T) {
 		t.Fatalf("explicit category: %v", err)
 	}
 }
+
+func ptr(v float64) *float64 { return &v }
+
+// Egenskapsdefinitioner: okänd egenskap nekas; prefill fyller tomma fält
+// men skriver aldrig över uttryckliga värden.
+func TestPropertyDefs(t *testing.T) {
+	c := New()
+	tmpl := wastebinTemplate()
+	tmpl.Template.PropertyDefs = map[string]things.PropertyDef{
+		"distance": {DisplayName: "Avstånd", Unit: "m", Signals: []things.SignalHint{
+			{Object: urnDistance, Resource: "5700"},
+		}},
+		"nope": {DisplayName: "Ogiltig"},
+	}
+	if err := c.PutTemplate(tmpl); err == nil {
+		t.Fatal("def for unknown property must fail")
+	}
+	delete(tmpl.Template.PropertyDefs, "nope")
+	if err := c.PutTemplate(tmpl); err != nil {
+		t.Fatalf("put with defs: %v", err)
+	}
+	cfg, err := c.Compile(ObjectSpec{
+		ThingID: "bin-42", Tenant: "t", Name: "Soptunna",
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+		Metadata:   map[string]string{"test": "true"},
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance": {},
+			"level":    {DisplayName: "Egen nivå", Unit: "cm"},
+			"fillRate": {},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if got := cfg.Properties["distance"]; got.DisplayName != "Avstånd" || got.Unit != "m" {
+		t.Fatalf("prefill=%+v, want Avstånd/m", got)
+	}
+	if got := cfg.Properties["level"]; got.DisplayName != "Egen nivå" || got.Unit != "cm" {
+		t.Fatalf("explicit=%+v, must win over def", got)
+	}
+}
+
+// Parameterinfo: okänd nyckel, min>max och default utanför intervall nekas
+// vid publicering; variant- och objektsvärden utanför nekas vid kompilering.
+func TestParamInfoRanges(t *testing.T) {
+	mk := func() TemplateSpec {
+		tmpl := wastebinTemplate()
+		tmpl.Overridable = []string{"usableHeight", "sensorToBottom"}
+		tmpl.ParamInfo = map[string]ParamDef{
+			"usableHeight":   {Unit: "m", Description: "Användbar höjd", Min: ptr(0.05), Max: ptr(10)},
+			"sensorToBottom": {Unit: "m", Description: "Avstånd givare–tom botten", Min: ptr(0.05), Max: ptr(10)},
+		}
+		return tmpl
+	}
+	bad := mk()
+	bad.ParamInfo["unknown"] = ParamDef{}
+	c := New()
+	if err := c.PutTemplate(bad); err == nil {
+		t.Fatal("info for unknown param must fail")
+	}
+	bad = mk()
+	bad.ParamInfo["usableHeight"] = ParamDef{Min: ptr(5), Max: ptr(1)}
+	if err := c.PutTemplate(bad); err == nil {
+		t.Fatal("min>max must fail")
+	}
+	bad = mk()
+	bad.ParamDefaults["usableHeight"] = 99
+	if err := c.PutTemplate(bad); err == nil {
+		t.Fatal("default out of range must fail")
+	}
+	if err := c.PutTemplate(mk()); err != nil {
+		t.Fatalf("valid info: %v", err)
+	}
+	// Variant utanför intervall.
+	if err := c.PutVariant(VariantSpec{Variant: things.Variant{
+		ID: "too-tall", Version: "v1",
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		ParamValues: map[string]float64{"usableHeight": 50},
+	}}); err == nil {
+		t.Fatal("variant out of range must fail")
+	}
+	// Override utanför intervall.
+	obj := ObjectSpec{
+		ThingID: "bin-42", Tenant: "t", Name: "Soptunna",
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+		Metadata:   map[string]string{"test": "true"},
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance": {}, "level": {}, "fillRate": {},
+		},
+		ParamOverrides: map[string]float64{"sensorToBottom": 99},
+	}
+	if _, err := c.Compile(obj); err == nil {
+		t.Fatal("override above max must fail")
+	}
+	obj.ParamOverrides = map[string]float64{"usableHeight": 0.01}
+	if _, err := c.Compile(obj); err == nil {
+		t.Fatal("override below min must fail")
+	}
+	obj.ParamOverrides = map[string]float64{"usableHeight": 1.2}
+	if _, err := c.Compile(obj); err != nil {
+		t.Fatalf("override in range: %v", err)
+	}
+}

@@ -327,6 +327,28 @@ func TestV0CatalogAndSearch(t *testing.T) {
 	if rr := doGET(h.listTemplates, ctx, "", ""); rr.Code != http.StatusOK {
 		t.Fatalf("list templates: %d", rr.Code)
 	}
+	if rr := doGET(h.listTemplates, ctx, "", "category=wastebin"); rr.Code != http.StatusOK {
+		t.Fatalf("filter templates: %d", rr.Code)
+	} else {
+		var tmpls []catalog.TemplateSpec
+		if err := json.Unmarshal(rr.Body.Bytes(), &tmpls); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(tmpls) != 1 || tmpls[0].Template.ID != "wastebin" {
+			t.Fatalf("category filter=%+v, want wastebin", tmpls)
+		}
+	}
+	if rr := doGET(h.listTemplates, ctx, "", "category=room"); rr.Code != http.StatusOK {
+		t.Fatalf("empty filter: %d", rr.Code)
+	} else {
+		var empty []catalog.TemplateSpec
+		if err := json.Unmarshal(rr.Body.Bytes(), &empty); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(empty) != 0 {
+			t.Fatalf("room filter=%d, want 0", len(empty))
+		}
+	}
 	if rr := doGET(h.listVariants, ctx, "", ""); rr.Code != http.StatusOK {
 		t.Fatalf("list variants: %d", rr.Code)
 	}

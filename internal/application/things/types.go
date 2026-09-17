@@ -108,6 +108,27 @@ type Property struct {
 	Description string `json:"description,omitempty"`
 }
 
+// SignalHint tells a GUI which sensor signal feeds a property:
+// LwM2M object (URN) and resource, e.g. 3303/5700 for temperature.
+// Hints never constrain bindings; any signal may be bound.
+type SignalHint struct {
+	Object   string `json:"object"`
+	Resource string `json:"resource"`
+}
+
+// PropertyDef describes one allowed property for GUI form building:
+// display names, documentation, data type, quantity/unit defaults and
+// compatible sensor signals. The template Compile prefills empty object
+// fields from the definition.
+type PropertyDef struct {
+	DisplayName string       `json:"displayName,omitempty"`
+	Description string       `json:"description,omitempty"`
+	DataType    string       `json:"dataType,omitempty"`
+	Quantity    string       `json:"quantity,omitempty"`
+	Unit        string       `json:"unit,omitempty"`
+	Signals     []SignalHint `json:"signals,omitempty"`
+}
+
 // Observation is one typed value with measurement time, reception time,
 // identity, quality and origin.
 type Observation struct {
@@ -268,17 +289,22 @@ func (l Location) IntersectsBBox(b BBox) bool {
 // repeatable measurement-point prefixes such as "temperature.".
 // Category is the business category (e.g. "wastebin",
 // "room"); Labels and PrimaryProperty are presentation hints.
+// DisplayName/Description are GUI labels; PropertyDefs documents allowed
+// properties for form building (IDs must be template-allowed).
 type Template struct {
-	ID                string         `json:"id"`
-	Version           string         `json:"version"`
-	Required          []string       `json:"required,omitempty"`
-	Optional          []string       `json:"optional,omitempty"`
-	RepeatGroups      []string       `json:"repeatGroups,omitempty"`
-	AllowedQuantities []string       `json:"allowedQuantities,omitempty"`
-	Relations         []RelationSpec `json:"relations,omitempty"`
-	Category          string         `json:"category,omitempty"`
-	Labels            []string       `json:"labels,omitempty"`
-	PrimaryProperty   string         `json:"primaryProperty,omitempty"`
+	ID                string                 `json:"id"`
+	Version           string                 `json:"version"`
+	Required          []string               `json:"required,omitempty"`
+	Optional          []string               `json:"optional,omitempty"`
+	RepeatGroups      []string               `json:"repeatGroups,omitempty"`
+	AllowedQuantities []string               `json:"allowedQuantities,omitempty"`
+	Relations         []RelationSpec         `json:"relations,omitempty"`
+	Category          string                 `json:"category,omitempty"`
+	Labels            []string               `json:"labels,omitempty"`
+	PrimaryProperty   string                 `json:"primaryProperty,omitempty"`
+	DisplayName       string                 `json:"displayName,omitempty"`
+	Description       string                 `json:"description,omitempty"`
+	PropertyDefs      map[string]PropertyDef `json:"propertyDefs,omitempty"`
 }
 
 // ValidatePropertyID reports whether id is allowed by the closed

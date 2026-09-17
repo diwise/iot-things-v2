@@ -81,7 +81,7 @@ func TestManageBinFlow(t *testing.T) {
 	ctx := context.Background()
 	mgmtWastebin(t, mgr)
 
-	if len(mgr.ListTemplates(ctx)) != 1 || len(mgr.ListVariants(ctx)) != 1 {
+	if len(mgr.ListTemplates(ctx, "")) != 1 || len(mgr.ListVariants(ctx)) != 1 {
 		t.Fatal("catalog list must show published versions")
 	}
 	preview, err := mgr.PreviewObject(ctx, "t", mgmtBinObject())
@@ -1554,6 +1554,11 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 	}
 	if got := *sum.Values["fillRate"].Value; got < 99.99 || got > 100.01 {
 		t.Fatalf("seed bin fillRate=%v, want 100", got)
+	}
+	// Mallens egenskapsdefinitioner prefillas (GUI visar namn/enhet utan
+	// att skaparen angav dem).
+	if got := sum.Values["distance"]; got.DisplayName != "Avstånd" || got.Unit != "m" {
+		t.Fatalf("prefill=%+v, want Avstånd/m från seed", got)
 	}
 	for i, open := range []bool{true, true, false, true} {
 		at := base.Add(time.Duration(i) * time.Minute)

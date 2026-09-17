@@ -30,6 +30,11 @@ paths:
     get:
       tags: [Catalog]
       summary: Lista publicerade mallversioner
+      parameters:
+        - name: category
+          in: query
+          description: Filtrera på kategori (t.ex. formulär för en saktyp).
+          schema: { type: string }
       responses:
         '200':
           description: Mallar
@@ -556,6 +561,44 @@ components:
           type: array
           items: { type: string }
         primaryProperty: { type: string }
+        displayName:
+          type: string
+          description: Visningsnamn för GUI (ID:t är tekniskt).
+        description:
+          type: string
+          description: Beskrivning för GUI.
+        propertyDefs:
+          type: object
+          description: Egenskapsdefinitioner per egenskaps-ID för formulärbyggande.
+          additionalProperties:
+            $ref: '#/components/schemas/PropertyDef'
+    SignalHint:
+      type: object
+      description: Kompatibel sensorsignal (URN + resurs). Hint, styr aldrig bindningar.
+      required: [object, resource]
+      properties:
+        object: { type: string }
+        resource: { type: string }
+    PropertyDef:
+      type: object
+      properties:
+        displayName: { type: string }
+        description: { type: string }
+        dataType: { type: string }
+        quantity: { type: string }
+        unit: { type: string }
+        signals:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignalHint'
+    ParamDef:
+      type: object
+      description: Parameterdokumentation (enhet, beskrivning, intervall). Intervall valideras vid publicering, variant och override.
+      properties:
+        unit: { type: string }
+        description: { type: string }
+        min: { type: number }
+        max: { type: number }
     Recipe:
       type: object
       required: [name, operator, inputs, outputs]
@@ -584,6 +627,10 @@ components:
         overridable:
           type: array
           items: { type: string }
+        paramInfo:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ParamDef'
         recipes:
           type: array
           items:

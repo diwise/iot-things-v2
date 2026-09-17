@@ -8,6 +8,10 @@
   ärvd från mallen) valideras i Compile. Metadata, bindningar och
   relationer är frivilliga: sensorlösa överobjekt och fristående
   objekt är giltiga enligt THNGS_NEW kap 5.
+- GUI-stöd i katalogen: mallar har visningsnamn/beskrivning,
+  egenskapsdefinitioner (namn, enhet, kompatibla signaler; prefillas vid
+  skapande) och parameterinfo (enhet, intervall valideras vid publicering,
+  variant och override); mallista filtreras på `?category=`.
 - `classification` heter `category` i kod/API (v2 ej i produktion;
   svenska dokument behåller "klassificering").
 - Fler-tenant-användare väljer tenant explicit med `?tenant=` på samtliga

@@ -38,11 +38,22 @@ type Recipe struct {
 // definition plus parameter defaults, overridability, recipes and allowed
 // relations.
 type TemplateSpec struct {
-	Template        things.Template    `json:"template"`
-	ParamDefaults   map[string]float64 `json:"paramDefaults,omitempty"`
-	Overridable     []string           `json:"overridable,omitempty"`
-	Recipes         []Recipe           `json:"recipes,omitempty"`
-	OperatorVersion map[string]string  `json:"operatorVersions,omitempty"`
+	Template        things.Template     `json:"template"`
+	ParamDefaults   map[string]float64  `json:"paramDefaults,omitempty"`
+	Overridable     []string            `json:"overridable,omitempty"`
+	ParamInfo       map[string]ParamDef `json:"paramInfo,omitempty"`
+	Recipes         []Recipe            `json:"recipes,omitempty"`
+	OperatorVersion map[string]string   `json:"operatorVersions,omitempty"`
+}
+
+// ParamDef documents one template parameter for GUI form building: unit,
+// description and optional range. Ranges are enforced on template defaults,
+// variant values and thing overrides; info keys must name declared params.
+type ParamDef struct {
+	Unit        string   `json:"unit,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Min         *float64 `json:"min,omitempty"`
+	Max         *float64 `json:"max,omitempty"`
 }
 
 // VariantSpec is a publishable variant version: exactly one template
@@ -239,13 +250,46 @@ func cloneTemplateSpec(spec TemplateSpec) TemplateSpec {
 		}
 		t.Relations = rels
 	}
+	if t.PropertyDefs != nil {
+		defs := make(map[string]things.PropertyDef, len(t.PropertyDefs))
+		for id, def := range t.PropertyDefs {
+			cp := def
+			if def.Signals != nil {
+				cp.Signals = append([]things.SignalHint(nil), def.Signals...)
+			}
+			defs[id] = cp
+		}
+		t.PropertyDefs = defs
+	}
 	return TemplateSpec{
 		Template:        t,
 		ParamDefaults:   cloneFloatMap(spec.ParamDefaults),
 		Overridable:     cloneStrings(spec.Overridable),
+		ParamInfo:       cloneParamInfo(spec.ParamInfo),
 		Recipes:         cloneRecipes(spec.Recipes),
 		OperatorVersion: cloneStringMap(spec.OperatorVersion),
 	}
+}
+
+// cloneParamInfo deep-copies parameter documentation (min/max pointers).
+func cloneParamInfo(in map[string]ParamDef) map[string]ParamDef {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]ParamDef, len(in))
+	for k, def := range in {
+		cp := def
+		if def.Min != nil {
+			v := *def.Min
+			cp.Min = &v
+		}
+		if def.Max != nil {
+			v := *def.Max
+			cp.Max = &v
+		}
+		out[k] = cp
+	}
+	return out
 }
 
 func cloneVariantSpec(spec VariantSpec) VariantSpec {
@@ -323,6 +367,23 @@ func (c *Catalog) PutTemplate(spec TemplateSpec) error {
 		}
 		overridable[p] = struct{}{}
 	}
+	for p, info := range spec.ParamInfo {
+		def, ok := spec.ParamDefaults[p]
+		if !ok {
+			return fmt.Errorf("%w: template %s/%s param info %q has no default", things.ErrValidation, t.ID, t.Version, p)
+		}
+		if info.Min != nil && info.Max != nil && *info.Min > *info.Max {
+			return fmt.Errorf("%w: template %s/%s param %q min exceeds max", things.ErrValidation, t.ID, t.Version, p)
+		}
+		if err := checkParamRange(t.ID, t.Version, p, def, info); err != nil {
+			return err
+		}
+	}
+	for id := range spec.Template.PropertyDefs {
+		if err := t.ValidatePropertyID(id); err != nil {
+			return fmt.Errorf("%w: template %s/%s property def %q: %w", things.ErrValidation, t.ID, t.Version, id, err)
+		}
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -384,9 +445,14 @@ func (c *Catalog) PutVariant(spec VariantSpec) error {
 	if !ok {
 		return fmt.Errorf("%w: variant %s/%s references unknown template %s/%s", things.ErrValidation, v.ID, v.Version, v.TemplateID, v.TemplateVersion)
 	}
-	for p := range v.ParamValues {
+	for p, val := range v.ParamValues {
 		if _, ok := tmpl.ParamDefaults[p]; !ok {
 			return fmt.Errorf("%w: variant %s/%s sets unknown parameter %q", things.ErrValidation, v.ID, v.Version, p)
+		}
+		if info, ok := tmpl.ParamInfo[p]; ok {
+			if err := checkParamRange(tmpl.Template.ID, tmpl.Template.Version, p, val, info); err != nil {
+				return fmt.Errorf("variant %s/%s: %w", v.ID, v.Version, err)
+			}
 		}
 	}
 	for _, prop := range spec.PresetProperties {
@@ -568,6 +634,25 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 	props := make(map[string]things.Property, len(obj.Properties))
 	for id, prop := range obj.Properties {
 		prop.ID = id
+		// Prefill tomma presentationsfält från mallens definition så att
+		// GUI:n kan skapa saker med bara ID:n; uttryckliga värden vinner.
+		if def, ok := t.PropertyDefs[id]; ok {
+			if prop.DisplayName == "" {
+				prop.DisplayName = def.DisplayName
+			}
+			if prop.DataType == "" {
+				prop.DataType = def.DataType
+			}
+			if prop.Quantity == "" {
+				prop.Quantity = def.Quantity
+			}
+			if prop.Unit == "" {
+				prop.Unit = def.Unit
+			}
+			if prop.Description == "" {
+				prop.Description = def.Description
+			}
+		}
 		props[id] = prop
 	}
 
@@ -622,6 +707,19 @@ func validateMetadata(thingID string, md map[string]string) error {
 	return nil
 }
 
+// checkParamRange enforces template-declared min/max for a value.
+func checkParamRange(templateID, templateVersion, param string, value float64, info ParamDef) error {
+	if info.Min != nil && value < *info.Min {
+		return fmt.Errorf("%w: template %s/%s param %q value %v below min %v",
+			things.ErrValidation, templateID, templateVersion, param, value, *info.Min)
+	}
+	if info.Max != nil && value > *info.Max {
+		return fmt.Errorf("%w: template %s/%s param %q value %v above max %v",
+			things.ErrValidation, templateID, templateVersion, param, value, *info.Max)
+	}
+	return nil
+}
+
 func resolveParams(tmpl TemplateSpec, variant things.Variant, obj ObjectSpec) (map[string]float64, map[string]things.ParamSource, error) {
 	values := make(map[string]float64, len(tmpl.ParamDefaults))
 	sources := make(map[string]things.ParamSource, len(tmpl.ParamDefaults))
@@ -632,6 +730,11 @@ func resolveParams(tmpl TemplateSpec, variant things.Variant, obj ObjectSpec) (m
 	for k, v := range variant.ParamValues {
 		if _, ok := tmpl.ParamDefaults[k]; !ok {
 			return nil, nil, fmt.Errorf("%w: variant sets unknown parameter %q", things.ErrValidation, k)
+		}
+		if info, ok := tmpl.ParamInfo[k]; ok {
+			if err := checkParamRange(tmpl.Template.ID, tmpl.Template.Version, k, v, info); err != nil {
+				return nil, nil, fmt.Errorf("variant %s: %w", variant.ID, err)
+			}
 		}
 		values[k] = v
 		sources[k] = things.ParamSourceVariant
@@ -647,6 +750,11 @@ func resolveParams(tmpl TemplateSpec, variant things.Variant, obj ObjectSpec) (m
 		if len(overridable) > 0 {
 			if _, ok := overridable[k]; !ok {
 				return nil, nil, fmt.Errorf("%w: object %q must not override parameter %q", things.ErrValidation, obj.ThingID, k)
+			}
+		}
+		if info, ok := tmpl.ParamInfo[k]; ok {
+			if err := checkParamRange(tmpl.Template.ID, tmpl.Template.Version, k, v, info); err != nil {
+				return nil, nil, fmt.Errorf("object %q: %w", obj.ThingID, err)
 			}
 		}
 		values[k] = v

@@ -50,7 +50,7 @@ func WithAccessObjectAuthorization(enabled bool) RegisterOption {
 type Manager interface {
 	PublishTemplate(ctx context.Context, spec catalog.TemplateSpec) error
 	PublishVariant(ctx context.Context, spec catalog.VariantSpec) error
-	ListTemplates(ctx context.Context) []catalog.TemplateSpec
+	ListTemplates(ctx context.Context, category string) []catalog.TemplateSpec
 	ListVariants(ctx context.Context) []catalog.VariantSpec
 	GetTemplate(ctx context.Context, id, version string) (catalog.TemplateSpec, error)
 	GetVariant(ctx context.Context, id, version string) (catalog.VariantSpec, error)
@@ -238,7 +238,7 @@ func (h *handler) listTemplates(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, h.mgr.ListTemplates(r.Context()))
+	writeJSON(w, http.StatusOK, h.mgr.ListTemplates(r.Context(), r.URL.Query().Get("category")))
 }
 
 func (h *handler) publishVariant(w http.ResponseWriter, r *http.Request) {
