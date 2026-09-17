@@ -682,3 +682,58 @@ func TestV0SearchLocationMetadata(t *testing.T) {
 		t.Fatalf("inverted bbox=%d, want 400", rr.Code)
 	}
 }
+
+// Träd, bortkoppling och X-Total-Count.
+func TestV0TreeUnlinkTotal(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	second := v0binObject()
+	second.ThingID = "bin-43"
+	if rr := doJSON(h.createThing, ctx, "", second, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create second: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr := doGET(h.searchThings, ctx, "", "limit=1")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search: %d", rr.Code)
+	}
+	if rr.Header().Get("X-Total-Count") != "2" {
+		t.Fatalf("total=%q, want 2", rr.Header().Get("X-Total-Count"))
+	}
+
+	rr = doGET(h.getTree, ctx, "bin-42", "depth=0")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tree: %d %s", rr.Code, rr.Body.String())
+	}
+	var node application.TreeNode
+	if err := json.Unmarshal(rr.Body.Bytes(), &node); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if node.Thing.ThingID != "bin-42" || len(node.Children) != 0 {
+		t.Fatalf("tree=%+v, want bare bin", node)
+	}
+	if rr := doGET(h.getTree, ctx, "bin-42", "depth=nope"); rr.Code != http.StatusBadRequest {
+		t.Fatalf("bad depth=%d, want 400", rr.Code)
+	}
+	if rr := doGET(h.getTree, ctx, "missing", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown tree=%d, want 404", rr.Code)
+	}
+
+	// Bortkoppling kräver If-Match och Delete-scope.
+	if rr := doJSON(h.unlinkThing, ctx, "bin-42", nil, ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("unlink without If-Match=%d, want 400", rr.Code)
+	}
+	grr := doGET(h.getThing, ctx, "bin-42", "")
+	etag := grr.Header().Get("ETag")
+	if rr := doJSON(h.unlinkThing, ctx, "bin-42", nil, etag); rr.Code != http.StatusNotFound {
+		t.Fatalf("unlink parentless=%d, want 404", rr.Code)
+	}
+	ro := v0ctxReadOnly("t")
+	if rr := doJSON(h.unlinkThing, ro, "bin-42", nil, etag); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("read-only unlink=%d, want 401", rr.Code)
+	}
+}

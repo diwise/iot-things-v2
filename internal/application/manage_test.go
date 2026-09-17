@@ -1072,3 +1072,128 @@ func TestManageLocationMetadataSearch(t *testing.T) {
 		t.Fatalf("update dropped location/metadata: %+v", sum)
 	}
 }
+
+// Underträd: depth gränsar barnnivåer (0 = bara saken), för djupt nekas.
+func TestManageSubtree(t *testing.T) {
+	mgr, _, _, _ := mgmtSetup(t)
+	ctx := context.Background()
+	mgmtRooms(t, mgr)
+	if err := mgr.PublishTemplate(ctx, catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "probe", Version: "v1",
+			Relations: []things.RelationSpec{
+				{Name: "partOf", AllowedTargets: []string{"room"}, Min: 0, Max: 1},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("publish probe: %v", err)
+	}
+	mkRoom := func(id, parent string) catalog.ObjectSpec {
+		obj := catalog.ObjectSpec{
+			ThingID: id, TemplateID: "room", TemplateVersion: "v1",
+			Properties: map[string]things.Property{"temperature.window": {}},
+			Bindings: []things.Binding{
+				{DeviceID: "s-" + id, Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
+			},
+		}
+		if parent != "" {
+			obj.Relations = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "building"}}
+		}
+		return obj
+	}
+	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
+		ThingID: "building-a", TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+	}); err != nil {
+		t.Fatalf("create building: %v", err)
+	}
+	if _, err := mgr.CreateObject(ctx, "t", mkRoom("room-a", "building-a")); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
+		ThingID: "probe-1", TemplateID: "probe", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+		Relations:  []catalog.RelationRef{{Name: "partOf", TargetThingID: "room-a", TargetTemplateID: "room"}},
+	}); err != nil {
+		t.Fatalf("create probe: %v", err)
+	}
+
+	node, err := mgr.Subtree(ctx, "t", "building-a", 0)
+	if err != nil {
+		t.Fatalf("depth 0: %v", err)
+	}
+	if node.Thing.ThingID != "building-a" || len(node.Children) != 0 {
+		t.Fatalf("depth 0=%+v, want bare building", node)
+	}
+	node, err = mgr.Subtree(ctx, "t", "building-a", 1)
+	if err != nil {
+		t.Fatalf("depth 1: %v", err)
+	}
+	if len(node.Children) != 1 || len(node.Children[0].Children) != 0 {
+		t.Fatalf("depth 1=%+v, want room without probe", node)
+	}
+	node, err = mgr.Subtree(ctx, "t", "building-a", 2)
+	if err != nil {
+		t.Fatalf("depth 2: %v", err)
+	}
+	if len(node.Children) != 1 || len(node.Children[0].Children) != 1 ||
+		node.Children[0].Children[0].Thing.ThingID != "probe-1" {
+		t.Fatalf("depth 2=%+v, want room with probe", node)
+	}
+	if _, err := mgr.Subtree(ctx, "t", "building-a", 99); err == nil {
+		t.Fatal("excessive depth must fail")
+	}
+	if _, err := mgr.Subtree(ctx, "t", "missing", 1); !errors.Is(err, things.ErrNotFound) {
+		t.Fatalf("unknown subtree err=%v, want not found", err)
+	}
+	if _, err := mgr.Subtree(ctx, "other", "building-a", 1); !errors.Is(err, things.ErrNotFound) {
+		t.Fatal("cross-tenant subtree must fail")
+	}
+}
+
+// Bortkoppling: förälder försvinner, barnet (ID/bindningar/historik) består,
+// revision bumpas; andra gången ger NotFound.
+func TestManageUnlink(t *testing.T) {
+	mgr, _, _, _ := mgmtSetup(t)
+	ctx := context.Background()
+	mgmtRooms(t, mgr)
+	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
+		ThingID: "building-a", TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+	}); err != nil {
+		t.Fatalf("create building: %v", err)
+	}
+	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
+		ThingID: "room-a", TemplateID: "room", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"temperature.window": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s1", Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
+		},
+		Relations: []catalog.RelationRef{{Name: "partOf", TargetThingID: "building-a", TargetTemplateID: "building"}},
+	}); err != nil {
+		t.Fatalf("create room: %v", err)
+	}
+	if err := mgr.UnlinkObject(ctx, "t", "room-a", 99); !errors.Is(err, things.ErrConflict) {
+		t.Fatalf("stale unlink err=%v, want conflict", err)
+	}
+	if err := mgr.UnlinkObject(ctx, "t", "room-a", 1); err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+	sum, err := mgr.GetObject(ctx, "t", "room-a")
+	if err != nil {
+		t.Fatalf("get after unlink: %v", err)
+	}
+	if sum.Revision != 2 {
+		t.Fatalf("revision=%d, want 2", sum.Revision)
+	}
+	ov, err := mgr.Overview(ctx, "t", "building-a")
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if len(ov.Children) != 0 {
+		t.Fatalf("children=%d, want 0 after unlink", len(ov.Children))
+	}
+	if err := mgr.UnlinkObject(ctx, "t", "room-a", 2); !errors.Is(err, things.ErrNotFound) {
+		t.Fatalf("second unlink err=%v, want not found", err)
+	}
+}

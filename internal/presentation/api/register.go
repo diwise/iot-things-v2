@@ -62,10 +62,12 @@ type Manager interface {
 	UpgradeObject(ctx context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string, force bool, revision int64) (catalog.Diff, []string, error)
 	DeleteObject(ctx context.Context, tenant, thingID string) error
 	MoveObject(ctx context.Context, tenant, childID, newParentID string, revision int64) error
+	UnlinkObject(ctx context.Context, tenant, childID string, revision int64) error
 	History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) ([]application.HistoryWrite, error)
 	GetObject(ctx context.Context, tenant, thingID string) (application.ThingSummary, error)
 	SearchObjects(ctx context.Context, tenant string, filter application.SearchFilter) []application.ThingSummary
 	Overview(ctx context.Context, tenant, thingID string) (application.Overview, error)
+	Subtree(ctx context.Context, tenant, thingID string, depth int) (application.TreeNode, error)
 }
 
 // RegisterHandlers wires the public management API onto mux with the same
@@ -121,6 +123,7 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, poli
 			r.Get("{id}", h.getThing)
 			r.Get("{id}/history", h.getHistory)
 			r.Get("{id}/overview", h.getOverview)
+			r.Get("{id}/tree", h.getTree)
 		})
 
 		r.Group(func(r router.ServeMux) {
@@ -141,6 +144,7 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, poli
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(DeleteThings))
 			r.Delete("{id}", h.deleteThing)
+			r.Delete("{id}/parent", h.unlinkThing)
 		})
 	})
 
@@ -348,6 +352,12 @@ func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.BBox = &box
 	}
+	// Total före paging i X-Total-Count (egen ofiltrerad räkning;
+	// dyr vid stora kataloger, men korrekt utan separat count-väg).
+	totalFilter := filter
+	totalFilter.Limit = 0
+	totalFilter.Offset = 0
+	w.Header().Set("X-Total-Count", strconv.Itoa(len(h.mgr.SearchObjects(r.Context(), t, totalFilter))))
 	writeJSON(w, http.StatusOK, h.mgr.SearchObjects(r.Context(), t, filter))
 }
 
@@ -616,6 +626,57 @@ func (h *handler) getOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ov)
+}
+
+func (h *handler) getTree(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, ReadThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	depth := 1
+	if raw := r.URL.Query().Get("depth"); raw != "" {
+		depth, err = strconv.Atoi(raw)
+		if err != nil || depth < 0 {
+			writeAPIError(w, fmt.Errorf("%w: invalid depth", things.ErrValidation))
+			return
+		}
+	}
+	node, err := h.mgr.Subtree(r.Context(), t, r.PathValue("id"), depth)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, node)
+}
+
+// unlinkThing kopplar loss föräldern (DELETE, men kräver If-Match som
+// övriga konfigurationsändringar). Ligger i DeleteThings-gruppen eftersom
+// routern förbjuder samma metod i två grupper med olika scope;
+// delete-scope är striktare än update och därför det säkra valet.
+func (h *handler) unlinkThing(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, DeleteThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	rev, err := requireIfMatch(r)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	id := r.PathValue("id")
+	if err := h.mgr.UnlinkObject(r.Context(), t, id, rev); err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	sum, err := h.mgr.GetObject(r.Context(), t, id)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	w.Header().Set("ETag", FormatETag(sum.Revision))
+	writeJSON(w, http.StatusOK, sum)
 }
 
 func requireIfMatch(r *http.Request) (int64, error) {

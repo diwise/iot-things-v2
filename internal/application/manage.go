@@ -56,6 +56,15 @@ type Overview struct {
 	Children []ThingSummary `json:"children,omitempty"`
 }
 
+// TreeNode är en nod i ett underträd: saken plus kapslade barn.
+type TreeNode struct {
+	Thing    ThingSummary `json:"thing"`
+	Children []TreeNode   `json:"children,omitempty"`
+}
+
+// maxTreeDepth gränsar underträdsläsning (kostnad per nivå).
+const maxTreeDepth = 10
+
 // Manager samordnar katalog, runtime och läsningar.
 type Manager struct {
 	cat      *catalog.Catalog
@@ -425,6 +434,70 @@ func (m *Manager) Overview(ctx context.Context, tenant, thingID string) (Overvie
 		ov.Children = append(ov.Children, sum)
 	}
 	return ov, nil
+}
+
+// Subtree läser ett begränsat underträd med aktuella värden: depth anger
+// hur många barnnivåer som följs (0 = bara saken själv). Negativt djup
+// nekas; djup över maxTreeDepth nekas för att gränsa läskostnaden.
+// Allt läses inom tenant; cykler bryts via besökta ID:n.
+func (m *Manager) Subtree(ctx context.Context, tenant, thingID string, depth int) (TreeNode, error) {
+	if depth < 0 {
+		return TreeNode{}, fmt.Errorf("%w: depth must not be negative", things.ErrValidation)
+	}
+	if depth > maxTreeDepth {
+		return TreeNode{}, fmt.Errorf("%w: depth %d exceeds max %d", things.ErrValidation, depth, maxTreeDepth)
+	}
+	visited := make(map[string]struct{})
+	return m.subtree(ctx, tenant, thingID, depth, visited)
+}
+
+func (m *Manager) subtree(ctx context.Context, tenant, thingID string, depth int, visited map[string]struct{}) (TreeNode, error) {
+	if _, ok := visited[thingID]; ok {
+		return TreeNode{}, fmt.Errorf("%w: relation cycle at %q", things.ErrConflict, thingID)
+	}
+	visited[thingID] = struct{}{}
+	sum, err := m.GetObject(ctx, tenant, thingID)
+	if err != nil {
+		return TreeNode{}, err
+	}
+	node := TreeNode{Thing: sum}
+	if depth == 0 {
+		return node, nil
+	}
+	for _, child := range m.store.Children(tenant, thingID) {
+		sub, err := m.subtree(ctx, tenant, child, depth-1, visited)
+		if err != nil {
+			continue
+		}
+		node.Children = append(node.Children, sub)
+	}
+	return node, nil
+}
+
+// UnlinkObject kopplar loss ett barns partOf-förälder utan att radera
+// barnet: ID, mätpunkter, bindningar och historik består. Revision krävs
+// (optimistisk låsning, B19) och bumpas. Utan förälder ger anropet
+// ErrNotFound (ingen tyst no-op med phantom-revision).
+func (m *Manager) UnlinkObject(_ context.Context, tenant, childID string, revision int64) error {
+	child, err := m.reconstructSpec(tenant, childID)
+	if err != nil {
+		return err
+	}
+	kept := child.Relations[:0]
+	detached := false
+	for _, rel := range child.Relations {
+		if rel.Name == "partOf" {
+			detached = true
+			continue
+		}
+		kept = append(kept, rel)
+	}
+	if !detached {
+		return fmt.Errorf("%w: thing %q has no parent", things.ErrNotFound, childID)
+	}
+	child.Relations = kept
+	_, err = m.rt.RegisterThing(tenant, m.cat, child, revision)
+	return err
 }
 
 func summarize(tenant, thingID string, cfg *catalog.EffectiveConfig, st StoredThingState) ThingSummary {
