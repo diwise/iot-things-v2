@@ -72,6 +72,7 @@ type Manager struct {
 	rt       *Runtime
 	store    RuntimeStore
 	catStore catalog.Store
+	pub      EventPublisher
 }
 
 // ManagerOption configures a Manager.
@@ -83,6 +84,12 @@ func WithCatalogStore(s catalog.Store) ManagerOption {
 	return func(m *Manager) { m.catStore = s }
 }
 
+// WithPublisher drains lifecycle/relation events inline after mutations
+// (nil = no inline drain; restart drain still delivers via outbox).
+func WithPublisher(p EventPublisher) ManagerOption {
+	return func(m *Manager) { m.pub = p }
+}
+
 // NewManager skapar ett hanteringslager. cat får delas med anroparen vid
 // test (samma pekare).
 func NewManager(cat *catalog.Catalog, rt *Runtime, store RuntimeStore, opts ...ManagerOption) *Manager {
@@ -91,6 +98,18 @@ func NewManager(cat *catalog.Catalog, rt *Runtime, store RuntimeStore, opts ...M
 		opt(m)
 	}
 	return m
+}
+
+// drain publishes pending lifecycle/relation events for a thing after a
+// mutation. State is already committed: on publish failure the error
+// propagates (client sees 500) while the outbox retains the events for
+// restart drain, so failures stay visible instead of silent.
+func (m *Manager) drain(ctx context.Context, tenant, thingID string) error {
+	if m.pub == nil {
+		return nil
+	}
+	_, err := m.rt.DrainRaw(ctx, m.pub, tenant, thingID)
+	return err
 }
 
 // PublishTemplate publicerar en mallversion (oföränderlig efter publicering)
@@ -188,33 +207,54 @@ func (m *Manager) PreviewObject(_ context.Context, tenant string, obj catalog.Ob
 }
 
 // CreateObject skapar en sak med revision 1.
-func (m *Manager) CreateObject(_ context.Context, tenant string, obj catalog.ObjectSpec) (*catalog.EffectiveConfig, error) {
+func (m *Manager) CreateObject(ctx context.Context, tenant string, obj catalog.ObjectSpec) (*catalog.EffectiveConfig, error) {
 	obj.Tenant = tenant
 	if _, exists := m.store.LoadThing(tenant, obj.ThingID); exists {
 		return nil, fmt.Errorf("%w: thing %q already exists", things.ErrConflict, obj.ThingID)
 	}
-	return m.rt.RegisterThing(tenant, m.cat, obj, 1)
+	cfg, err := m.rt.RegisterThing(tenant, m.cat, obj, 1)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.drain(ctx, tenant, obj.ThingID); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // UpdateObject omsparar en sak efter ompilering; gammal revision nekas (409).
-func (m *Manager) UpdateObject(_ context.Context, tenant string, obj catalog.ObjectSpec, revision int64) (*catalog.EffectiveConfig, error) {
+func (m *Manager) UpdateObject(ctx context.Context, tenant string, obj catalog.ObjectSpec, revision int64) (*catalog.EffectiveConfig, error) {
 	obj.Tenant = tenant
 	if _, exists := m.store.LoadThing(tenant, obj.ThingID); !exists {
 		return nil, fmt.Errorf("%w: thing %q", things.ErrNotFound, obj.ThingID)
 	}
-	return m.rt.RegisterThing(tenant, m.cat, obj, revision)
+	cfg, err := m.rt.RegisterThing(tenant, m.cat, obj, revision)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.drain(ctx, tenant, obj.ThingID); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // SwapBindings byter sensorkopplingar utan att byta objektets identitet,
 // historik eller beräkningsreferenser: övrig konfiguration rekonstrueras
 // från lagrad effektiv config och kompileras om.
-func (m *Manager) SwapBindings(_ context.Context, tenant, thingID string, bindings []things.Binding, revision int64) (*catalog.EffectiveConfig, error) {
+func (m *Manager) SwapBindings(ctx context.Context, tenant, thingID string, bindings []things.Binding, revision int64) (*catalog.EffectiveConfig, error) {
 	obj, err := m.reconstructSpec(tenant, thingID)
 	if err != nil {
 		return nil, err
 	}
 	obj.Bindings = bindings
-	return m.rt.RegisterThing(tenant, m.cat, obj, revision)
+	cfg, err := m.rt.RegisterThing(tenant, m.cat, obj, revision)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.drain(ctx, tenant, thingID); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // PreviewUpgrade visar diff och konflikter mot nya versioner utan att ändra.
@@ -228,7 +268,7 @@ func (m *Manager) PreviewUpgrade(_ context.Context, tenant, thingID, newTemplate
 
 // UpgradeObject aktiverar nya versioner. Med konflikter och utan force
 // nekas uppgraderingen (undantag försvinner aldrig tyst).
-func (m *Manager) UpgradeObject(_ context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string, force bool, revision int64) (catalog.Diff, []string, error) {
+func (m *Manager) UpgradeObject(ctx context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string, force bool, revision int64) (catalog.Diff, []string, error) {
 	obj, err := m.reconstructSpec(tenant, thingID)
 	if err != nil {
 		return catalog.Diff{}, nil, err
@@ -247,6 +287,9 @@ func (m *Manager) UpgradeObject(_ context.Context, tenant, thingID, newTemplateI
 	obj.TemplateID, obj.TemplateVersion = newTemplateID, newTemplateVersion
 	obj.VariantID, obj.VariantVersion = newVariantID, newVariantVersion
 	if _, err := m.rt.RegisterThing(tenant, m.cat, obj, revision); err != nil {
+		return diff, conflicts, err
+	}
+	if err := m.drain(ctx, tenant, thingID); err != nil {
 		return diff, conflicts, err
 	}
 	return diff, conflicts, nil
@@ -311,8 +354,11 @@ func stripConflicting(obj catalog.ObjectSpec, cat *catalog.Catalog, newTemplateI
 }
 
 // DeleteObject tar bort en sak (blockeras med aktiva barn, ingen kaskad).
-func (m *Manager) DeleteObject(_ context.Context, tenant, thingID string) error {
-	return m.rt.DeleteThing(tenant, thingID)
+func (m *Manager) DeleteObject(ctx context.Context, tenant, thingID string) error {
+	if err := m.rt.DeleteThing(tenant, thingID); err != nil {
+		return err
+	}
+	return m.drain(ctx, tenant, thingID)
 }
 
 // MoveObject flyttar ett barns partOf-förälder atomärt med optimistisk
@@ -322,7 +368,7 @@ func (m *Manager) DeleteObject(_ context.Context, tenant, thingID string) error 
 // uppdateras tillsammans: en efterföljande SwapBindings/Upgrade
 // (reconstructSpec) återställer aldrig den gamla föräldern. Övriga
 // relationstyper än partOf bevaras. Revision bumpas vid lyckad flytt.
-func (m *Manager) MoveObject(_ context.Context, tenant, childID, newParentID string, revision int64) error {
+func (m *Manager) MoveObject(ctx context.Context, tenant, childID, newParentID string, revision int64) error {
 	child, err := m.reconstructSpec(tenant, childID)
 	if err != nil {
 		return err
@@ -347,7 +393,10 @@ func (m *Manager) MoveObject(_ context.Context, tenant, childID, newParentID str
 		TargetTemplateID: parentCfg.TemplateID,
 	})
 	_, err = m.rt.RegisterThing(tenant, m.cat, child, revision)
-	return err
+	if err != nil {
+		return err
+	}
+	return m.drain(ctx, tenant, childID)
 }
 
 // History läser tidsbegränsad egenskapshistorik (tom prop = alla).
@@ -509,7 +558,7 @@ func (m *Manager) subtree(ctx context.Context, tenant, thingID string, depth int
 // barnet: ID, mätpunkter, bindningar och historik består. Revision krävs
 // (optimistisk låsning, B19) och bumpas. Utan förälder ger anropet
 // ErrNotFound (ingen tyst no-op med phantom-revision).
-func (m *Manager) UnlinkObject(_ context.Context, tenant, childID string, revision int64) error {
+func (m *Manager) UnlinkObject(ctx context.Context, tenant, childID string, revision int64) error {
 	child, err := m.reconstructSpec(tenant, childID)
 	if err != nil {
 		return err
@@ -527,8 +576,10 @@ func (m *Manager) UnlinkObject(_ context.Context, tenant, childID string, revisi
 		return fmt.Errorf("%w: thing %q has no parent", things.ErrNotFound, childID)
 	}
 	child.Relations = kept
-	_, err = m.rt.RegisterThing(tenant, m.cat, child, revision)
-	return err
+	if _, err := m.rt.RegisterThing(tenant, m.cat, child, revision); err != nil {
+		return err
+	}
+	return m.drain(ctx, tenant, childID)
 }
 
 func summarize(tenant, thingID string, cfg *catalog.EffectiveConfig, st StoredThingState) ThingSummary {

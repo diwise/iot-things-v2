@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 )
 
 // ThingRecord är ett minimalt minnesobjekt.
@@ -487,6 +489,9 @@ type OutboxEvent struct {
 	ObservedAt time.Time
 	Revision   int64
 	Payload    []byte
+	// Topic routes non-values entries (lifecycle, relations); empty
+	// means property values (pre-topic rows).
+	Topic string
 }
 
 // MemOutbox är ett minnesbaserat utbox-lager med idempotent append på ID.
@@ -589,6 +594,34 @@ func (o *MemOutbox) ClearIDs(tenant, thingID string, ids []string) {
 		o.events[i] = OutboxEvent{}
 	}
 	o.events = kept
+}
+
+// PendingRawTargets lists distinct tenant/thing pairs with pending
+// non-values outbox entries (lifecycle, relations), sorted. Values rows
+// are excluded: their things are enumerated from blob storage.
+func (o *MemOutbox) PendingRawTargets() [][2]string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	seen := make(map[string]struct{})
+	var out [][2]string
+	for _, ev := range o.events {
+		if ev.Topic == "" || ev.Topic == pkgtypes.TopicThingValues {
+			continue
+		}
+		key := ev.Tenant + "\x00" + ev.ThingID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, [2]string{ev.Tenant, ev.ThingID})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i][0] != out[j][0] {
+			return out[i][0] < out[j][0]
+		}
+		return out[i][1] < out[j][1]
+	})
+	return out
 }
 
 // Len returnerar antal lagrade händelser.

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"github.com/diwise/iot-things-v2/internal/application/catalog"
 	"github.com/diwise/iot-things-v2/internal/application/things"
 	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
+	"github.com/diwise/messaging-golang/pkg/messaging"
 )
 
 // pgTestStore ansluter mot lokal testdatabas och tömmer v2-tabellerna.
@@ -285,12 +287,17 @@ func (p *pgStubPublisher) PublishThingValues(_ context.Context, ev pkgtypes.Thin
 	return nil
 }
 
+func (p *pgStubPublisher) PublishMessage(_ context.Context, _ messaging.TopicMessage) error {
+	return p.err
+}
+
 func pgBinCatalog(t *testing.T) *catalog.Catalog {
 	t.Helper()
 	c := catalog.New()
 	err := c.PutTemplate(catalog.TemplateSpec{
 		Template: things.Template{
 			ID: "wastebin", Version: "v1",
+			Category: "wastebin",
 			Required: []string{"distance", "level", "fillRate"},
 		},
 		ParamDefaults: map[string]float64{"usableHeight": 1.2, "sensorToBottom": 1.42},
@@ -311,7 +318,9 @@ func pgBinCatalog(t *testing.T) *catalog.Catalog {
 
 func pgBinObject() catalog.ObjectSpec {
 	return catalog.ObjectSpec{
-		ThingID: "bin-42", Tenant: "t",
+		ThingID: "bin-42", Tenant: "t", Name: "Soptunna 42",
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+		Metadata:   map[string]string{"test": "true"},
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"distance": {}, "level": {}, "fillRate": {},
@@ -387,12 +396,14 @@ func TestPostgresCrossInstanceConcurrency(t *testing.T) {
 	a := application.RuntimeStore(s)
 	c := catalog.New()
 	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
-		ID: "gauge", Version: "v1", Required: []string{"distance"},
+		ID: "gauge", Version: "v1", Required: []string{"distance"}, Category: "gauge",
 	}}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	obj := catalog.ObjectSpec{
-		ThingID: "gauge-1", Tenant: "t",
+		ThingID: "gauge-1", Tenant: "t", Name: "Mätare 1",
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+		Metadata:   map[string]string{"test": "true"},
 		TemplateID: "gauge", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}},
 		Bindings: []things.Binding{
@@ -676,12 +687,14 @@ func TestPostgresConcurrentRegisterSameThing(t *testing.T) {
 	// Runtime-nivå: minst en vinner, övriga konflikt, ingen dubblett.
 	c := catalog.New()
 	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
-		ID: "gauge", Version: "v1", Required: []string{"distance"},
+		ID: "gauge", Version: "v1", Required: []string{"distance"}, Category: "gauge",
 	}}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	obj := catalog.ObjectSpec{
-		ThingID: "gauge-1", Tenant: "t",
+		ThingID: "gauge-1", Tenant: "t", Name: "Mätare 1",
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+		Metadata:   map[string]string{"test": "true"},
 		TemplateID: "gauge", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}},
 	}
@@ -881,4 +894,36 @@ func TestConfigConnStrEscapesPassword(t *testing.T) {
 		t.Fatalf("New with special password must parse: %v (connstr=%q)", err, cs)
 	}
 	_ = s
+}
+
+// Råa outbox-rader (livscykel/relationer): ID-dedup, topic-partition,
+// targets för omstartssvep. Samma semantik som minnesbackendens adapter.
+func TestPostgresRawOutbox(t *testing.T) {
+	s := pgTestStore(t)
+	a := application.RuntimeStore(s)
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	ev := application.RawOutboxEvent{
+		ID: "v1/t/x/lifecycle/created/1", Topic: pkgtypes.TopicLifecycleChanges,
+		Payload: []byte(`{"kind":"created"}`), ObservedAt: at, Revision: 1,
+	}
+	a.StoreRawEvents("t", "x", []application.RawOutboxEvent{ev, ev})
+	got := a.PendingRawEvents("t", "x")
+	if len(got) != 1 || got[0].Topic != pkgtypes.TopicLifecycleChanges {
+		t.Fatalf("pending raw=%+v, want one lifecycle row", got)
+	}
+	targets := a.ListRawTargets()
+	if len(targets) != 1 || targets[0].Tenant != "t" || targets[0].ThingID != "x" {
+		t.Fatalf("targets=%+v, want t/x", targets)
+	}
+	// Värderader syns inte i råa frågor.
+	if len(a.PendingRawEvents("t", "nope")) != 0 {
+		t.Fatal("unknown thing must have no raw rows")
+	}
+	a.ClearRawIDs("t", "x", []string{ev.ID})
+	if len(a.PendingRawEvents("t", "x")) != 0 {
+		t.Fatal("cleared raw rows must vanish")
+	}
+	if len(a.ListRawTargets()) != 0 {
+		t.Fatal("targets must be empty after clear")
+	}
 }

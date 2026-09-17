@@ -11,6 +11,13 @@ info:
     Användare med flera tenants väljer en explicit via ?tenant= på samtliga
     endpoints; utan väljare svarar tvetydiga anrop 400 och läsningar slås
     aldrig ihop över tenants.
+    Muterande anrop dränerar livscykel-/relationshändelser inline: ett 500-svar
+    efter lyckad validering kan betyda att tillståndet sparats men
+    publiceringen väntar i outbox (levereras vid omstart); läs aktuellt
+    tillstånd via GET i stället för blindt återförsök.
+    Utgående topics (isoleraade v1-kontrakt): things.v1.values (mätvärden med
+    sakdeskriptor), things.v1.lifecycle (created/updated/deleted),
+    things.v1.relations (partOf set/removed).
 servers:
   - url: /api/v1
 security:

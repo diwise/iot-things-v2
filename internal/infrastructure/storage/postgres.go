@@ -13,6 +13,7 @@ import (
 	"github.com/diwise/iot-things-v2/internal/application"
 	"github.com/diwise/iot-things-v2/internal/application/catalog"
 	"github.com/diwise/iot-things-v2/internal/application/things"
+	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -286,8 +287,8 @@ func (s *PgStore) PendingEvents(tenant, thingID string) []application.FlowEvent 
 	ctx, cancel := s.ctx()
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		`SELECT payload FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 ORDER BY observed_at, property_id, id`,
-		tenant, thingID)
+		`SELECT payload FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 AND topic=$3 ORDER BY observed_at, property_id, id`,
+		tenant, thingID, pkgtypes.TopicThingValues)
 	if err != nil {
 		return nil
 	}
@@ -319,9 +320,9 @@ func (s *PgStore) StorePending(tenant, thingID string, events []application.Flow
 			WITH s AS (
 				INSERT INTO outbox_seen_v2(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id
 			)
-			INSERT INTO outbox_v2(id, tenant, thing_id, property_id, observed_at, revision, payload)
-			SELECT $1,$2,$3,$4,$5,$6,$7 WHERE EXISTS (SELECT 1 FROM s)`,
-			id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, raw)
+			INSERT INTO outbox_v2(id, tenant, thing_id, property_id, observed_at, revision, payload, topic)
+			SELECT $1,$2,$3,$4,$5,$6,$7,$8 WHERE EXISTS (SELECT 1 FROM s)`,
+			id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, raw, pkgtypes.TopicThingValues)
 	}
 }
 
@@ -334,6 +335,84 @@ func (s *PgStore) ClearPendingIDs(tenant, thingID string, ids []string) {
 	_, _ = s.pool.Exec(ctx,
 		`DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 AND id = ANY($3)`,
 		tenant, thingID, ids)
+}
+
+// StoreRawEvents persists lifecycle/relation events with ID dedup (same
+// seen-table as values; IDs are namespaced per topic).
+func (s *PgStore) StoreRawEvents(tenant, thingID string, events []application.RawOutboxEvent) {
+	ctx, cancel := s.ctx()
+	defer cancel()
+	for _, e := range events {
+		if e.ID == "" {
+			continue
+		}
+		_, _ = s.pool.Exec(ctx, `
+			WITH s AS (
+				INSERT INTO outbox_seen_v2(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id
+			)
+			INSERT INTO outbox_v2(id, tenant, thing_id, observed_at, revision, payload, topic)
+			SELECT $1,$2,$3,$4,$5,$6,$7 WHERE EXISTS (SELECT 1 FROM s)`,
+			e.ID, tenant, thingID, e.ObservedAt, e.Revision, e.Payload, e.Topic)
+	}
+}
+
+// PendingRawEvents returns pending non-values outbox entries with topics.
+func (s *PgStore) PendingRawEvents(tenant, thingID string) []application.RawOutboxEvent {
+	ctx, cancel := s.ctx()
+	defer cancel()
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, topic, payload, observed_at, revision FROM outbox_v2
+		 WHERE tenant=$1 AND thing_id=$2 AND topic <> $3 ORDER BY observed_at, id`,
+		tenant, thingID, pkgtypes.TopicThingValues)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []application.RawOutboxEvent
+	for rows.Next() {
+		var e application.RawOutboxEvent
+		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.ObservedAt, &e.Revision); err != nil {
+			return out
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// ClearRawIDs removes delivered raw entries by ID.
+func (s *PgStore) ClearRawIDs(tenant, thingID string, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	ctx, cancel := s.ctx()
+	defer cancel()
+	_, _ = s.pool.Exec(ctx,
+		`DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 AND id = ANY($3)`,
+		tenant, thingID, ids)
+}
+
+// ListRawTargets lists tenant/things with pending non-values entries,
+// including deleted things (their values are gone, lifecycle events
+// still have to drain).
+func (s *PgStore) ListRawTargets() []application.RawTarget {
+	ctx, cancel := s.ctx()
+	defer cancel()
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT tenant, thing_id FROM outbox_v2 WHERE topic <> $1 ORDER BY tenant, thing_id`,
+		pkgtypes.TopicThingValues)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []application.RawTarget
+	for rows.Next() {
+		var t application.RawTarget
+		if err := rows.Scan(&t.Tenant, &t.ThingID); err != nil {
+			return out
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // CommitBatch persisterar blob-CAS + historik + pending i en transaktion:

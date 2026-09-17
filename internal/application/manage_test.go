@@ -12,6 +12,7 @@ import (
 
 	"github.com/diwise/iot-things-v2/internal/application/catalog"
 	"github.com/diwise/iot-things-v2/internal/application/things"
+	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 )
 
 const (
@@ -1674,5 +1675,204 @@ func TestManageMigrate160LBins(t *testing.T) {
 	}
 	if got := *sum.Values["fillRate"].Value; got != 0 {
 		t.Fatalf("empty fillRate=%v, want 0", got)
+	}
+}
+
+// Livscykel + relationer för konsumenter (FIWARE): create/move/unlink/
+// delete ger created/updated/deleted samt partOf set/removed; värdesevent
+// bär sakdeskriptor så att entiteter byggs utan API-join.
+func TestManageLifecycleAndRelations(t *testing.T) {
+	ctx := context.Background()
+	fs := newFakeStore()
+	rt := NewRuntime(fs)
+	cat := catalog.New()
+	pub := &fakePublisher{}
+	mgr := NewManager(cat, rt, fs, WithPublisher(pub))
+
+	roomTmpl := catalog.TemplateSpec{Template: things.Template{
+		ID: "room", Version: "v1",
+		Category:     "room",
+		RepeatGroups: []string{"temperature."},
+		Relations: []things.RelationSpec{
+			{Name: "partOf", AllowedTargets: []string{"building"}, Min: 0, Max: 1},
+		},
+	}}
+	if err := mgr.PublishTemplate(ctx, roomTmpl); err != nil {
+		t.Fatalf("publish room: %v", err)
+	}
+	if err := mgr.PublishTemplate(ctx, catalog.TemplateSpec{Template: things.Template{
+		ID: "building", Version: "v1", Category: "building",
+	}}); err != nil {
+		t.Fatalf("publish building: %v", err)
+	}
+	mkRoom := func(id, parent string) catalog.ObjectSpec {
+		obj := catalog.ObjectSpec{
+			ThingID: id, Tenant: "t", Name: "Rum " + id,
+			Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+			Metadata:   map[string]string{"floor": "2"},
+			TemplateID: "room", TemplateVersion: "v1",
+			Properties: map[string]things.Property{"temperature.window": {}},
+			Bindings: []things.Binding{
+				{DeviceID: "s-" + id, Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
+			},
+		}
+		if parent != "" {
+			obj.Relations = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "building"}}
+		}
+		return obj
+	}
+	mkBuilding := func(id string) catalog.ObjectSpec {
+		return catalog.ObjectSpec{
+			ThingID: id, Tenant: "t", Name: "Hus " + id,
+			Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.0,59.3]`)},
+			Metadata:   map[string]string{"floor": "0"},
+			TemplateID: "building", TemplateVersion: "v1",
+			Properties: map[string]things.Property{},
+		}
+	}
+	mustCreate := func(obj catalog.ObjectSpec) {
+		t.Helper()
+		if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+			t.Fatalf("create %s: %v", obj.ThingID, err)
+		}
+	}
+
+	mustCreate(mkBuilding("b-a"))
+	mustCreate(mkBuilding("b-b"))
+	mustCreate(mkRoom("room-a", "b-a"))
+
+	sum, err := mgr.GetObject(ctx, "t", "room-a")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	etag := sum.Revision
+	if err := mgr.MoveObject(ctx, "t", "room-a", "b-b", etag); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	sum, _ = mgr.GetObject(ctx, "t", "room-a")
+	if err := mgr.UnlinkObject(ctx, "t", "room-a", sum.Revision); err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+	sum, _ = mgr.GetObject(ctx, "t", "room-a")
+	if err := mgr.DeleteObject(ctx, "t", "room-a"); err != nil {
+		t.Fatalf("delete room: %v", err)
+	}
+	_ = sum
+	if err := mgr.DeleteObject(ctx, "t", "b-a"); err != nil {
+		t.Fatalf("delete b-a: %v", err)
+	}
+	// Delete med aktiv förälder ger både deleted och removed.
+	roomB := mkRoom("room-b", "b-b")
+	if _, err := mgr.CreateObject(ctx, "t", roomB); err != nil {
+		t.Fatalf("create room-b: %v", err)
+	}
+	if err := mgr.DeleteObject(ctx, "t", "room-b"); err != nil {
+		t.Fatalf("delete room-b: %v", err)
+	}
+
+	lifecycle := pub.rawByTopic(pkgtypes.TopicLifecycleChanges)
+	relations := pub.rawByTopic(pkgtypes.TopicRelationChanges)
+	kinds := map[string]int{}
+	for _, body := range lifecycle {
+		var ev pkgtypes.ThingLifecycleV1
+		if err := json.Unmarshal(body, &ev); err != nil {
+			t.Fatalf("decode lifecycle: %v", err)
+		}
+		if err := ev.Validate(); err != nil {
+			t.Fatalf("validate lifecycle: %v", err)
+		}
+		kinds[string(ev.Kind)]++
+		if ev.ThingID == "room-a" && (ev.Thing == nil || ev.Thing.Name != "Rum room-a" || ev.Thing.Category != "room") {
+			t.Fatalf("lifecycle descriptor=%+v, want name+category", ev.Thing)
+		}
+		if ev.ThingID == "room-a" && (ev.Thing.Location == nil || ev.Thing.Location.Type != "Point") {
+			t.Fatalf("lifecycle location=%+v, want point", ev.Thing.Location)
+		}
+	}
+	// created x4 (b-a, b-b, room-a, room-b), updated x2 (move, unlink),
+	// deleted x3 (room-a, b-a, room-b).
+	if kinds["created"] != 4 || kinds["updated"] != 2 || kinds["deleted"] != 3 {
+		t.Fatalf("lifecycle kinds=%v, want created 4/updated 2/deleted 3", kinds)
+	}
+	sets, removed := 0, 0
+	roomA := map[string]int{}
+	removedTargets := map[string]string{}
+	for _, body := range relations {
+		var ev pkgtypes.RelationChangeV1
+		if err := json.Unmarshal(body, &ev); err != nil {
+			t.Fatalf("decode relation: %v", err)
+		}
+		if ev.RelationID == "" || ev.Type != "partOf" {
+			t.Fatalf("relation=%+v, want partOf with ID", ev)
+		}
+		if ev.Removed {
+			removed++
+			// Removed bär sista kända mål (informativt: vilken länk som försvann).
+			removedTargets[ev.FromID] = ev.ToID
+		} else {
+			sets++
+			if ev.ToID == "" {
+				t.Fatalf("set relation ToID empty: %+v", ev)
+			}
+		}
+		if ev.FromID == "room-a" && !ev.Removed {
+			roomA[ev.ToID]++
+		}
+	}
+	// room-a: set(b-a) + set(b-b) + removed; room-b: set(b-b) + removed(b-b).
+	if sets != 3 || removed != 2 {
+		t.Fatalf("relations set=%d removed=%d, want 3/2", sets, removed)
+	}
+	if roomA["b-a"] != 1 || roomA["b-b"] != 1 {
+		t.Fatalf("room-a targets=%v, want b-a then b-b", roomA)
+	}
+	if removedTargets["room-b"] != "b-b" {
+		t.Fatalf("room-b removed target=%v, want b-b", removedTargets)
+	}
+}
+
+// Värdesevent bär sakdeskriptor: namn, kategori, plats och metadata följer
+// med utan API-join.
+func TestManageValuesCarryDescriptor(t *testing.T) {
+	ctx := context.Background()
+	fs := newFakeStore()
+	rt := NewRuntime(fs)
+	cat := catalog.New()
+	pub := &fakePublisher{}
+	mgr := NewManager(cat, rt, fs, WithPublisher(pub))
+	mgmtRooms(t, mgr)
+	obj := catalog.ObjectSpec{
+		ThingID: "room-a", Tenant: "t", Name: "Kontorslandskap A",
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+		Metadata:   map[string]string{"floor": "2"},
+		TemplateID: "room", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"temperature.window": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s1", Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
+		},
+	}
+	if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	v := 21.0
+	if _, err := rt.HandleBatch(ctx, "t", "m1", []things.Observation{
+		{Signal: things.ParseSignalID("s1", "", rtTempURN, "5700"), Value: &v,
+			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+	}, base); err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if _, err := rt.DrainAndPublish(ctx, pub, "t", "room-a", base); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if len(pub.events) != 1 {
+		t.Fatalf("value events=%d, want 1", len(pub.events))
+	}
+	desc := pub.events[0].Thing
+	if desc == nil || desc.Name != "Kontorslandskap A" || desc.Category != "room" {
+		t.Fatalf("descriptor=%+v, want name+category", desc)
+	}
+	if desc.Location == nil || desc.Location.Type != "Point" || desc.Metadata["floor"] != "2" {
+		t.Fatalf("descriptor=%+v, want location+metadata", desc)
 	}
 }

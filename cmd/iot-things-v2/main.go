@@ -438,6 +438,8 @@ func newApp(ctx context.Context, r application.ThingsReader, w application.Thing
 		cat.Restore(cs.LoadTemplates(), cs.LoadVariants())
 		opts = append(opts, application.WithCatalogStore(cs))
 	}
+	// Inline-drain av livscykel-/relationshändelser efter hanteringsanrop.
+	opts = append(opts, application.WithPublisher(pub))
 	mgr := application.NewManager(cat, rt, store, opts...)
 	a := application.New(r, w, m, rt, pub)
 	err := a.LoadConfig(ctx, cfg)

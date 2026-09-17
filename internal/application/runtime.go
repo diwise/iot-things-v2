@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/diwise/iot-things-v2/internal/application/catalog"
 	"github.com/diwise/iot-things-v2/internal/application/things"
 	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
+	"github.com/diwise/messaging-golang/pkg/messaging"
 )
 
 // StoredThingState är det persisterade tillståndet per sak. Revision är
@@ -76,6 +78,16 @@ type RuntimeStore interface {
 	PendingEvents(tenant, thingID string) []FlowEvent
 	StorePending(tenant, thingID string, events []FlowEvent)
 	ClearPendingIDs(tenant, thingID string, ids []string)
+	// Raw outbox for thing lifecycle and relation events (other topics
+	// than property values, same durability). IDs are namespaced per
+	// topic so values and lifecycle never collide.
+	StoreRawEvents(tenant, thingID string, events []RawOutboxEvent)
+	PendingRawEvents(tenant, thingID string) []RawOutboxEvent
+	ClearRawIDs(tenant, thingID string, ids []string)
+	// ListRawTargets lists tenant/things with pending non-values events,
+	// including deleted things (their values are gone but lifecycle
+	// events must still drain). Used by restart drain.
+	ListRawTargets() []RawTarget
 	DedupCheck(tenant, messageID, thingID string) bool
 	DedupMark(tenant, messageID, thingID string)
 	Children(tenant, parentID string) []string
@@ -85,11 +97,28 @@ type RuntimeStore interface {
 	DetachChild(tenant, childID string)
 }
 
+// RawOutboxEvent is one durable non-values outbox entry (lifecycle or
+// relation change): topic routes, ID dedups, Payload is the event JSON.
+type RawOutboxEvent struct {
+	ID         string
+	Topic      string
+	Payload    []byte
+	ObservedAt time.Time
+	Revision   int64
+}
+
+// RawTarget identifies a thing with pending raw outbox events.
+type RawTarget struct {
+	Tenant  string
+	ThingID string
+}
+
 // EventPublisher levererar konvergerade utbox-batchar. Produktions-
 // implementation: TopicPublisher nedan (messaging-golang). Tester använder
 // en fake.
 type EventPublisher interface {
 	PublishThingValues(ctx context.Context, ev pkgtypes.ThingValuesEventV1) error
+	PublishMessage(ctx context.Context, msg messaging.TopicMessage) error
 }
 
 // Runtime serialiserar batchar per instans. En instans betjänar alla
@@ -204,7 +233,98 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 			return nil, err
 		}
 	}
+	// Livscykel- och relationshändelser köas beständigt (P10/P11):
+	// konsumenter utan API-åtkomst (t.ex. FIWARE-mappning mot
+	// Smart Data Models) hålls synkade inklusive borttag.
+	now := time.Now().UTC()
+	kind := pkgtypes.ThingCreated
+	if exists {
+		kind = pkgtypes.ThingUpdated
+	}
+	rt.emitLifecycleLocked(tenant, cfg, kind, newRevision, now)
+	for _, op := range relOps {
+		switch op.op {
+		case "attach", "move":
+			rt.emitRelationLocked(tenant, obj.ThingID, op.target, false, newRevision, now)
+		case "detach":
+			rt.emitRelationLocked(tenant, obj.ThingID, "", true, newRevision, now)
+		}
+	}
 	return cfg, nil
+}
+
+// sanitizeEventID gör ID-segment broker-säkra (samma regel som StableEventID).
+func sanitizeEventID(s string) string {
+	return strings.ReplaceAll(s, "/", "~")
+}
+
+// describeThing bygger sakdeskriptorn för events från effektiv config.
+func describeThing(cfg *catalog.EffectiveConfig) *pkgtypes.ThingDescriptorV1 {
+	desc := &pkgtypes.ThingDescriptorV1{
+		ThingID:        cfg.ThingID,
+		Name:           cfg.Name,
+		Category:       cfg.Category,
+		Metadata:       cfg.Metadata,
+		VariantID:      cfg.VariantID,
+		VariantVersion: cfg.VariantVersion,
+	}
+	if cfg.Location != nil {
+		desc.Location = &pkgtypes.GeoLocationV1{
+			Type:        cfg.Location.Type,
+			Coordinates: append([]byte(nil), cfg.Location.Coordinates...),
+		}
+	}
+	return desc
+}
+
+// emitLifecycleLocked köar en livscykelhändelse. Anroparen håller rt.mu;
+// payloaden marshalas direkt så att senare mutationer aldrig läcker in.
+// ID:t bär kind: create och delete på samma revision (ingen uppdatering
+// emellan) är olika händelser och får inte dedupliceras mot varandra.
+func (rt *Runtime) emitLifecycleLocked(tenant string, cfg *catalog.EffectiveConfig, kind pkgtypes.ThingLifecycleKind, revision int64, at time.Time) {
+	ev := pkgtypes.ThingLifecycleV1{
+		Schema:           pkgtypes.SchemaV1,
+		EventID:          "v1/" + sanitizeEventID(tenant) + "/" + sanitizeEventID(cfg.ThingID) + "/lifecycle/" + string(kind) + "/" + strconv.FormatInt(revision, 10),
+		Tenant:           tenant,
+		ThingID:          cfg.ThingID,
+		Kind:             kind,
+		ThingType:        cfg.TemplateID,
+		ThingTypeVersion: cfg.TemplateVersion,
+		ConfigRevision:   revision,
+		ChangedAt:        at,
+		Thing:            describeThing(cfg),
+	}
+	body, _ := json.Marshal(ev)
+	rt.store.StoreRawEvents(tenant, cfg.ThingID, []RawOutboxEvent{{
+		ID: ev.EventID, Topic: ev.TopicName(), Payload: body, ObservedAt: at, Revision: revision,
+	}})
+}
+
+// emitRelationLocked köar en relationsändring för ett barns partOf-länk.
+// Relations-ID:t delas med lagringen ("partof-<barn>"). Event-ID:t bär
+// åtgärd: set och removed på samma revision (t.ex. skapa-med-förälder
+// följt av delete utan uppdatering emellan) är olika händelser och får
+// inte dedupliceras mot varandra.
+func (rt *Runtime) emitRelationLocked(tenant, childID, parentID string, removed bool, revision int64, at time.Time) {
+	action := "set"
+	if removed {
+		action = "removed"
+	}
+	ev := pkgtypes.RelationChangeV1{
+		RelationID: "partof-" + childID,
+		Type:       "partOf",
+		FromID:     childID,
+		ToID:       parentID,
+		Removed:    removed,
+		Tenant:     tenant,
+		Revision:   revision,
+		ChangedAt:  at,
+	}
+	body, _ := json.Marshal(ev)
+	rt.store.StoreRawEvents(tenant, childID, []RawOutboxEvent{{
+		ID:    "v1/" + sanitizeEventID(tenant) + "/" + sanitizeEventID(childID) + "/relations/partof/" + strconv.FormatInt(revision, 10) + "/" + action,
+		Topic: ev.TopicName(), Payload: body, ObservedAt: at, Revision: revision,
+	}})
 }
 
 // BatchOutcome är resultatet per sak för en batch.
@@ -386,21 +506,34 @@ func decodeConfig(raw []byte) (*catalog.EffectiveConfig, error) {
 
 // DeleteThing tar bort en sak. Med aktiva barn blockeras borttagningen
 // (ingen kaskad, B17); sakens egna relationslänkar kopplas loss och
-// värdehistorik bevaras i storet.
+// värdehistorik bevaras i storet. Livscykel (deleted) och borttagen
+// partOf-länk köas för konsumenter före lagringens rensning (som tömmer
+// väntande händelser för saken).
 func (rt *Runtime) DeleteThing(tenant, thingID string) error {
 	if tenant == "" || thingID == "" {
 		return fmt.Errorf("%w: tenant and thing ID must be provided", things.ErrValidation)
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if _, ok := rt.store.LoadThing(tenant, thingID); !ok {
+	st, ok := rt.store.LoadThing(tenant, thingID)
+	if !ok {
 		return fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
 	}
 	if children := rt.store.Children(tenant, thingID); len(children) > 0 {
 		return fmt.Errorf("%w: thing %q has %d active children", things.ErrConflict, thingID, len(children))
 	}
+	parent, hasParent := rt.store.ParentOf(tenant, thingID)
+	cfg, err := decodeConfig(st.ConfigJSON)
+	if err != nil {
+		return fmt.Errorf("runtime: thing %q has undecodable config: %w", thingID, err)
+	}
+	now := time.Now().UTC()
 	rt.store.DetachChild(tenant, thingID)
 	rt.store.DeleteThingState(tenant, thingID)
+	rt.emitLifecycleLocked(tenant, cfg, pkgtypes.ThingDeleted, st.Revision, now)
+	if hasParent {
+		rt.emitRelationLocked(tenant, thingID, parent, true, st.Revision, now)
+	}
 	return nil
 }
 
@@ -474,9 +607,10 @@ func buildThingValuesEvent(tenant, thingID, thingType, thingTypeVersion string, 
 	}
 }
 
-// DrainAndPublish levererar väntande händelser för en sak: bygger ett
-// kontraktsevent per meddelande-ID (stabilt EventID), publicerar, och
-// rensar endast de ID:n som levererats. Fel behåller kön för retry.
+// DrainAndPublish levererar väntande händelser för en sak: först råa
+// livscykel-/relationshändelser (registret före avläsningarna), sedan ett
+// kontraktsevent per meddelande-ID (stabilt EventID), och rensar endast de
+// ID:n som levererats. Fel behåller kön för retry.
 // Revision stämplas per batchgrupp från lagrade händelser (låst revision vid
 // beräkning), inte från aktuell config (som kan ha uppdaterats efter batch).
 func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tenant, thingID string, now time.Time) (int, error) {
@@ -485,6 +619,9 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
+	}
+	if _, err := rt.DrainRaw(ctx, pub, tenant, thingID); err != nil {
+		return 0, err
 	}
 	rt.mu.Lock()
 	st, ok := rt.store.LoadThing(tenant, thingID)
@@ -521,6 +658,7 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 			rev = group[0].ConfigRevision
 		}
 		ev := buildThingValuesEvent(tenant, thingID, cfg.TemplateID, cfg.TemplateVersion, units, group, rev, now)
+		ev.Thing = describeThing(cfg)
 		for _, v := range ev.Values {
 			if err := v.Validate(); err != nil {
 				return published, fmt.Errorf("runtime: invalid value event: %w", err)
@@ -565,5 +703,60 @@ func (rt *Runtime) DrainAll(ctx context.Context, pub EventPublisher, now time.Ti
 		}
 		total += n
 	}
+	// Råa händelser för borttagna saker syns inte i saklistningen;
+	// svep dem separat så att deletes levereras efter omstart.
+	rt.mu.Lock()
+	rawTargets := rt.store.ListRawTargets()
+	rt.mu.Unlock()
+	for _, t := range rawTargets {
+		if _, err := rt.DrainRaw(ctx, pub, t.Tenant, t.ThingID); err != nil {
+			return total, err
+		}
+	}
 	return total, nil
+}
+
+// DrainRaw levererar väntande livscykel-/relationshändelser för en sak.
+// Till skillnad från DrainAndPublish kräver den ingen lagrad sakblob:
+// borttagna saker dräneras likadant. Returnerar antal levererade händelser.
+func (rt *Runtime) DrainRaw(ctx context.Context, pub EventPublisher, tenant, thingID string) (int, error) {
+	if tenant == "" || thingID == "" {
+		return 0, fmt.Errorf("%w: tenant and thing ID must be provided", things.ErrValidation)
+	}
+	rt.mu.Lock()
+	pending := rt.store.PendingRawEvents(tenant, thingID)
+	rt.mu.Unlock()
+	delivered := 0
+	for _, re := range pending {
+		var msg messaging.TopicMessage
+		switch re.Topic {
+		case pkgtypes.TopicLifecycleChanges:
+			var ev pkgtypes.ThingLifecycleV1
+			if err := json.Unmarshal(re.Payload, &ev); err != nil {
+				return delivered, fmt.Errorf("runtime: invalid lifecycle event %q: %w", re.ID, err)
+			}
+			if err := ev.Validate(); err != nil {
+				return delivered, fmt.Errorf("runtime: invalid lifecycle event %q: %w", re.ID, err)
+			}
+			msg = ev
+		case pkgtypes.TopicRelationChanges:
+			var ev pkgtypes.RelationChangeV1
+			if err := json.Unmarshal(re.Payload, &ev); err != nil {
+				return delivered, fmt.Errorf("runtime: invalid relation event %q: %w", re.ID, err)
+			}
+			msg = ev
+		default:
+			// Värdehändelser dräneras via DrainAndPublish; okända topics
+			// lämnas för framtida konsumenter utan att blockera kön.
+			continue
+		}
+		if err := pub.PublishMessage(ctx, msg); err != nil {
+			return delivered, err
+		}
+		delivered++
+		rt.mu.Lock()
+		rt.store.ClearRawIDs(tenant, thingID, []string{re.ID})
+		rt.mu.Unlock()
+	}
+	return delivered, nil
 }

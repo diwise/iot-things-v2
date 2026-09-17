@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/diwise/iot-things-v2/internal/application/catalog"
 	"github.com/diwise/iot-things-v2/internal/application/things"
 	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
+	"github.com/diwise/messaging-golang/pkg/messaging"
 )
 
 // fakeStore implementerar RuntimeStore med samma semantik som adaptern:
@@ -26,6 +28,8 @@ type fakeStore struct {
 	histSeen map[string]struct{}
 	pending  map[string][]FlowEvent
 	pendSeen map[string]struct{}
+	raw      map[string][]RawOutboxEvent
+	rawSeen  map[string]struct{}
 	dedup    map[string]struct{}
 	parents  map[string]string          // tenant\x00barn -> förälder
 	children map[string]map[string]bool // tenant\x00förälder -> barn
@@ -43,6 +47,8 @@ func newFakeStore() *fakeStore {
 		histSeen: make(map[string]struct{}),
 		pending:  make(map[string][]FlowEvent),
 		pendSeen: make(map[string]struct{}),
+		raw:      make(map[string][]RawOutboxEvent),
+		rawSeen:  make(map[string]struct{}),
 		dedup:    make(map[string]struct{}),
 		parents:  make(map[string]string),
 		children: make(map[string]map[string]bool),
@@ -369,6 +375,85 @@ func (f *fakeStore) ClearPendingIDs(tenant, thingID string, ids []string) {
 	}
 }
 
+func (f *fakeStore) StoreRawEvents(tenant, thingID string, events []RawOutboxEvent) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fkey(tenant, thingID)
+	for _, e := range events {
+		if e.ID == "" {
+			continue
+		}
+		if _, ok := f.rawSeen[e.ID]; ok {
+			continue
+		}
+		f.rawSeen[e.ID] = struct{}{}
+		cp := e
+		cp.Payload = append([]byte(nil), e.Payload...)
+		f.raw[key] = append(f.raw[key], cp)
+	}
+}
+
+func (f *fakeStore) PendingRawEvents(tenant, thingID string) []RawOutboxEvent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := append([]RawOutboxEvent(nil), f.raw[fkey(tenant, thingID)]...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ObservedAt.Equal(out[j].ObservedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].ObservedAt.Before(out[j].ObservedAt)
+	})
+	return out
+}
+
+func (f *fakeStore) ClearRawIDs(tenant, thingID string, ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	want := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		want[id] = true
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fkey(tenant, thingID)
+	kept := f.raw[key][:0]
+	for _, e := range f.raw[key] {
+		if want[e.ID] {
+			continue
+		}
+		kept = append(kept, e)
+	}
+	if len(kept) == 0 {
+		delete(f.raw, key)
+	} else {
+		f.raw[key] = kept
+	}
+}
+
+func (f *fakeStore) ListRawTargets() []RawTarget {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []RawTarget
+	for key, evs := range f.raw {
+		if len(evs) == 0 {
+			continue
+		}
+		parts := strings.SplitN(key, "\x00", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		out = append(out, RawTarget{Tenant: parts[0], ThingID: parts[1]})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Tenant != out[j].Tenant {
+			return out[i].Tenant < out[j].Tenant
+		}
+		return out[i].ThingID < out[j].ThingID
+	})
+	return out
+}
+
 func (f *fakeStore) DedupHit(tenant, messageID, thingID string) bool {
 	if messageID == "" {
 		return false
@@ -591,7 +676,13 @@ func rtMeta() map[string]string {
 type fakePublisher struct {
 	mu     sync.Mutex
 	events []pkgtypes.ThingValuesEventV1
+	raw    []publishedRaw
 	err    error
+}
+
+type publishedRaw struct {
+	topic string
+	body  []byte
 }
 
 func (p *fakePublisher) PublishThingValues(_ context.Context, ev pkgtypes.ThingValuesEventV1) error {
@@ -602,6 +693,28 @@ func (p *fakePublisher) PublishThingValues(_ context.Context, ev pkgtypes.ThingV
 	defer p.mu.Unlock()
 	p.events = append(p.events, ev)
 	return nil
+}
+
+func (p *fakePublisher) PublishMessage(_ context.Context, msg messaging.TopicMessage) error {
+	if p.err != nil {
+		return p.err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.raw = append(p.raw, publishedRaw{topic: msg.TopicName(), body: msg.Body()})
+	return nil
+}
+
+func (p *fakePublisher) rawByTopic(topic string) [][]byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out [][]byte
+	for _, r := range p.raw {
+		if r.topic == topic {
+			out = append(out, r.body)
+		}
+	}
+	return out
 }
 
 func (p *fakePublisher) count() int {
@@ -1418,15 +1531,15 @@ func TestRuntimePartialDrainClearsIncrementally(t *testing.T) {
 		t.Fatalf("pending=%d, want 6 (2 batches x 3)", len(pending))
 	}
 	calls := 0
-	failSecond := &failAfterNPublisher{n: 1, err: errors.New("broker down")}
+	failSecond := &failAfterNPublisher{n: 2, err: errors.New("broker down")}
 	_ = calls
 	if _, err := rt.DrainAndPublish(context.Background(), failSecond, "t", "bin-42", base.Add(2*time.Minute)); err == nil {
-		t.Fatal("second group failure must propagate")
+		t.Fatal("third group failure must propagate")
 	}
-	// Första gruppen (m1) ska vara rensad trots att andra fallerade.
+	// Livscykel + första gruppen (m1) ska vara rensade trots att andra fallerade.
 	remaining := fs.PendingEvents("t", "bin-42")
 	if len(remaining) != 3 {
-		t.Fatalf("remaining=%d, want 3 (m2 only, m1 cleared incrementally)", len(remaining))
+		t.Fatalf("remaining=%d, want 3 (m2 only, lifecycle+m1 cleared incrementally)", len(remaining))
 	}
 	for _, e := range remaining {
 		if e.MessageID != "m2" {
@@ -1479,6 +1592,14 @@ type failAfterNPublisher struct {
 }
 
 func (p *failAfterNPublisher) PublishThingValues(_ context.Context, _ pkgtypes.ThingValuesEventV1) error {
+	if p.calls >= p.n {
+		return p.err
+	}
+	p.calls++
+	return nil
+}
+
+func (p *failAfterNPublisher) PublishMessage(_ context.Context, _ messaging.TopicMessage) error {
 	if p.calls >= p.n {
 		return p.err
 	}
@@ -1577,5 +1698,49 @@ func TestRuntimeConcurrentRegisterSameThing(t *testing.T) {
 	}
 	if st.Revision != int64(wins) {
 		t.Fatalf("revision=%d, want %d (one bump per win)", st.Revision, wins)
+	}
+}
+
+// Regression: råa händelser för borttagna saker måste dräneras vid omstart
+// (de syns inte i saklistningen). Simulerar krasch mellan mutation och
+// inline-drain genom att aldrig dränera före omstarten.
+func TestRuntimeRestartDrainsDeletedLifecycle(t *testing.T) {
+	fs := newFakeStore()
+	cat := rtBinCatalog(t)
+	rtA := NewRuntime(fs)
+	if _, err := rtA.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if err := rtA.DeleteThing("t", "bin-42"); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, ok := fs.LoadThing("t", "bin-42"); ok {
+		t.Fatal("thing must be gone")
+	}
+
+	pub := &fakePublisher{}
+	rtB := NewRuntime(fs)
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	if _, err := rtB.DrainAll(context.Background(), pub, base); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	kinds := map[string]int{}
+	for _, body := range pub.rawByTopic(pkgtypes.TopicLifecycleChanges) {
+		var ev pkgtypes.ThingLifecycleV1
+		if err := json.Unmarshal(body, &ev); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		kinds[string(ev.Kind)]++
+	}
+	if kinds["created"] != 1 || kinds["deleted"] != 1 {
+		t.Fatalf("kinds=%v, want created 1/deleted 1", kinds)
+	}
+	// Andra dräneringen är tom (idempotent).
+	pub2 := &fakePublisher{}
+	if _, err := rtB.DrainAll(context.Background(), pub2, base); err != nil {
+		t.Fatalf("redrain: %v", err)
+	}
+	if len(pub2.rawByTopic(pkgtypes.TopicLifecycleChanges)) != 0 {
+		t.Fatal("redrain must deliver nothing")
 	}
 }

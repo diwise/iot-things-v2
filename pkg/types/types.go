@@ -13,9 +13,37 @@ const TopicThingValues = "things.v1.values"
 // TopicRelationChanges carries versioned thing relation changes.
 const TopicRelationChanges = "things.v1.relations"
 
+// TopicLifecycleChanges carries thing lifecycle events (created/updated/deleted).
+const TopicLifecycleChanges = "things.v1.lifecycle"
+
 // SchemaV1 is the payload schema version for the v1 topics.
 // Old topics/payloads (e.g. thing.updated) are left untouched (B20).
 const SchemaV1 = "v1"
+
+// ContentTypeV1 is the versioned payload content type shared by v1 topics.
+const ContentTypeV1 = "application/vnd.diwise.things.v1+json"
+
+// GeoLocationV1 is a GeoJSON Point or Polygon (lon/lat, WGS84),
+// mirroring the thing location for consumers without API access.
+type GeoLocationV1 struct {
+	Type        string          `json:"type"`
+	Coordinates json.RawMessage `json:"coordinates"`
+}
+
+// ThingDescriptorV1 describes the thing an event belongs to, valid for the
+// event's config revision. It carries what consumers (e.g. FIWARE mapping
+// to Smart Data Models) need without an API join: identity for the entity
+// URN, category for rule matching, location for GeoProperties and metadata
+// for the remaining attributes.
+type ThingDescriptorV1 struct {
+	ThingID        string            `json:"thingId"`
+	Name           string            `json:"name,omitempty"`
+	Category       string            `json:"category,omitempty"`
+	Location       *GeoLocationV1    `json:"location,omitempty"`
+	Metadata       map[string]string `json:"metadata,omitempty"`
+	VariantID      string            `json:"variantId,omitempty"`
+	VariantVersion string            `json:"variantVersion,omitempty"`
+}
 
 // ThingValueV1 is a single versioned thing property observation.
 // ObservedAt/ReceivedAt/ComputedAt are kept separate per C5 so consumers
@@ -78,26 +106,96 @@ type ThingValuesEventV1 struct {
 	ThingTypeVersion string             `json:"thingTypeVersion,omitempty"`
 	ConfigRevision   int64              `json:"configRevision"`
 	PublishedAt      time.Time          `json:"publishedAt"`
+	Thing            *ThingDescriptorV1 `json:"thing,omitempty"`
 	Values           []ThingValueV1     `json:"values"`
 	Relations        []RelationChangeV1 `json:"relations,omitempty"`
 }
 
 // RelationChangeV1 describes a single directed relation change.
+// Removed marks a detached link; ToID then carries the last known target
+// (which link disappeared), otherwise the new one.
 type RelationChangeV1 struct {
 	RelationID string    `json:"relationId"`
 	Type       string    `json:"type"`
 	FromID     string    `json:"fromId"`
-	ToID       string    `json:"toId"`
+	ToID       string    `json:"toId,omitempty"`
+	Removed    bool      `json:"removed,omitempty"`
 	Tenant     string    `json:"tenant"`
 	Revision   int64     `json:"revision"`
 	ChangedAt  time.Time `json:"changedAt"`
 }
 
 // TopicName reports the publish topic (B20: isolated v1 topics).
+func (e RelationChangeV1) TopicName() string { return TopicRelationChanges }
+
+// ContentType reports the versioned payload content type.
+func (e RelationChangeV1) ContentType() string { return ContentTypeV1 }
+
+// Body serializes the event for transport.
+func (e RelationChangeV1) Body() []byte {
+	b, _ := json.Marshal(e)
+	return b
+}
+
+// ThingLifecycleKind describes what happened to a thing.
+type ThingLifecycleKind string
+
+const (
+	ThingCreated ThingLifecycleKind = "created"
+	ThingUpdated ThingLifecycleKind = "updated"
+	ThingDeleted ThingLifecycleKind = "deleted"
+)
+
+// ThingLifecycleV1 announces thing creation, configuration change or
+// deletion. Consumers that materialize things (e.g. FIWARE entities)
+// subscribe to stay in sync, including deletes. The snapshot carries the
+// thing descriptor at ConfigRevision.
+type ThingLifecycleV1 struct {
+	Schema           string             `json:"schema,omitempty"`
+	EventID          string             `json:"eventId"`
+	Tenant           string             `json:"tenant"`
+	ThingID          string             `json:"thingId"`
+	Kind             ThingLifecycleKind `json:"kind"`
+	ThingType        string             `json:"thingType,omitempty"`
+	ThingTypeVersion string             `json:"thingTypeVersion,omitempty"`
+	ConfigRevision   int64              `json:"configRevision"`
+	ChangedAt        time.Time          `json:"changedAt"`
+	Thing            *ThingDescriptorV1 `json:"thing,omitempty"`
+}
+
+// TopicName reports the publish topic (B20: isolated v1 topics).
+func (e ThingLifecycleV1) TopicName() string { return TopicLifecycleChanges }
+
+// ContentType reports the versioned payload content type.
+func (e ThingLifecycleV1) ContentType() string { return ContentTypeV1 }
+
+// Body serializes the event for transport.
+func (e ThingLifecycleV1) Body() []byte {
+	b, _ := json.Marshal(e)
+	return b
+}
+
+// Validate checks required identity fields and the kind enum.
+func (e ThingLifecycleV1) Validate() error {
+	if e.ThingID == "" {
+		return fmt.Errorf("types: missing thingId")
+	}
+	if e.Tenant == "" {
+		return fmt.Errorf("types: missing tenant")
+	}
+	switch e.Kind {
+	case ThingCreated, ThingUpdated, ThingDeleted:
+	default:
+		return fmt.Errorf("types: invalid kind %q (want created/updated/deleted)", e.Kind)
+	}
+	return nil
+}
+
+// TopicName reports the publish topic (B20: isolated v1 topics).
 func (e ThingValuesEventV1) TopicName() string { return TopicThingValues }
 
 // ContentType reports the versioned payload content type.
-func (e ThingValuesEventV1) ContentType() string { return "application/vnd.diwise.things.v1+json" }
+func (e ThingValuesEventV1) ContentType() string { return ContentTypeV1 }
 
 // Body serializes the event for transport.
 func (e ThingValuesEventV1) Body() []byte {

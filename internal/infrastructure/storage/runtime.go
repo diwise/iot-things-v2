@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application"
+	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 )
 
 // RuntimeAdapter är trådsäker via de underliggande lagrens egna lås plus
@@ -83,6 +84,7 @@ func (a *RuntimeAdapter) CommitBatch(tenant, thingID, messageID string, expected
 			ObservedAt: e.ObservedAt,
 			Revision:   e.ConfigRevision,
 			Payload:    payload,
+			Topic:      pkgtypes.TopicThingValues,
 		})
 	}
 	a.S.Dedup.Mark(tenant, messageID, thingID)
@@ -148,6 +150,11 @@ func (a *RuntimeAdapter) PendingEvents(tenant, thingID string) []application.Flo
 	evs := a.S.Outbox.PeekFor(tenant, thingID)
 	out := make([]application.FlowEvent, 0, len(evs))
 	for _, ev := range evs {
+		// Råa livscykel-/relationsrader delar tabellen; värdesdränering
+		// hoppar över dem (de dräneras via PendingRawEvents).
+		if ev.Topic != "" && ev.Topic != pkgtypes.TopicThingValues {
+			continue
+		}
 		var fe application.FlowEvent
 		if err := json.Unmarshal(ev.Payload, &fe); err != nil {
 			continue
@@ -168,12 +175,65 @@ func (a *RuntimeAdapter) StorePending(tenant, thingID string, events []applicati
 			ObservedAt: e.ObservedAt,
 			Revision:   e.ConfigRevision,
 			Payload:    raw,
+			Topic:      pkgtypes.TopicThingValues,
 		})
 	}
 }
 
 func (a *RuntimeAdapter) ClearPendingIDs(tenant, thingID string, ids []string) {
 	a.S.Outbox.ClearIDs(tenant, thingID, ids)
+}
+
+// StoreRawEvents persists lifecycle/relation events with ID dedup.
+func (a *RuntimeAdapter) StoreRawEvents(tenant, thingID string, events []application.RawOutboxEvent) {
+	for _, e := range events {
+		a.S.Outbox.Append(OutboxEvent{
+			ID:         e.ID,
+			Tenant:     tenant,
+			ThingID:    thingID,
+			ObservedAt: e.ObservedAt,
+			Revision:   e.Revision,
+			Payload:    e.Payload,
+			Topic:      e.Topic,
+		})
+	}
+}
+
+// PendingRawEvents returns pending non-values outbox entries (lifecycle,
+// relations) with their topics.
+func (a *RuntimeAdapter) PendingRawEvents(tenant, thingID string) []application.RawOutboxEvent {
+	evs := a.S.Outbox.PeekFor(tenant, thingID)
+	var out []application.RawOutboxEvent
+	for _, ev := range evs {
+		if ev.Topic == "" || ev.Topic == pkgtypes.TopicThingValues {
+			continue
+		}
+		out = append(out, application.RawOutboxEvent{
+			ID:         ev.ID,
+			Topic:      ev.Topic,
+			Payload:    append([]byte(nil), ev.Payload...),
+			ObservedAt: ev.ObservedAt,
+			Revision:   ev.Revision,
+		})
+	}
+	return out
+}
+
+// ClearRawIDs removes delivered raw entries by ID.
+func (a *RuntimeAdapter) ClearRawIDs(tenant, thingID string, ids []string) {
+	a.S.Outbox.ClearIDs(tenant, thingID, ids)
+}
+
+// ListRawTargets lists tenant/things with pending non-values entries,
+// including deleted things (values are gone with the blob, lifecycle
+// events still have to drain).
+func (a *RuntimeAdapter) ListRawTargets() []application.RawTarget {
+	recs := a.S.Outbox.PendingRawTargets()
+	out := make([]application.RawTarget, 0, len(recs))
+	for _, r := range recs {
+		out = append(out, application.RawTarget{Tenant: r[0], ThingID: r[1]})
+	}
+	return out
 }
 
 func (a *RuntimeAdapter) DedupHit(tenant, messageID, thingID string) bool {

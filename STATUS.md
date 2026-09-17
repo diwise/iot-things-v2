@@ -47,7 +47,7 @@
 - [x] C1-C10 (operatorer + regler; quality-tabell per operator återstår K1)
 - [x] L1-L7 (regler + minnes-outbox + PostgreSQL-PgStore med samma protokolltester; dedupmarkering atomär i commit, omtag spelar upp vid samtidig slutförd batch; DLX/ack-verifiering i messaging-lib återstår), L8-L10 delvis
 - [x] P1-P9: katalog publish/list/get enstaka (immutable, ingen update/delete), sak-CRUD, sökning med filter (mall/version/variant/namn/category/metadata/bbox) + limit/offset + X-Total-Count, historik med egenskap + from/to-intervall + limit/offset, underträd med djupgräns, detach, OpenAPI för /api/v1
-- [x] P10-P13 delvis (kontrakt + health + thing/history/children/tree; relationsevents deklarerade men publiceras ännu inte (P11), konsumentkartläggning återstår E7)
+- [x] P10-P13 delvis (kontrakt + health + thing/history/children/tree; livscykel created/updated/deleted + partOf set/removed publiceras beständigt med inline-drain; värdesevent bär sakdeskriptor; konsumentkartläggning mot FIWARE återstår E7)
 - [x] G1-G6, G8-G9 (kärna testbar utan broker/DB); G7 delvis (slog utan hemligheter, metrics/tracing återstår)
 - [x] E1-E6 (E6-resten: beständig katalog, plats/metadata/sök, träd/detach/total, OpenAPI); E7 påbörjad (isolerad drill + kontraktstester + v1-CSV-import; konsumentomställning återstår)
 - [x] A1/A3-A7 (struktur); A2/A8-A29 delvis via enhetstester (full E2E återstår)

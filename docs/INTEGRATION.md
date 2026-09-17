@@ -54,15 +54,19 @@ enbart things-kontrakten.
   `pkg/types/contract_compat_test.go` (fälttabell + golden JSON):
   id<-thingId, type<-thingType (mall-ID, tillagt Etapp 7), thing.*<-values,
   tenant<-tenant, timestamp<-values[].observedAt.
-  Kända luckor (medvetet, K1-arbete före konsumentomställning): v2 saknar
-  presentations-/identitetsmetadata som fiware-konsumenten läser ur
-  `thing.*` (namn/alternativnamn, `subType`, beskrivning, `location`/area,
-  taggar) — `values[]` bär endast typade egenskapsobservationer
-  (propertyId/värde/enhet/kvalitet/källa/tider). `timestamp`-mappningen är
-  per värde (`values[].observedAt`); vid flera värden i ett event måste
-  konsumenten välja (rekommenderat: senaste `observedAt`, samma regel som B3).
+  Sakdeskriptorn (`thing` i värdesevent: namn, kategori, plats, metadata,
+  variant) stänger det mesta av presentationsgapet utan API-join:
+  kvarvarande luckor mot `thing.*` är alternativnamn, `subType`,
+  beskrivning (v2 bär sådant i metadata i stället) och taggar.
+  `timestamp`-mappningen är per värde (`values[].observedAt`); vid flera
+  värden i ett event måste konsumenten välja (rekommenderat:
+  senaste `observedAt`, samma regel som B3).
   Full proveniens (antal tillgängliga/förväntade per ingång) stannar i
   historik/outbox-lagren liksom källdetaljer bortom kommaseparerad `source`.
+  Livscykel (`things.v1.lifecycle`: created/updated/deleted med snapshot)
+  och relationer (`things.v1.relations`: partOf set/removed) ger
+  registerhållning inklusive delete-propagering; enhetsrelationer
+  (`hasDevice`) härleds ur värdenas kommaseparerade källströmmar.
 
 ## 4. Införande som separat tjänst
 
