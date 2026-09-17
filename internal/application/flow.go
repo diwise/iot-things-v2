@@ -414,10 +414,25 @@ type recipeResult struct {
 	Expected   int
 }
 
+// recipeParamKey resolves a recipe parameter by position: the recipe's
+// declared name wins (per-recipe values for repeated operators), the
+// legacy global key is the fallback for older templates.
+func recipeParamKey(r catalog.Recipe, i int, legacy string) string {
+	if i < len(r.Params) {
+		return r.Params[i]
+	}
+	return legacy
+}
+
 // runRecipe exekverar ett recept mot working. skip=true betyder att en
 // krävd ingång saknas: inget resultat och inget event. Tillståndsbärande
 // operatorer (activeTime) läser proc per utegenskap och returnerar
 // uppdaterat tillstånd i stateOut (nil för tillståndslösa operatorer).
+//
+// Parametrar löses per recept: receptets deklarerade namn (Params) vinner,
+// så att samma operator kan användas flera gånger med olika värden (t.ex.
+// två nivågivare på olika höjd). Äldre mallar utan deklaration faller
+// tillbaka på de globala legacy-nycklarna.
 func runRecipe(cfg *catalog.EffectiveConfig, working map[string]CurrentValue, proc map[string]StoredProcessor, r catalog.Recipe) (recipeResult, bool, *StoredProcessor, error) {
 	vals := make([]functions.NumberWithQuality, 0, len(r.Inputs))
 	sources := make([]string, 0, len(r.Inputs))
@@ -454,19 +469,34 @@ func runRecipe(cfg *catalog.EffectiveConfig, working map[string]CurrentValue, pr
 		if len(vals) != 1 {
 			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one input", r.Operator)
 		}
-		factor, ok := cfg.ParamValues["factor"]
-		if !ok {
-			factor = 1
+		factor, offset := 1.0, 0.0
+		if len(r.Params) > 0 {
+			f, ok := cfg.ParamValues[r.Params[0]]
+			if !ok {
+				return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, r.Params[0])
+			}
+			factor = f
+		} else if f, ok := cfg.ParamValues["factor"]; ok {
+			factor = f
 		}
-		offset := cfg.ParamValues["offset"]
+		if len(r.Params) > 1 {
+			o, ok := cfg.ParamValues[r.Params[1]]
+			if !ok {
+				return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, r.Params[1])
+			}
+			offset = o
+		} else if o, ok := cfg.ParamValues["offset"]; ok {
+			offset = o
+		}
 		return mk(functions.Linear(vals[0].Value, factor, offset), vals[0].Quality)
 	case "distanceToLevel", "level":
 		if len(vals) != 1 {
 			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one input", r.Operator)
 		}
-		bottom, ok := cfg.ParamValues["sensorToBottom"]
+		key := recipeParamKey(r, 0, "sensorToBottom")
+		bottom, ok := cfg.ParamValues[key]
 		if !ok {
-			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, "sensorToBottom")
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, key)
 		}
 		v, err := functions.Level(bottom, vals[0].Value)
 		if err != nil {
@@ -477,9 +507,10 @@ func runRecipe(cfg *catalog.EffectiveConfig, working map[string]CurrentValue, pr
 		if len(vals) != 1 {
 			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one input", r.Operator)
 		}
-		height, ok := cfg.ParamValues["usableHeight"]
+		key := recipeParamKey(r, 0, "usableHeight")
+		height, ok := cfg.ParamValues[key]
 		if !ok {
-			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, "usableHeight")
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, key)
 		}
 		v, q, err := functions.FillRate(vals[0].Value, height)
 		if err != nil {
@@ -523,13 +554,15 @@ func runRecipe(cfg *catalog.EffectiveConfig, working map[string]CurrentValue, pr
 		if len(vals) != 1 {
 			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly one input", r.Operator)
 		}
-		high, ok := cfg.ParamValues["high"]
+		highKey := recipeParamKey(r, 0, "high")
+		high, ok := cfg.ParamValues[highKey]
 		if !ok {
-			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, "high")
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, highKey)
 		}
-		low, ok := cfg.ParamValues["low"]
+		lowKey := recipeParamKey(r, 1, "low")
+		low, ok := cfg.ParamValues[lowKey]
 		if !ok {
-			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, "low")
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs param %q", r.Operator, lowKey)
 		}
 		prev := false
 		if len(r.Outputs) > 0 {
@@ -755,18 +788,32 @@ func validateRecipeStatic(cfg *catalog.EffectiveConfig, r catalog.Recipe) error 
 		return nil
 	}
 	switch r.Operator {
-	case "passthrough", "direct", "linear", "calibration":
+	case "passthrough", "direct":
 		return needInputs(1)
+	case "linear", "calibration":
+		if err := needInputs(1); err != nil {
+			return err
+		}
+		// Deklarerade parametrar måste finnas; utan deklaration gäller
+		// legacy-nycklar med standardvärden (factor 1, offset 0).
+		var declared []string
+		if len(r.Params) > 0 {
+			declared = append(declared, r.Params[0])
+		}
+		if len(r.Params) > 1 {
+			declared = append(declared, r.Params[1])
+		}
+		return needParams(declared...)
 	case "distanceToLevel", "level":
 		if err := needInputs(1); err != nil {
 			return err
 		}
-		return needPositive("sensorToBottom")
+		return needPositive(recipeParamKey(r, 0, "sensorToBottom"))
 	case "fillRate", "percent", "percentage":
 		if err := needInputs(1); err != nil {
 			return err
 		}
-		return needPositive("usableHeight")
+		return needPositive(recipeParamKey(r, 0, "usableHeight"))
 	case "mean", "average", "min", "max":
 		if len(r.Inputs) == 0 {
 			return fmt.Errorf("operator %q needs at least one input", r.Operator)
@@ -781,7 +828,7 @@ func validateRecipeStatic(cfg *catalog.EffectiveConfig, r catalog.Recipe) error 
 		if err := needInputs(1); err != nil {
 			return err
 		}
-		return needParams("high", "low")
+		return needParams(recipeParamKey(r, 0, "high"), recipeParamKey(r, 1, "low"))
 	case "activeTime", "active_time":
 		if err := needInputs(1); err != nil {
 			return err

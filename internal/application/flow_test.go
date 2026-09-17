@@ -1100,3 +1100,122 @@ func TestSubtractInputs(t *testing.T) {
 		t.Fatalf("quality=%q, want uncertain", q)
 	}
 }
+
+// Per-recept-parametrar: två nivågivare på olika höjd i samma avlopp,
+// varsin offset, gemensam sammanvägning. Samma avstånd ska ge olika nivå.
+func TestPerRecipeLevelOffsets(t *testing.T) {
+	c := catalog.New()
+	tmpl := catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "sewer", Version: "v1",
+			Required: []string{"distance1", "distance2", "level1", "level2", "level"},
+			Category: "sewer",
+		},
+		ParamDefaults: map[string]float64{"sensor1bottom": 2.0, "sensor2bottom": 1.0},
+		Recipes: []catalog.Recipe{
+			{Name: "level-1", Operator: "distanceToLevel", Version: "v1",
+				Inputs: []string{"distance1"}, Outputs: []string{"level1"},
+				Params: []string{"sensor1bottom"}},
+			{Name: "level-2", Operator: "distanceToLevel", Version: "v1",
+				Inputs: []string{"distance2"}, Outputs: []string{"level2"},
+				Params: []string{"sensor2bottom"}},
+			{Name: "mean-level", Operator: "mean", Version: "v1",
+				Inputs: []string{"level1", "level2"}, Outputs: []string{"level"}},
+		},
+	}
+	if err := c.PutTemplate(tmpl); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	cfg, err := c.Compile(catalog.ObjectSpec{
+		ThingID: "sewer-2", Tenant: "t", Name: "Avlopp 2",
+		Location: rtLoc(), Metadata: rtMeta(),
+		TemplateID: "sewer", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance1": {}, "distance2": {}, "level1": {}, "level2": {}, "level": {},
+		},
+		Bindings: []things.Binding{
+			{DeviceID: "s1", Object: flowURNdistance, Resource: "5700", Input: "distance1"},
+			{DeviceID: "s2", Object: flowURNdistance, Resource: "5700", Input: "distance2"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	dist := 0.5
+	out, err := EvaluateBatchFlow(cfg, nil, nil, []things.Observation{
+		{Signal: things.ParseSignalID("s1", "", flowURNdistance, "5700"), Value: &dist,
+			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("s2", "", flowURNdistance, "5700"), Value: &dist,
+			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+	}, base, "m1", 1)
+	if err != nil {
+		t.Fatalf("flow: %v", err)
+	}
+	if got := *out.Updated["level1"].Value; got != 1.5 {
+		t.Fatalf("level1=%v, want 1.5 (2.0-0.5)", got)
+	}
+	if got := *out.Updated["level2"].Value; got != 0.5 {
+		t.Fatalf("level2=%v, want 0.5 (1.0-0.5)", got)
+	}
+	if got := *out.Updated["level"].Value; got != 1.0 {
+		t.Fatalf("level=%v, want mean 1.0", got)
+	}
+}
+
+// Per-recept-parametrar: två olika enhetskonverteringar i samma mall
+// (byggnadens energi J->kWh och effekt W->kW).
+func TestPerRecipeLinearConversions(t *testing.T) {
+	c := catalog.New()
+	tmpl := catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "building", Version: "v1",
+			Required: []string{"energy", "power", "energyKwh", "powerKw"},
+			Category: "building",
+		},
+		ParamDefaults: map[string]float64{"energyFactor": 1.0 / 3600000.0, "powerFactor": 1.0 / 1000.0},
+		Recipes: []catalog.Recipe{
+			{Name: "energy-si", Operator: "linear", Version: "v1",
+				Inputs: []string{"energy"}, Outputs: []string{"energyKwh"},
+				Params: []string{"energyFactor"}},
+			{Name: "power-si", Operator: "linear", Version: "v1",
+				Inputs: []string{"power"}, Outputs: []string{"powerKw"},
+				Params: []string{"powerFactor"}},
+		},
+	}
+	if err := c.PutTemplate(tmpl); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	cfg, err := c.Compile(catalog.ObjectSpec{
+		ThingID: "building-1", Tenant: "t", Name: "Byggnad 1",
+		Location: rtLoc(), Metadata: rtMeta(),
+		TemplateID: "building", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"energy": {}, "power": {}, "energyKwh": {}, "powerKw": {},
+		},
+		Bindings: []things.Binding{
+			{DeviceID: "s-e", Object: flowURNtemp, Resource: "5700", Input: "energy"},
+			{DeviceID: "s-p", Object: flowURNtemp, Resource: "5700", Input: "power"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	joule, watt := 3600000.0, 2000.0
+	out, err := EvaluateBatchFlow(cfg, nil, nil, []things.Observation{
+		{Signal: things.ParseSignalID("s-e", "", flowURNtemp, "5700"), Value: &joule,
+			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("s-p", "", flowURNtemp, "5700"), Value: &watt,
+			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+	}, base, "m1", 1)
+	if err != nil {
+		t.Fatalf("flow: %v", err)
+	}
+	if got := *out.Updated["energyKwh"].Value; got < 0.999 || got > 1.001 {
+		t.Fatalf("energyKwh=%v, want 1.0", got)
+	}
+	if got := *out.Updated["powerKw"].Value; got < 1.999 || got > 2.001 {
+		t.Fatalf("powerKw=%v, want 2.0", got)
+	}
+}
