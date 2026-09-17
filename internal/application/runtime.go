@@ -59,9 +59,13 @@ type RuntimeStore interface {
 	// (DataRevision, ej konfigurationsrevisionen).
 	SaveThingCAS(tenant, thingID string, expected int64, st StoredThingState) bool
 	// CommitBatch persisterar en omgång atomärt: blob-CAS på expected
-	// staket + idempotent historik + idempotent pending. False vid
-	// staketkonflikt (inget skrivs); anroparen läser om och försöker igen.
-	CommitBatch(tenant, thingID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool
+	// staket + idempotent historik + idempotent pending + dedupmarkering
+	// i samma atomära enhet. False vid staketkonflikt (inget skrivs,
+	// inget markeras); anroparen läser om och försöker igen.
+	// Markeringen i samma enhet stänger fönstret mellan commit och mark:
+	// en krasch lämnar aldrig state utan dedup (dubbeltillämpning av
+	// sum/delta vid återleverans) eller dedup utan state (tappad omgång).
+	CommitBatch(tenant, thingID, messageID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool
 	DeleteThingState(tenant, thingID string)
 	ListThingIDs(tenant string) []string
 	ListTenants() []string
@@ -244,12 +248,19 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 		states[id] = &storedDecoded{state: st, config: cfg}
 	}
 
-	// Routa: bevara batchordning per sak (EvaluateBatchFlow sorterar ändå
-	// deterministiskt, men stabil inmatning underlättar felsökning).
+	// Routa: sorterade saks-ID:n ger deterministisk grupperingsordning
+	// (flödet sorterar ändå observationer per sak, men stabil inmatning
+	// underlättar felsökning och tester).
+	ids := make([]string, 0, len(states))
+	for id := range states {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
 	grouped := make(map[string][]things.Observation)
 	order := []string{}
 	for _, o := range obs {
-		for id, sd := range states {
+		for _, id := range ids {
+			sd := states[id]
 			if len(matchingInputs(sd.config.Bindings, o.Signal)) == 0 {
 				continue
 			}
@@ -259,13 +270,14 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 			grouped[id] = append(grouped[id], o)
 		}
 	}
-	sort.Strings(order)
 
 	outcomes := make([]BatchOutcome, 0, len(order))
 	for _, id := range order {
 		sd := states[id]
-		// Atomär dedup (L6/L10): check-only före beräkning; markera först
-		// efter lyckad persist så att fel/omstart inte lämnar dedup utan state.
+		// Atomär dedup (L6/L10): check-only före beräkning; markeringen sker
+		// atomärt i CommitBatch, så varken fel/omstart före commit (dedup
+		// utan state) eller krasch efter commit (state utan dedup) ger
+		// divergerande tillstånd.
 		if rt.store.DedupCheck(tenant, messageID, id) {
 			outcomes = append(outcomes, BatchOutcome{
 				ThingID:   id,
@@ -325,8 +337,7 @@ func (rt *Runtime) persistBatch(tenant, messageID, id string, sd *storedDecoded,
 		sd.state.LastMessageID = messageID
 		fence := sd.state.DataRevision
 		sd.state.DataRevision++
-		if rt.store.CommitBatch(tenant, id, fence, sd.state, outcome.History, outcome.Events) {
-			rt.store.DedupMark(tenant, messageID, id)
+		if rt.store.CommitBatch(tenant, id, messageID, fence, sd.state, outcome.History, outcome.Events) {
 			return outcome, nil
 		}
 		// CAS-konflikt: inget från försöket blev synligt (CommitBatch är
@@ -339,6 +350,16 @@ func (rt *Runtime) persistBatch(tenant, messageID, id string, sd *storedDecoded,
 		fresh, ok := rt.store.LoadThing(tenant, id)
 		if !ok {
 			return nil, fmt.Errorf("%w: thing %q deleted concurrently", things.ErrConflict, id)
+		}
+		if rt.store.DedupCheck(tenant, messageID, id) {
+			// En samtidig skribent slutförde samma batch under vårt omtag:
+			// spela upp lagrade händelser i stället för att räkna om.
+			// Omberäkning är inte konvergent för tillståndsbärande
+			// operatorer (räknare/summor/deltan dubbelräknar).
+			return &FlowOutcome{
+				Updated: map[string]CurrentValue{},
+				Events:  append([]FlowEvent(nil), fresh.LastEvents...),
+			}, nil
 		}
 		freshCfg, err := decodeConfig(fresh.ConfigJSON)
 		if err != nil {

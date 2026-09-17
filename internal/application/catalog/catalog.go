@@ -481,10 +481,10 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 	if obj.TemplateID == "" || obj.TemplateVersion == "" {
 		return nil, fmt.Errorf("%w: object %q must reference a template version", things.ErrValidation, obj.ThingID)
 	}
-	// Beskrivande fält är obligatoriska för alla saker: namn, plats,
-	// metadata och kategori. Bindningar och relationer förblir valfria:
-	// överordnade objekt kan sakna egna sensorer och fristående objekt
-	// sakna föräldrar.
+	// Beskrivande fält är obligatoriska för alla saker: namn, plats och
+	// kategori (ärvd eller egen). Metadata, bindningar och relationer är
+	// frivilliga: överordnade objekt kan sakna egna sensorer och
+	// fristående objekt sakna föräldrar.
 	if strings.TrimSpace(obj.Name) == "" {
 		return nil, fmt.Errorf("%w: object %q must have a name", things.ErrValidation, obj.ThingID)
 	}

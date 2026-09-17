@@ -227,7 +227,11 @@ func (m *Manager) csvRow(record []string) (catalog.ObjectSpec, string) {
 	if !ok {
 		return fail("unknown type %q", record[1])
 	}
-	for _, b := range csvBindings(record[8], v1type, inputs) {
+	bindings, failText := csvBindings(record[8], inputs)
+	if failText != "" {
+		return fail("%s", failText)
+	}
+	for _, b := range bindings {
 		prop := csvProperty(templateID, b.Input)
 		b.Input = prop
 		obj.Bindings = append(obj.Bindings, b)
@@ -269,7 +273,9 @@ func (m *Manager) csvRow(record []string) (catalog.ObjectSpec, string) {
 
 // csvBindings parses the bindings column: 'device|channel|object|resource|input'
 // segments separated by comma, or a bare device ID expanded to all type inputs.
-func csvBindings(col, v1type string, inputs []csvInput) []things.Binding {
+// A malformed explicit segment rejects the row (never silently dropped:
+// a missing binding would create a thing without its intended signal).
+func csvBindings(col string, inputs []csvInput) ([]things.Binding, string) {
 	var out []things.Binding
 	for _, seg := range strings.Split(col, ",") {
 		seg = strings.TrimSpace(seg)
@@ -289,7 +295,7 @@ func csvBindings(col, v1type string, inputs []csvInput) []things.Binding {
 		}
 		parts := strings.Split(seg, "|")
 		if len(parts) != 5 {
-			continue
+			return nil, fmt.Sprintf("invalid binding %q (want device|channel|object|resource|input)", seg)
 		}
 		out = append(out, things.Binding{
 			DeviceID: strings.TrimSpace(parts[0]),
@@ -299,7 +305,7 @@ func csvBindings(col, v1type string, inputs []csvInput) []things.Binding {
 			Input:    strings.TrimSpace(parts[4]),
 		})
 	}
-	return out
+	return out, ""
 }
 
 // csvArgs maps LevelConfig args to parameter overrides. maxd/maxl become

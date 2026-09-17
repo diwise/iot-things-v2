@@ -323,60 +323,6 @@ const (
 	ParamSourceThing    ParamSource = "thing"
 )
 
-// Thing is a persistent business object (sak) created from a template.
-// Both version references and the effective configuration are stored so
-// the configuration can be reproduced without reading a later template
-// version.
-type Thing struct {
-	ID              string                 `json:"id"`
-	Tenant          string                 `json:"tenant"`
-	Name            string                 `json:"name,omitempty"`
-	Category        string                 `json:"category,omitempty"`
-	Location        *Location              `json:"location,omitempty"`
-	Metadata        map[string]string      `json:"metadata,omitempty"`
-	TemplateID      string                 `json:"templateId"`
-	TemplateVersion string                 `json:"templateVersion"`
-	VariantID       string                 `json:"variantId,omitempty"`
-	VariantVersion  string                 `json:"variantVersion,omitempty"`
-	Revision        int64                  `json:"revision"`
-	Properties      map[string]Property    `json:"properties,omitempty"`
-	Bindings        []Binding              `json:"bindings,omitempty"`
-	ParamValues     map[string]float64     `json:"paramValues,omitempty"`
-	ParamSources    map[string]ParamSource `json:"paramSources,omitempty"`
-}
-
-// EffectiveParam resolves key with precedence
-// template default -> variant value -> thing override,
-// reporting the effective value together with its origin.
-func (t Thing) EffectiveParam(key string, tmplDefaults map[string]float64, variant Variant) (float64, ParamSource, bool) {
-	if t.ParamValues != nil {
-		if v, ok := t.ParamValues[key]; ok {
-			return v, ParamSourceThing, true
-		}
-	}
-	if variant.ParamValues != nil {
-		if v, ok := variant.ParamValues[key]; ok {
-			return v, ParamSourceVariant, true
-		}
-	}
-	if tmplDefaults != nil {
-		if v, ok := tmplDefaults[key]; ok {
-			return v, ParamSourceTemplate, true
-		}
-	}
-	return 0, "", false
-}
-
-// Relation is a persistent, typed, directed link between independent
-// things within the same tenant.
-type Relation struct {
-	ID     string `json:"id"`
-	Tenant string `json:"tenant"`
-	Type   string `json:"type"`
-	FromID string `json:"fromId"`
-	ToID   string `json:"toId"`
-}
-
 var (
 	// ErrValidation signals that input violates domain rules.
 	ErrValidation = errors.New("validation error")
@@ -412,14 +358,6 @@ func ValidateBindingForTemplate(tmpl Template, b Binding) error {
 	}
 	if b.Resource == "" {
 		return fmt.Errorf("%w: binding resource must not be empty", ErrValidation)
-	}
-	return nil
-}
-
-// ValidateNoSelfRef denies self references in relations.
-func ValidateNoSelfRef(rel Relation) error {
-	if rel.FromID != "" && rel.FromID == rel.ToID {
-		return fmt.Errorf("%w: relation %q must not reference itself", ErrValidation, rel.ID)
 	}
 	return nil
 }

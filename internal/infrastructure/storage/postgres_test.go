@@ -142,7 +142,7 @@ func TestPostgresCommitBatchAtomic(t *testing.T) {
 		ObservedAt: at, ReceivedAt: at, MessageID: "stale", ConfigRevision: 1,
 	}}
 	st.DataRevision = 8
-	if a.CommitBatch("t", "gauge-1", 6, st, hist, pending) {
+	if a.CommitBatch("t", "gauge-1", "stale", 6, st, hist, pending) {
 		t.Fatal("conflicting fence must fail")
 	}
 	if got := a.History("t", "gauge-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
@@ -151,8 +151,14 @@ func TestPostgresCommitBatchAtomic(t *testing.T) {
 	if pending := a.PendingEvents("t", "gauge-1"); len(pending) != 0 {
 		t.Fatalf("pending=%d after failed commit, want 0", len(pending))
 	}
-	if !a.CommitBatch("t", "gauge-1", 7, st, hist, pending) {
+	if a.DedupCheck("t", "stale", "gauge-1") {
+		t.Fatal("failed commit must not mark dedup")
+	}
+	if !a.CommitBatch("t", "gauge-1", "stale", 7, st, hist, pending) {
 		t.Fatal("matching fence must commit")
+	}
+	if !a.DedupCheck("t", "stale", "gauge-1") {
+		t.Fatal("successful commit must mark dedup atomically")
 	}
 	if got := a.History("t", "gauge-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("history=%d after commit, want 1", len(got))

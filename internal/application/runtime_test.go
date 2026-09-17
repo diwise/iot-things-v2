@@ -127,9 +127,10 @@ func (f *fakeStore) storeLocked(tenant, thingID string, st StoredThingState) {
 	f.things[fkey(tenant, thingID)] = st
 }
 
-// CommitBatch persisterar blob-CAS + historik + pending atomärt under ett
-// lås: vid staketkonflikt blir inget synligt.
-func (f *fakeStore) CommitBatch(tenant, thingID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool {
+// CommitBatch persisterar blob-CAS + historik + pending + dedupmarkering
+// atomärt under ett lås: vid staketkonflikt blir inget synligt och inget
+// markerat.
+func (f *fakeStore) CommitBatch(tenant, thingID, messageID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cur, ok := f.things[fkey(tenant, thingID)]
@@ -141,6 +142,12 @@ func (f *fakeStore) CommitBatch(tenant, thingID string, expected int64, st Store
 		f.appendHistoryLocked(tenant, thingID, h)
 	}
 	f.storePendingLocked(tenant, thingID, pending)
+	if messageID != "" {
+		if f.dedup == nil {
+			f.dedup = make(map[string]struct{})
+		}
+		f.dedup[tenant+"\x00"+messageID+"\x00"+thingID] = struct{}{}
+	}
 	return true
 }
 
@@ -822,7 +829,7 @@ func TestCommitBatchAtomicOnConflict(t *testing.T) {
 		ObservedAt: base, ReceivedAt: base, MessageID: "stale", ConfigRevision: 1,
 	}}
 	st.DataRevision = 8
-	if fs.CommitBatch("t", "gauge-1", 6, st, hist, pending) {
+	if fs.CommitBatch("t", "gauge-1", "stale", 6, st, hist, pending) {
 		t.Fatal("conflicting fence must fail")
 	}
 	if n := fs.historyCount("t", "gauge-1"); n != 0 {
@@ -831,12 +838,18 @@ func TestCommitBatchAtomicOnConflict(t *testing.T) {
 	if pending := fs.PendingEvents("t", "gauge-1"); len(pending) != 0 {
 		t.Fatalf("pending=%d after failed commit, want 0", len(pending))
 	}
+	if fs.DedupCheck("t", "stale", "gauge-1") {
+		t.Fatal("failed commit must not mark dedup")
+	}
 	got, _ := fs.LoadThing("t", "gauge-1")
 	if got.DataRevision != 7 {
 		t.Fatalf("dataRev=%d after failed commit, want 7", got.DataRevision)
 	}
-	if !fs.CommitBatch("t", "gauge-1", 7, st, hist, pending) {
+	if !fs.CommitBatch("t", "gauge-1", "stale", 7, st, hist, pending) {
 		t.Fatal("matching fence must commit")
+	}
+	if !fs.DedupCheck("t", "stale", "gauge-1") {
+		t.Fatal("successful commit must mark dedup atomically")
 	}
 	if n := fs.historyCount("t", "gauge-1"); n != 1 {
 		t.Fatalf("history=%d after commit, want 1", n)
@@ -904,6 +917,80 @@ func TestRuntimeCrossInstanceConcurrency(t *testing.T) {
 	}
 	if n := fs.historyCount("t", "gauge-1"); n != 10 {
 		t.Fatalf("history=%d, want 10 (no lost writes)", n)
+	}
+}
+
+// Regression L6/L10: omtag med underskrivet staket där en samtidig skribent
+// redan slutfört samma batch ska spela upp lagrade händelser, inte räkna
+// om (tillståndsbärande operatorer konvergerar inte vid omberäkning:
+// räknare/summor/deltan skulle dubbelräkna).
+func TestRuntimeRetryReplaysFinishedBatch(t *testing.T) {
+	const dinURN = "urn:oma:lwm2m:ext:3200"
+	fs := newFakeStore()
+	c := catalog.New()
+	if err := c.PutTemplate(catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "passage", Version: "v1",
+			Required: []string{"door", "passages"},
+			Category: "passage",
+		},
+		Recipes: []catalog.Recipe{{Name: "count", Operator: "counter", Version: "v1",
+			Inputs: []string{"door"}, Outputs: []string{"passages"}}},
+	}); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	obj := catalog.ObjectSpec{
+		ThingID: "passage-1", Tenant: "t", Name: "Passage",
+		Location: rtLoc(), Metadata: rtMeta(),
+		TemplateID: "passage", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"door": {}, "passages": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "s", Object: dinURN, Resource: "5500", Input: "door"},
+		},
+	}
+	rtA := NewRuntime(fs)
+	if _, err := rtA.RegisterThing("t", c, obj, 1); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	// Fånga underskrivet tillstånd före batchen.
+	stale, ok := fs.LoadThing("t", "passage-1")
+	if !ok {
+		t.Fatal("thing missing")
+	}
+	staleCfg, err := decodeConfig(stale.ConfigJSON)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	staleSD := &storedDecoded{state: stale, config: staleCfg}
+
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	door := []things.Observation{rtBoolObs("s", dinURN, "5500", true, base)}
+	if _, err := rtA.HandleBatch(context.Background(), "t", "m1", door, base); err != nil {
+		t.Fatalf("winner batch: %v", err)
+	}
+	winner, _ := fs.LoadThing("t", "passage-1")
+
+	// Förloraren med underskrivet staket: replay, ingen omskrivning.
+	rtB := NewRuntime(fs)
+	out, err := rtB.persistBatch("t", "m1", "passage-1", staleSD, door, base)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	found := false
+	for _, e := range out.Events {
+		if e.PropertyID == "passages" && e.Value == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("replay events=%+v, want winner's passages=1", out.Events)
+	}
+	after, _ := fs.LoadThing("t", "passage-1")
+	if after.DataRevision != winner.DataRevision {
+		t.Fatalf("dataRev=%d, want %d (replay must not rewrite state)", after.DataRevision, winner.DataRevision)
+	}
+	if got := *after.Current["passages"].Value; got != 1 {
+		t.Fatalf("passages=%v, want still 1", got)
 	}
 }
 

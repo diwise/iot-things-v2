@@ -48,10 +48,11 @@ func (a *RuntimeAdapter) SaveThingCAS(tenant, thingID string, expected int64, st
 	return a.S.Things.CompareAndSwap(tenant, thingID, expected, ThingRecord{ID: thingID, Tenant: tenant, Revision: st.DataRevision, Data: raw})
 }
 
-// CommitBatch persisterar blob-CAS + historik + pending atomärt under
-// Storage-låset: vid staketkonflikt blir inget synligt. Historik/outbox är
-// själva idempotenta, så omtag efter konflikt konvergerar.
-func (a *RuntimeAdapter) CommitBatch(tenant, thingID string, expected int64, st application.StoredThingState, hist []application.HistoryWrite, pending []application.FlowEvent) bool {
+// CommitBatch persisterar blob-CAS + historik + pending + dedupmarkering
+// atomärt under Storage-låset: vid staketkonflikt blir inget synligt och
+// inget markerat. Historik/outbox är själva idempotenta, så omtag efter
+// konflikt konvergerar.
+func (a *RuntimeAdapter) CommitBatch(tenant, thingID, messageID string, expected int64, st application.StoredThingState, hist []application.HistoryWrite, pending []application.FlowEvent) bool {
 	a.S.mu.Lock()
 	defer a.S.mu.Unlock()
 	raw, _ := json.Marshal(st)
@@ -84,6 +85,7 @@ func (a *RuntimeAdapter) CommitBatch(tenant, thingID string, expected int64, st 
 			Payload:    payload,
 		})
 	}
+	a.S.Dedup.Mark(tenant, messageID, thingID)
 	return true
 }
 

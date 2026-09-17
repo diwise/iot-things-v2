@@ -14,9 +14,6 @@ const (
 	flowURNpresence = "urn:oma:lwm2m:ext:3200"
 )
 
-//go:fix inline
-func flowPtr(v float64) *float64 { return new(v) }
-
 func flowBins(t *testing.T) (*catalog.Catalog, catalog.EffectiveConfig) {
 	t.Helper()
 	c := catalog.New()

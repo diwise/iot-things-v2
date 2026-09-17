@@ -153,21 +153,6 @@ func TestValidateThingIDRejectsSlash(t *testing.T) {
 	}
 }
 
-// B17: strict intra-tenant relations deny self references.
-func TestValidateNoSelfRef(t *testing.T) {
-	ok := Relation{ID: "r1", Tenant: "t1", Type: "partOf", FromID: "room-a", ToID: "building-a"}
-	if err := ValidateNoSelfRef(ok); err != nil {
-		t.Fatalf("ValidateNoSelfRef(distinct) = %v, want nil", err)
-	}
-
-	self := Relation{ID: "r2", Tenant: "t1", Type: "partOf", FromID: "room-a", ToID: "room-a"}
-	if err := ValidateNoSelfRef(self); err == nil {
-		t.Fatalf("ValidateNoSelfRef(self) = nil, want error")
-	} else if !errors.Is(err, ErrValidation) {
-		t.Fatalf("ValidateNoSelfRef(self) error = %v, want ErrValidation", err)
-	}
-}
-
 // B1/T2: the bare repeat-group prefix itself is not a measurement point;
 // a non-empty suffix is required.
 func TestClosedTemplateRejectsBarePrefix(t *testing.T) {
@@ -211,44 +196,6 @@ func TestValidateBindingRequiresDevice(t *testing.T) {
 		t.Fatalf("ValidateBindingForTemplate(empty device) = nil, want error")
 	} else if !errors.Is(err, ErrValidation) {
 		t.Fatalf("ValidateBindingForTemplate(empty device) error = %v, want ErrValidation", err)
-	}
-}
-
-// Regression: parameterprecedens template -> variant -> thing (thing vinner).
-func TestEffectiveParamPrecedence(t *testing.T) {
-	tmplDefaults := map[string]float64{"usableHeight": 1.0, "onlyTemplate": 9}
-	variant := Variant{
-		ID:              "wastebin-B",
-		Version:         "v1",
-		TemplateID:      "wastebin",
-		TemplateVersion: "v1",
-		ParamValues:     map[string]float64{"usableHeight": 1.2, "onlyVariant": 8},
-	}
-	thing := Thing{
-		ID:          "bin-42",
-		Tenant:      "t1",
-		ParamValues: map[string]float64{"usableHeight": 1.5},
-	}
-
-	if v, src, ok := thing.EffectiveParam("usableHeight", tmplDefaults, variant); !ok || v != 1.5 || src != ParamSourceThing {
-		t.Fatalf("thing-override = (%v, %q, %v), want (1.5, thing, true)", v, src, ok)
-	}
-	bare := Thing{ID: "x", Tenant: "t1"}
-	if v, src, ok := bare.EffectiveParam("usableHeight", tmplDefaults, variant); !ok || v != 1.2 || src != ParamSourceVariant {
-		t.Fatalf("variant = (%v, %q, %v), want (1.2, variant, true)", v, src, ok)
-	}
-	emptyVariant := Variant{}
-	if v, src, ok := bare.EffectiveParam("usableHeight", tmplDefaults, emptyVariant); !ok || v != 1.0 || src != ParamSourceTemplate {
-		t.Fatalf("template-default = (%v, %q, %v), want (1.0, template, true)", v, src, ok)
-	}
-	if _, _, ok := bare.EffectiveParam("missing", tmplDefaults, variant); ok {
-		t.Fatal("saknad nyckel ska ge ok=false")
-	}
-	if v, src, ok := bare.EffectiveParam("onlyVariant", tmplDefaults, variant); !ok || v != 8 || src != ParamSourceVariant {
-		t.Fatalf("onlyVariant = (%v, %q, %v), want (8, variant, true)", v, src, ok)
-	}
-	if v, src, ok := bare.EffectiveParam("onlyTemplate", tmplDefaults, variant); !ok || v != 9 || src != ParamSourceTemplate {
-		t.Fatalf("onlyTemplate = (%v, %q, %v), want (9, template, true)", v, src, ok)
 	}
 }
 

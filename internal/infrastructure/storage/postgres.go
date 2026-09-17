@@ -340,7 +340,7 @@ func (s *PgStore) ClearPendingIDs(tenant, thingID string, ids []string) {
 // vid staketkonflikt (0 rader) rollbackas allt och false returneras.
 // Historik/outbox-skrivningar är själva idempotenta, så omtag efter
 // konflikt konvergerar.
-func (s *PgStore) CommitBatch(tenant, thingID string, expected int64, st application.StoredThingState, hist []application.HistoryWrite, pending []application.FlowEvent) bool {
+func (s *PgStore) CommitBatch(tenant, thingID, messageID string, expected int64, st application.StoredThingState, hist []application.HistoryWrite, pending []application.FlowEvent) bool {
 	ctx, cancel := s.ctx()
 	defer cancel()
 	raw, _ := json.Marshal(st)
@@ -375,6 +375,13 @@ func (s *PgStore) CommitBatch(tenant, thingID string, expected int64, st applica
 			INSERT INTO outbox_v2(id, tenant, thing_id, property_id, observed_at, revision, payload)
 			SELECT $1,$2,$3,$4,$5,$6,$7 WHERE EXISTS (SELECT 1 FROM s)`,
 			id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, payload); err != nil {
+			return false
+		}
+	}
+	if messageID != "" {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO dedup_v2(tenant, message_id, thing_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`,
+			tenant, messageID, thingID); err != nil {
 			return false
 		}
 	}

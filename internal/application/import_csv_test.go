@@ -19,6 +19,7 @@ bad-type;Nope;;;59,18;default;;;;
 angle-bin;Container;;;;59,18;default;;milesight:9;{'maxd':0.94,'maxl':0.79,'angle':15}
 bad-loc;Desk;;D;;not-a-place;default;;s-d;
 no-tenant;Desk;;D;;59,18;;;s-d;
+bad-bind;Desk;;D;;59,18;default;test;s-d|oops;
 `
 
 func importSeededManager(t *testing.T) *Manager {
@@ -52,14 +53,14 @@ func TestImportCSV(t *testing.T) {
 	if added != 4 || skipped != 0 {
 		t.Fatalf("added=%d skipped=%d, want 4/0", added, skipped)
 	}
-	if len(failures) != 4 {
-		t.Fatalf("failures=%+v, want 4", failures)
+	if len(failures) != 5 {
+		t.Fatalf("failures=%+v, want 5", failures)
 	}
 	rows := map[int]bool{}
 	for _, f := range failures {
 		rows[f.Row] = true
 	}
-	for _, want := range []int{6, 7, 8, 9} {
+	for _, want := range []int{6, 7, 8, 9, 10} {
 		if !rows[want] {
 			t.Fatalf("failures=%+v, want row %d rejected", failures, want)
 		}
@@ -70,8 +71,8 @@ func TestImportCSV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
-	if added != 0 || skipped != 4 || len(failures) != 4 {
-		t.Fatalf("reimport added=%d skipped=%d failures=%d, want 0/4/4", added, skipped, len(failures))
+	if added != 0 || skipped != 4 || len(failures) != 5 {
+		t.Fatalf("reimport added=%d skipped=%d failures=%d, want 0/4/5", added, skipped, len(failures))
 	}
 
 	// Tunnan bär subtyp/taggar i metadata och får mått som overrides.
