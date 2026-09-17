@@ -23,7 +23,6 @@ const (
 	policiesFile
 	authzAccessObject
 	thingsFile
-	configFile
 	catalogSeedFile
 	migrateBindings
 

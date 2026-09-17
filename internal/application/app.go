@@ -24,7 +24,6 @@ type ThingsApp interface {
 
 	Add(ctx context.Context, b []byte) error
 	Seed(ctx context.Context, r io.Reader) error
-	LoadConfig(ctx context.Context, r io.Reader) error
 
 	MigrateBindings(ctx context.Context) (int, error)
 	HasUnmigratedThings(ctx context.Context) (bool, error)
@@ -120,15 +119,6 @@ func (a *app) DrainPending(ctx context.Context) (int, error) {
 func (a *app) Add(_ context.Context, b []byte) error {
 	if len(b) == 0 {
 		return fmt.Errorf("%w: empty body", ErrMissingThingID)
-	}
-	return nil
-}
-
-// LoadConfig loads operator/catalog configuration (YAML). Stub: validated
-// but not yet stored; iot-things parity point (newApp -> LoadConfig).
-func (a *app) LoadConfig(_ context.Context, r io.Reader) error {
-	if r == nil {
-		return errors.New("nil config reader")
 	}
 	return nil
 }

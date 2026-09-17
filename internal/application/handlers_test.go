@@ -30,7 +30,6 @@ func (f *fakeThingsApp) HandleMeasurements(_ context.Context, tenant, messageID 
 }
 func (f *fakeThingsApp) Add(context.Context, []byte) error            { return nil }
 func (f *fakeThingsApp) Seed(context.Context, io.Reader) error        { return nil }
-func (f *fakeThingsApp) LoadConfig(context.Context, io.Reader) error  { return nil }
 func (f *fakeThingsApp) MigrateBindings(context.Context) (int, error) { return 0, nil }
 func (f *fakeThingsApp) HasUnmigratedThings(context.Context) (bool, error) {
 	return false, nil

@@ -46,7 +46,6 @@ func defaultFlags() flagMap {
 		policiesFile:      "/opt/diwise/config/authz.rego",
 		authzAccessObject: "false",
 		thingsFile:        "/opt/diwise/config/things.csv",
-		configFile:        "/opt/diwise/config/config.yaml",
 		catalogSeedFile:   "/opt/diwise/config/catalog-seed.json",
 		migrateBindings:   "true",
 
@@ -69,19 +68,16 @@ func main() {
 	things, err := os.Open(flags[thingsFile])
 	exitIf(err, logger, "unable to open things file")
 
-	config, err := os.Open(flags[configFile])
-	exitIf(err, logger, "unable to open config file")
-
 	cfg := &appConfig{}
 
-	runner, err := initialize(ctx, flags, cfg, policies, things, config)
+	runner, err := initialize(ctx, flags, cfg, policies, things)
 	exitIf(err, logger, "failed to initialize service runner")
 
 	err = runner.Run(ctx)
 	exitIf(err, logger, "failed to start service runner")
 }
 
-func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile, thingsData, configData io.ReadCloser) (servicerunner.Runner[appConfig], error) {
+func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile, thingsData io.ReadCloser) (servicerunner.Runner[appConfig], error) {
 	log := logging.GetFromContext(ctx)
 
 	probes := readinessProbes()
@@ -119,7 +115,6 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 		oninit(func(ctx context.Context, ac *appConfig) error {
 			log.Debug("initializing servicerunner")
 
-			defer configData.Close()
 			defer thingsData.Close()
 
 			var err error
@@ -172,7 +167,7 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 			owned.storage = backend
 
 			log.Debug("creating application...")
-			app, mgr, err = newApp(ctx, reader, writer, msgCtx, runtimeStore, configData)
+			app, mgr, err = newApp(reader, writer, msgCtx, runtimeStore)
 			if err != nil {
 				if backend != nil {
 					backend.Close()
@@ -377,7 +372,6 @@ func parseExternalConfig(ctx context.Context, flags flagMap) (context.Context, f
 	flags[policiesFile] = envOrDef(ctx, "POLICIES_FILE", flags[policiesFile])
 	flags[authzAccessObject] = envOrDef(ctx, "AUTHZ_ACCESS_OBJECT_ENABLED", flags[authzAccessObject])
 	flags[thingsFile] = envOrDef(ctx, "THINGS_FILE", flags[thingsFile])
-	flags[configFile] = envOrDef(ctx, "CONFIG_FILE", flags[configFile])
 	flags[catalogSeedFile] = envOrDef(ctx, "CATALOG_SEED_FILE", flags[catalogSeedFile])
 	flags[migrateBindings] = envOrDef(ctx, "THINGS_MIGRATE_BINDINGS", flags[migrateBindings])
 
@@ -401,7 +395,6 @@ func parseExternalConfig(ctx context.Context, flags flagMap) (context.Context, f
 	flag.Func("policies", "an authorization policy file", apply(policiesFile))
 	flag.Func("authz-access-object", "enable access-object authorization policy result model", apply(authzAccessObject))
 	flag.Func("things", "list of known things", apply(thingsFile))
-	flag.Func("config", "a yaml file with configuration", apply(configFile))
 	flag.Func("catalog-seed", "seed file with start catalog (templates/variants)", apply(catalogSeedFile))
 	flag.Func("loglevel", "set the log level", apply(logLevel))
 	flag.Parse()
@@ -424,7 +417,7 @@ func parseLogLevel(level string) slog.Level {
 	}
 }
 
-func newApp(ctx context.Context, r application.ThingsReader, w application.ThingsWriter, m messaging.MsgContext, store application.RuntimeStore, cfg io.Reader) (application.ThingsApp, *application.Manager, error) {
+func newApp(r application.ThingsReader, w application.ThingsWriter, m messaging.MsgContext, store application.RuntimeStore) (application.ThingsApp, *application.Manager, error) {
 	// Runtime över storet (minne eller PostgreSQL, valt av anroparen):
 	// atomära batchar, dedup, outbox. Samma store delas vid omstart
 	// (dränering utan omberäkning). Manager: katalog + objektlivscykel.
@@ -442,10 +435,6 @@ func newApp(ctx context.Context, r application.ThingsReader, w application.Thing
 	opts = append(opts, application.WithPublisher(pub))
 	mgr := application.NewManager(cat, rt, store, opts...)
 	a := application.New(r, w, m, rt, pub)
-	err := a.LoadConfig(ctx, cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("unable to load config: %w", err)
-	}
 
 	return a, mgr, nil
 }
