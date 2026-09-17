@@ -351,6 +351,8 @@ func canonicalOperator(op string) string {
 		return "delta"
 	case "accumulate":
 		return "sum"
+	case "minus":
+		return "subtract"
 	default:
 		return op
 	}
@@ -490,9 +492,21 @@ func runRecipe(cfg *catalog.EffectiveConfig, working map[string]CurrentValue, pr
 	case "mean", "average":
 		v, q, err := functions.Mean(vals)
 		if err != nil {
-			return recipeResult{}, false, nil, err
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q: %w", r.Operator, err)
 		}
 		return mk(v, q)
+	case "subtract", "minus":
+		// Differens mellan två ingångar (t.ex. temperatur vid två
+		// ingångar): första minus andra, med tecken. Båda ingångar
+		// krävs som för mean (B4); uncertain propagerar.
+		if len(vals) != 2 {
+			return recipeResult{}, false, nil, fmt.Errorf("operator %q needs exactly two inputs", r.Operator)
+		}
+		q := functions.QualityOk
+		if vals[0].Quality == functions.QualityUncertain || vals[1].Quality == functions.QualityUncertain {
+			q = functions.QualityUncertain
+		}
+		return mk(functions.Subtract(vals[0].Value, vals[1].Value), q)
 	case "min":
 		v, q, err := functions.Min(vals)
 		if err != nil {
@@ -756,6 +770,11 @@ func validateRecipeStatic(cfg *catalog.EffectiveConfig, r catalog.Recipe) error 
 	case "mean", "average", "min", "max":
 		if len(r.Inputs) == 0 {
 			return fmt.Errorf("operator %q needs at least one input", r.Operator)
+		}
+		return nil
+	case "subtract", "minus":
+		if len(r.Inputs) != 2 {
+			return fmt.Errorf("operator %q needs exactly two inputs", r.Operator)
 		}
 		return nil
 	case "threshold", "hysteresis":

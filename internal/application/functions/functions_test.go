@@ -394,3 +394,12 @@ func TestSumNext(t *testing.T) {
 		t.Fatalf("total=%v, want ~0.9", s.Total)
 	}
 }
+
+func TestSubtract(t *testing.T) {
+	if Subtract(21, 18) != 3 {
+		t.Fatal("21-18 ska bli 3")
+	}
+	if Subtract(18, 21) != -3 {
+		t.Fatal("tecknet ska bevaras (riktning)")
+	}
+}

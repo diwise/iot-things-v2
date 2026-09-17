@@ -1033,3 +1033,56 @@ func TestOutcomeDoesNotAliasInput(t *testing.T) {
 		t.Fatalf("Updated and History share pointer: history=%v", *out.History[0].Value)
 	}
 }
+
+// Differens mellan två mätpunkter (t.ex. temperatur vid två ingångar):
+// första minus andra, med tecken. Båda krävs; uncertain propagerar.
+func TestSubtractInputs(t *testing.T) {
+	cfg := catalog.EffectiveConfig{
+		Properties: map[string]things.Property{
+			"temperature.a": {}, "temperature.b": {}, "temperature.diff": {},
+		},
+		Bindings: []things.Binding{
+			{DeviceID: "s1", Object: flowURNtemp, Resource: "5700", Input: "temperature.a"},
+			{DeviceID: "s2", Object: flowURNtemp, Resource: "5700", Input: "temperature.b"},
+		},
+		Recipes: []catalog.Recipe{
+			{Name: "diff", Operator: "subtract", Version: "v1",
+				Inputs: []string{"temperature.a", "temperature.b"}, Outputs: []string{"temperature.diff"}},
+		},
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	out, err := EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{
+		tempObs("s1", 21, base), tempObs("s2", 18, base),
+	}, base, "m1", 1)
+	if err != nil {
+		t.Fatalf("flow: %v", err)
+	}
+	diff, ok := out.Updated["temperature.diff"]
+	if !ok || diff.Value == nil || *diff.Value != 3 {
+		t.Fatalf("diff=%+v, want 3", out.Updated)
+	}
+
+	// Saknad ingång ger inget resultat.
+	out, err = EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{
+		tempObs("s1", 21, base),
+	}, base, "m2", 1)
+	if err != nil {
+		t.Fatalf("flow: %v", err)
+	}
+	if _, ok := out.Updated["temperature.diff"]; ok {
+		t.Fatal("subtract without both inputs must not produce a result")
+	}
+
+	// Uncertain på en ingång ger uncertain resultat.
+	uncertain := tempObs("s2", 18, base)
+	uncertain.Quality = things.QualityUncertain
+	out, err = EvaluateBatchFlow(&cfg, nil, nil, []things.Observation{
+		tempObs("s1", 21, base), uncertain,
+	}, base, "m3", 1)
+	if err != nil {
+		t.Fatalf("flow: %v", err)
+	}
+	if q := out.Updated["temperature.diff"].Quality; q != "uncertain" {
+		t.Fatalf("quality=%q, want uncertain", q)
+	}
+}

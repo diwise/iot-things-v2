@@ -283,3 +283,12 @@ func SumNext(state SumState, value float64) SumState {
 
 	return state
 }
+
+// Subtract returns the difference between two inputs: a - b.
+// The signed result keeps direction (which entrance is warmer);
+// use threshold or absolute handling downstream if only the magnitude
+// matters. Quality combination follows the multi-input rule (uncertain
+// propagates) in the flow layer.
+func Subtract(a, b float64) float64 {
+	return a - b
+}
