@@ -1,5 +1,5 @@
 {
-  "description": "Startkatalog för iot-things-v2: en mall per saktyp i iot-things (config.yaml), uttryckt med generiska operatorer. Container/WasteContainer/Sandstorage täcks av wastebin-mallen med modellvarianter; övriga typer har egna mallar. Formatet är exakt API-form (TemplateSpec/VariantSpec) så filen kan även POSTas mot /api/v1/catalog. Publicerade versioner är oföränderliga: ändra aldrig en version i denna fil, lägg till en ny.",
+  "description": "Startkatalog för iot-things-v2: en mall per saktyp i iot-things (config.yaml) samt greenhouse/tank för växthus med tankar, uttryckt med generiska operatorer. Container/WasteContainer/Sandstorage täcks av wastebin-mallen med modellvarianter; övriga typer har egna mallar. Formatet är exakt API-form (TemplateSpec/VariantSpec) så filen kan även POSTas mot /api/v1/catalog. Publicerade versioner är oföränderliga: ändra aldrig en version i denna fil, lägg till en ny.",
   "templates": [
     {
       "template": {
@@ -182,6 +182,30 @@
         "version": "v1",
         "optional": ["temperature", "presence", "power", "energy", "distance", "digitalInput", "illuminance", "humidity"],
         "category": "sink"
+      }
+    },
+    {
+      "template": {
+        "id": "greenhouse",
+        "version": "v1",
+        "optional": ["temperature", "humidity", "co2", "illuminance"],
+        "repeatGroups": ["temperature."],
+        "category": "greenhouse",
+        "labels": ["Växthus"],
+        "primaryProperty": "temperature"
+      }
+    },
+    {
+      "template": {
+        "id": "tank",
+        "version": "v1",
+        "required": ["ph", "co2", "temperature", "waterLevel"],
+        "category": "tank",
+        "labels": ["Tank"],
+        "primaryProperty": "waterLevel",
+        "relations": [
+          {"name": "partOf", "allowedTargets": ["greenhouse"], "min": 0, "max": 1}
+        ]
       }
     }
   ],

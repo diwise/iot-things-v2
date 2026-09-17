@@ -13,7 +13,7 @@ Status: Etapp 1–6 + K4-persistens (minne + PostgreSQL via PgStore, dedup/outbo
 - `internal/infrastructure/storage`: `config.go` (`NewConfig`/`ConnStr`, enda väg via cmd-flags), `storage.go` (minnesbackend), `postgres.go` (`PgStore` över pgx + `migrations/`; Timescale-hypertabell när tillägget finns), `memory.go` (things/history/relations/outbox/dedup, tenant-isolering, cykelskydd). Backend väljs i `cmd`: tom `POSTGRES_HOST` ger minne, satt värd ger PostgreSQL.
 - `internal/presentation/api`: `register.go` (`RegisterHandlers` med `router` + OPA-`auth`, scopes `things.create/read/update/delete`, `/api/v1`-prefix), `respond.go` (JSON/ETag-hjälpare), `auth/` (kopierad OPA-middleware från iot-things).
 - `pkg/types`: `things.v1.values`, `things.v1.relations` + `Validate()` (gamla `thing.updated` orörda).
-- `assets/data/fixtures`: bins, rooms+building, greenhouse, sewer. `assets/config`: `authz.rego`, `config.yaml`, `things.csv`, `catalog-seed.json` (startkatalog: en mall per iot-things-typ + wastebin-varianter, laddas idempotent vid start via `CATALOG_SEED_FILE`). `assets/docs`: `openapi.yaml` (beskriver `/api/v1`).
+- `assets/data/fixtures`: bins, rooms+building, greenhouse, sewer. `assets/config`: `authz.rego`, `config.yaml`, `things.csv`, `catalog-seed.json` (startkatalog: en mall per iot-things-typ + greenhouse/tank-mallar + wastebin-varianter, laddas idempotent vid start via `CATALOG_SEED_FILE`). `assets/docs`: `openapi.yaml` (beskriver `/api/v1`).
 - `deployments/Dockerfile`: samma multi-stage-bygge som iot-things (binary `iot-things-v2`).
 
 ## Verifiering

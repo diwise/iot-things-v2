@@ -1422,16 +1422,16 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if added != 16 || skipped != 0 {
-		t.Fatalf("seed added=%d skipped=%d, want 16/0", added, skipped)
+	if added != 18 || skipped != 0 {
+		t.Fatalf("seed added=%d skipped=%d, want 18/0", added, skipped)
 	}
 	// Idempotent: andra seedningen skippar allt.
 	added, skipped, err = mgr.SeedCatalog(ctx, seed)
 	if err != nil {
 		t.Fatalf("reseed: %v", err)
 	}
-	if added != 0 || skipped != 16 {
-		t.Fatalf("reseed added=%d skipped=%d, want 0/16", added, skipped)
+	if added != 0 || skipped != 18 {
+		t.Fatalf("reseed added=%d skipped=%d, want 0/18", added, skipped)
 	}
 
 	bind := func(device, object, resource, input string) things.Binding {
@@ -1874,5 +1874,134 @@ func TestManageValuesCarryDescriptor(t *testing.T) {
 	}
 	if desc.Location == nil || desc.Location.Type != "Point" || desc.Metadata["floor"] != "2" {
 		t.Fatalf("descriptor=%+v, want location+metadata", desc)
+	}
+}
+
+// Växthus med tankar från seed-mallarna: växthuset bär rummets mätpunkter
+// (temperatur, luftfuktighet, co2, ljus), varje tank har pH, co2,
+// temperatur och vattennivå. Vy visar tankarnas värden samlat.
+func TestManageGreenhouseTanks(t *testing.T) {
+	const (
+		tempURN = "urn:oma:lwm2m:ext:3303"
+		humURN  = "urn:oma:lwm2m:ext:3304"
+		luxURN  = "urn:oma:lwm2m:ext:3301"
+		aqURN   = "urn:oma:lwm2m:ext:3428"
+		distURN = "urn:oma:lwm2m:ext:3330"
+	)
+	raw, err := os.ReadFile("../../assets/config/catalog-seed.json")
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	seed, err := catalog.ParseSeed(raw)
+	if err != nil {
+		t.Fatalf("parse seed: %v", err)
+	}
+	mgr, _, _, rt := mgmtSetup(t)
+	ctx := context.Background()
+	if _, _, err := mgr.SeedCatalog(ctx, seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	greenhouse := catalog.ObjectSpec{
+		ThingID: "greenhouse-a", Tenant: "t", Name: "Växthus A",
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+		Metadata:   map[string]string{"site": "campus"},
+		TemplateID: "greenhouse", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"temperature": {}, "humidity": {}, "co2": {}, "illuminance": {},
+		},
+		Bindings: []things.Binding{
+			{DeviceID: "gh-air", Object: tempURN, Resource: "5700", Input: "temperature"},
+			{DeviceID: "gh-air", Object: humURN, Resource: "5700", Input: "humidity"},
+			{DeviceID: "gh-air", Object: aqURN, Resource: "17", Input: "co2"},
+			{DeviceID: "gh-air", Object: luxURN, Resource: "5700", Input: "illuminance"},
+		},
+	}
+	if _, err := mgr.CreateObject(ctx, "t", greenhouse); err != nil {
+		t.Fatalf("create greenhouse: %v", err)
+	}
+	mkTank := func(id, device string) catalog.ObjectSpec {
+		return catalog.ObjectSpec{
+			ThingID: id, Tenant: "t", Name: "Tank " + id,
+			Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
+			Metadata:   map[string]string{"site": "campus"},
+			TemplateID: "tank", TemplateVersion: "v1",
+			Properties: map[string]things.Property{
+				"ph": {}, "co2": {}, "temperature": {}, "waterLevel": {},
+			},
+			Bindings: []things.Binding{
+				{DeviceID: device, Object: tempURN, Resource: "5700", Input: "temperature"},
+				{DeviceID: device, Object: aqURN, Resource: "17", Input: "co2"},
+				{DeviceID: device, Object: distURN, Resource: "5700", Input: "waterLevel"},
+				{DeviceID: device, Object: "urn:oma:lwm2m:ext:3327", Resource: "5700", Input: "ph"},
+			},
+			Relations: []catalog.RelationRef{{Name: "partOf", TargetThingID: "greenhouse-a", TargetTemplateID: "greenhouse"}},
+		}
+	}
+	for _, obj := range []catalog.ObjectSpec{mkTank("tank-1", "tank-sensor-1"), mkTank("tank-2", "tank-sensor-2")} {
+		if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+			t.Fatalf("create %s: %v", obj.ThingID, err)
+		}
+	}
+
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	f := func(v float64) *float64 { return &v }
+	feed := func(id string, obs []things.Observation, at time.Time) {
+		t.Helper()
+		if _, err := rt.HandleBatch(ctx, "t", id, obs, at); err != nil {
+			t.Fatalf("batch %s: %v", id, err)
+		}
+	}
+	feed("gh1", []things.Observation{
+		{Signal: things.ParseSignalID("gh-air", "", tempURN, "5700"), Value: f(21.0), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("gh-air", "", humURN, "5700"), Value: f(55.0), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("gh-air", "", aqURN, "17"), Value: f(450.0), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("gh-air", "", luxURN, "5700"), Value: f(320.0), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+	}, base)
+	feed("t1", []things.Observation{
+		{Signal: things.ParseSignalID("tank-sensor-1", "", "urn:oma:lwm2m:ext:3327", "5700"), Value: f(6.2), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("tank-sensor-1", "", aqURN, "17"), Value: f(800.0), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("tank-sensor-1", "", tempURN, "5700"), Value: f(18.5), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("tank-sensor-1", "", distURN, "5700"), Value: f(0.8), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+	}, base)
+	feed("t2", []things.Observation{
+		{Signal: things.ParseSignalID("tank-sensor-2", "", "urn:oma:lwm2m:ext:3327", "5700"), Value: f(7.1), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("tank-sensor-2", "", aqURN, "17"), Value: f(820.0), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("tank-sensor-2", "", tempURN, "5700"), Value: f(19.0), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("tank-sensor-2", "", distURN, "5700"), Value: f(0.5), Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+	}, base)
+
+	val := func(thing, prop string, wantV float64) {
+		t.Helper()
+		sum, err := mgr.GetObject(ctx, "t", thing)
+		if err != nil {
+			t.Fatalf("get %s: %v", thing, err)
+		}
+		pv, ok := sum.Values[prop]
+		if !ok || pv.Value == nil || *pv.Value != wantV {
+			t.Fatalf("%s.%s=%+v, want %v", thing, prop, sum.Values[prop], wantV)
+		}
+	}
+	val("tank-1", "ph", 6.2)
+	val("tank-1", "waterLevel", 0.8)
+	val("greenhouse-a", "temperature", 21.0)
+	val("greenhouse-a", "co2", 450.0)
+
+	// Gemensam översikt: växthuset + båda tankarna med värden.
+	ov, err := mgr.Overview(ctx, "t", "greenhouse-a")
+	if err != nil {
+		t.Fatalf("overview: %v", err)
+	}
+	if len(ov.Children) != 2 {
+		t.Fatalf("children=%d, want 2 tanks", len(ov.Children))
+	}
+	for _, child := range ov.Children {
+		ph, ok := child.Values["ph"]
+		if !ok || ph.Value == nil {
+			t.Fatalf("tank %s saknar ph: %+v", child.ThingID, child.Values)
+		}
+	}
+	// Kategorisökning hittar båda tankarna.
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Category: "tank"}); len(got) != 2 {
+		t.Fatalf("tank search=%d, want 2", len(got))
 	}
 }
