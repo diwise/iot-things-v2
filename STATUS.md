@@ -30,16 +30,16 @@
 ## F/D/T/S/R/H/C/L/P/G/E/A/K
 
 - [x] F1-F7 (struktur, ej driftbevis)
-- [x] D1-D2, T1-T10 (grund; versionsdiff före aktivering återstår i API)
+- [x] D1-D2, T1-T10 (inkl. versionsdiff före aktivering via upgrade/preview)
 - [x] S1-S4, R1-R6 (fixtures + recept; geometri-bredd återstår K2)
 - [x] H1-H10 (minneslager + API-filter; DB-constraint återstår)
 - [x] C1-C10 (operatorer + regler; quality-tabell per operator återstår K1)
 - [x] L1-L7 (regler + minnes-outbox + PostgreSQL-PgStore med samma protokolltester; DLX/ack-verifiering i messaging-lib återstår), L8-L10 delvis
-- [x] P1-P9 delvis: katalog publish/list/get enstaka (immutable, ingen update/delete), sak-CRUD, sökning med filter (mall/version/variant/namn) + limit/offset, historik med egenskap + from/to-intervall + limit/offset; underträd/djupgräns återstår
-- [x] P10-P13 delvis (kontrakt + health + thing/history/children; djup återstår)
+- [x] P1-P9: katalog publish/list/get enstaka (immutable, ingen update/delete), sak-CRUD, sökning med filter (mall/version/variant/namn/klassificering/metadata/bbox) + limit/offset + X-Total-Count, historik med egenskap + from/to-intervall + limit/offset, underträd med djupgräns, detach, OpenAPI för /api/v1
+- [x] P10-P13 delvis (kontrakt + health + thing/history/children/tree; konsumentkartläggning återstår E7)
 - [x] G1-G6, G8-G9 (kärna testbar utan broker/DB); G7 delvis (slog utan hemligheter, metrics/tracing återstår)
-- [x] E1 (fixtures); E2-E7 påbörjade (E3 flöde i engine, E4 minnespersistens; transportadapter återstår)
+- [x] E1-E6 (E6-resten: beständig katalog, plats/metadata/sök, träd/detach/total, OpenAPI); E7 påbörjad (isolerad drill + kontraktstester; konsumentomställning återstår)
 - [x] A1/A3-A7 (struktur); A2/A8-A29 delvis via enhetstester (full E2E återstår)
-- [ ] K1-K6 kvarstår delvis: K4-backend klar (retention + beständig katalog-seed återstår, nytt seed-format separat arbete); övriga se kod-TODO + THNGS_NEW.md kap 12
+- [ ] K1-K6 kvarstår delvis: K4-backend + beständig katalog klara (retention + övervakning återstår); övriga se kod-TODO + THNGS_NEW.md kap 12
 
 Review 2026-09-16: 10 fynd fixade (bare-prefix, device-krav, ok/uncertain-strikthet, dedup-tenant, outbox-idempotens, historik-kvalitet, cykelskydd, relationsvalidering, kontrakt-tid/version, API-tester). `gofmt`/`vet`/`test` grönt.

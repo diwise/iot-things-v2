@@ -2,7 +2,7 @@
 
 Ny version av iot-things enligt `../THNGS_NEW.md`. Separat tjänst/installation med **samma struktur och mönster som iot-things**: `cmd/<tjänst>`, `internal/{application,infrastructure,presentation}`, `pkg` för publika kontrakt, `assets`, `deployments`. Samma beroenden och versioner (`service-chassis`, `messaging-golang`, `senml`, `pgx`, `opa`, `otel`).
 
-Status: Etapp 1–4 + K4-persistens (minne + PostgreSQL via PgStore, dedup/outbox/CAS, omstart/dränering), domänkärna, operatorer, flödesregler, HTTP-scaffold och fixtures. Se `STATUS.md` för checklista mot `THNGS_NEW.md` kap 13.
+Status: Etapp 1–6 + K4-persistens (minne + PostgreSQL via PgStore, dedup/outbox/CAS, omstart/dränering, beständig katalog), domänkärna, operatorer, flödesregler, hanterings-API (katalog/sak-CRUD, bindningsbyte, uppgradering, relationer, underträd, historik med intervall+paging, sökning på mall/metadata/plats) och fixtures. Se `STATUS.md` för checklista mot `THNGS_NEW.md` kap 13.
 
 ## Struktur (spegel av iot-things)
 
@@ -13,7 +13,7 @@ Status: Etapp 1–4 + K4-persistens (minne + PostgreSQL via PgStore, dedup/outbo
 - `internal/infrastructure/storage`: `config.go` (`NewConfig`/`ConnStr`, enda väg via cmd-flags), `storage.go` (minnesbackend), `postgres.go` (`PgStore` över pgx + `migrations/`; Timescale-hypertabell när tillägget finns), `memory.go` (things/history/relations/outbox/dedup, tenant-isolering, cykelskydd). Backend väljs i `cmd`: tom `POSTGRES_HOST` ger minne, satt värd ger PostgreSQL.
 - `internal/presentation/api`: `register.go` (`RegisterHandlers` med `router` + OPA-`auth`, scopes `things.create/read/update/delete`, `/api/v1`-prefix), `respond.go` (JSON/ETag-hjälpare), `auth/` (kopierad OPA-middleware från iot-things).
 - `pkg/types`: `things.v1.values`, `things.v1.relations` + `Validate()` (gamla `thing.updated` orörda).
-- `assets/data/fixtures`: bins, rooms+building, greenhouse, sewer. `assets/config`: `authz.rego`, `config.yaml`, `things.csv`. `assets/docs`: `openapi.yaml` (v1-spec återstår).
+- `assets/data/fixtures`: bins, rooms+building, greenhouse, sewer. `assets/config`: `authz.rego`, `config.yaml`, `things.csv`. `assets/docs`: `openapi.yaml` (beskriver `/api/v1`).
 - `deployments/Dockerfile`: samma multi-stage-bygge som iot-things (binary `iot-things-v2`).
 
 ## Verifiering

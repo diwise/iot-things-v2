@@ -1,303 +1,413 @@
 openapi: 3.0.3
 info:
-  title: IoT Things API
-  version: 0.1.0
-  description: API for querying and managing things and thing values.
+  title: IoT Things v2 API
+  version: 1.0.0
+  description: >-
+    Hanterings-API för verksamhetsobjekt (saker) skapade från versionerade
+    mallar. Publicerade mall-/variantversioner är oföränderliga; ändringar
+    av saker kräver aktuell revision via If-Match (svarar 409 vid konflikt)
+    och returnerar ny revision som ETag ("rev-<n>").
 servers:
   - url: /api/v1
 security:
   - bearerAuth: []
 tags:
+  - name: Catalog
   - name: Things
-  - name: Lookup
 paths:
-  /things:
+  /catalog/templates:
     get:
-      tags: [Things]
-      summary: Query things
-      parameters:
-        - name: id
-          in: query
-          schema: { type: string }
-        - name: type
-          in: query
-          style: form
-          explode: true
-          schema:
-            type: array
-            items: { type: string }
-        - name: subtype
-          in: query
-          schema: { type: string }
-        - name: tags
-          in: query
-          style: form
-          explode: true
-          schema:
-            type: array
-            items: { type: string }
-        - name: refdevice
-          in: query
-          schema: { type: string }
-        - $ref: '#/components/parameters/Limit'
-        - $ref: '#/components/parameters/Offset'
-        - name: export
-          in: query
-          schema: { type: boolean }
-        - name: op
-          in: query
-          description: Operator used for numeric field filters such as `v[level]=50`.
-          schema:
-            type: string
-            enum: [eq, ne, gt, lt]
-            default: gt
-        - name: v[field]
-          in: query
-          description: Numeric field filter. Replace `field` with the value field name to filter on.
-          schema: { type: number, format: double }
+      tags: [Catalog]
+      summary: Lista publicerade mallversioner
       responses:
         '200':
-          description: Things returned
+          description: Mallar
           content:
-            application/vnd.api+json:
+            application/json:
               schema:
-                oneOf:
-                  - $ref: '#/components/schemas/ThingCollectionResponse'
-                  - $ref: '#/components/schemas/EmptyArray'
-            text/csv:
-              schema:
-                type: string
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '500': { $ref: '#/components/responses/InternalServerError' }
+                type: array
+                items:
+                  $ref: '#/components/schemas/TemplateSpec'
+        '401': { $ref: '#/components/responses/Unauthorized' }
     post:
-      tags: [Things]
-      summary: Create thing or seed things from file
+      tags: [Catalog]
+      summary: Publicera en mallversion (oföränderlig)
       requestBody:
         required: true
         content:
-          application/vnd.api+json:
-            schema:
-              $ref: '#/components/schemas/Thing'
           application/json:
             schema:
-              $ref: '#/components/schemas/Thing'
-          multipart/form-data:
-            schema:
-              type: object
-              properties:
-                fileupload:
-                  type: string
-                  format: binary
-              required: [fileupload]
+              $ref: '#/components/schemas/TemplateSpec'
       responses:
-        '201': { description: Thing created or seed completed }
+        '201': { description: Mall publicerad }
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '500': { $ref: '#/components/responses/InternalServerError' }
+  /catalog/templates/{id}/{version}:
+    get:
+      tags: [Catalog]
+      summary: Hämta en publicerad mallversion
+      parameters:
+        - $ref: '#/components/parameters/CatalogId'
+        - $ref: '#/components/parameters/CatalogVersion'
+      responses:
+        '200':
+          description: Mall
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateSpec'
+        '404': { $ref: '#/components/responses/NotFound' }
+  /catalog/variants:
+    get:
+      tags: [Catalog]
+      summary: Lista publicerade variantversioner
+      responses:
+        '200':
+          description: Varianter
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/VariantSpec'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Catalog]
+      summary: Publicera en variantversion låst till exakt mallversion
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VariantSpec'
+      responses:
+        '201': { description: Variant publicerad }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /catalog/variants/{id}/{version}:
+    get:
+      tags: [Catalog]
+      summary: Hämta en publicerad variantversion
+      parameters:
+        - $ref: '#/components/parameters/CatalogId'
+        - $ref: '#/components/parameters/CatalogVersion'
+      responses:
+        '200':
+          description: Variant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VariantSpec'
+        '404': { $ref: '#/components/responses/NotFound' }
+  /things:
+    get:
+      tags: [Things]
+      summary: Lista saker med filter och paging
+      parameters:
+        - name: template
+          in: query
+          schema: { type: string }
+        - name: templateVersion
+          in: query
+          schema: { type: string }
+        - name: variant
+          in: query
+          schema: { type: string }
+        - name: name
+          in: query
+          description: Delsträng på namn (skiftlägesokänslig).
+          schema: { type: string }
+        - name: classification
+          in: query
+          schema: { type: string }
+        - name: bbox
+          in: query
+          description: minLon,minLat,maxLon,maxLat (WGS84).
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Offset'
+      responses:
+        '200':
+          description: Saker (totalt antal i X-Total-Count)
+          headers:
+            X-Total-Count:
+              description: Antal träffar före limit/offset.
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ThingSummary'
+        '400': { $ref: '#/components/responses/BadRequest' }
+    post:
+      tags: [Things]
+      summary: Skapa sak från mall/variant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ObjectSpec'
+      responses:
+        '201':
+          description: Sak skapad
+          headers:
+            ETag:
+              schema: { type: string }
+              description: Aktuell revision ("rev-<n>").
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThingSummary'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
   /things/{id}:
     parameters:
       - $ref: '#/components/parameters/ThingId'
     get:
       tags: [Things]
-      summary: Get thing by id
-      parameters:
-        - $ref: '#/components/parameters/ValueId'
-        - name: urn
-          in: query
-          style: form
-          explode: true
-          schema:
-            type: array
-            items: { type: string }
-        - name: refdevice
-          in: query
-          schema: { type: string }
-        - name: n
-          in: query
-          description: Value name filter.
-          schema: { type: string }
-        - $ref: '#/components/parameters/Limit'
-        - $ref: '#/components/parameters/Offset'
-        - $ref: '#/components/parameters/Timerel'
-        - $ref: '#/components/parameters/TimeAt'
-        - $ref: '#/components/parameters/EndTimeAt'
-        - name: value
-          in: query
-          schema: { type: number, format: double }
-        - name: v
-          in: query
-          description: Alias for `value`.
-          schema: { type: number, format: double }
-        - $ref: '#/components/parameters/Operator'
-        - name: vb
-          in: query
-          schema: { type: boolean }
-        - name: timeunit
-          in: query
-          schema:
-            type: string
-            enum: [hour, day]
-        - name: distinct
-          in: query
-          schema:
-            type: string
-            enum: [v, vb]
-        - name: latest
-          in: query
-          schema: { type: boolean }
-        - name: options
-          in: query
-          schema:
-            type: string
-            enum: [groupByID, groupByRef]
+      summary: Hämta sak med aktuella värden
       responses:
         '200':
-          description: Thing returned
+          description: Sak
+          headers:
+            ETag:
+              schema: { type: string }
           content:
-            application/vnd.api+json:
+            application/json:
               schema:
-                $ref: '#/components/schemas/ThingResponse'
-        '400': { $ref: '#/components/responses/BadRequest' }
+                $ref: '#/components/schemas/ThingSummary'
         '404': { $ref: '#/components/responses/NotFound' }
-        '500': { $ref: '#/components/responses/InternalServerError' }
     put:
       tags: [Things]
-      summary: Update thing
+      summary: Uppdatera sak (kräver If-Match)
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
       requestBody:
         required: true
         content:
-          application/vnd.api+json:
-            schema:
-              $ref: '#/components/schemas/Thing'
           application/json:
             schema:
-              $ref: '#/components/schemas/Thing'
+              $ref: '#/components/schemas/ObjectSpec'
       responses:
-        '200': { description: Thing updated }
+        '200':
+          description: Sak uppdaterad
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThingSummary'
         '400': { $ref: '#/components/responses/BadRequest' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '500': { $ref: '#/components/responses/InternalServerError' }
-    patch:
-      tags: [Things]
-      summary: Patch thing
-      requestBody:
-        required: true
-        content:
-          application/vnd.api+json:
-            schema:
-              type: object
-              additionalProperties: true
-          application/json:
-            schema:
-              type: object
-              additionalProperties: true
-      responses:
-        '200': { description: Thing patched }
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '500': { $ref: '#/components/responses/InternalServerError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
     delete:
       tags: [Things]
-      summary: Delete thing
+      summary: Ta bort sak (blockeras med aktiva barn, ingen kaskad)
       responses:
-        '200': { description: Thing deleted }
+        '204': { description: Sak borttagen }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /things/{id}/bindings:
+    put:
+      tags: [Things]
+      summary: Byt sensorkopplingar utan att byta identitet/historik (kräver If-Match)
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bindings]
+              properties:
+                bindings:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Binding'
+      responses:
+        '200':
+          description: Kopplingar bytta
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThingSummary'
         '400': { $ref: '#/components/responses/BadRequest' }
-  /things/tags:
-    get:
-      tags: [Lookup]
-      summary: Get tags
+        '409': { $ref: '#/components/responses/Conflict' }
+  /things/{id}/preview:
+    put:
+      tags: [Things]
+      summary: Förhandsgranska effektiv konfiguration utan att lagra
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ObjectSpec'
       responses:
         '200':
-          description: Tags returned
+          description: Effektiv konfiguration
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/StringCollectionResponse'
-        '500': { $ref: '#/components/responses/InternalServerError' }
-  /things/types:
-    get:
-      tags: [Lookup]
-      summary: Get thing types
+                $ref: '#/components/schemas/EffectiveConfig'
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /things/{id}/move:
+    put:
+      tags: [Things]
+      summary: Flytta barns partOf-förälder atomärt (kräver If-Match)
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [parentId]
+              properties:
+                parentId: { type: string }
       responses:
         '200':
-          description: Thing types returned
+          description: Sak flyttad
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ThingTypeCollectionResponse'
-        '500': { $ref: '#/components/responses/InternalServerError' }
-  /things/values:
+                $ref: '#/components/schemas/ThingSummary'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /things/{id}/parent:
+    delete:
+      tags: [Things]
+      summary: Koppla loss förälder utan att radera barnet (kräver If-Match)
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+        - $ref: '#/components/parameters/IfMatch'
+      responses:
+        '200':
+          description: Sak losskopplad
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThingSummary'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /things/{id}/upgrade/preview:
+    put:
+      tags: [Things]
+      summary: Förhandsgranska versionsuppgradering (diff + konflikter)
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionRef'
+      responses:
+        '200':
+          description: Diff och konflikter
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  diff:
+                    $ref: '#/components/schemas/Diff'
+                  conflicts:
+                    type: array
+                    items: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /things/{id}/upgrade:
+    put:
+      tags: [Things]
+      summary: Aktivera versionsuppgradering (kräver If-Match; force=true tar bort motstridiga val)
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+        - $ref: '#/components/parameters/IfMatch'
+        - name: force
+          in: query
+          schema: { type: boolean }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VersionRef'
+      responses:
+        '200': { description: Uppgradering aktiverad }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /things/{id}/history:
     get:
       tags: [Things]
-      summary: Query thing values
+      summary: Läs egenskapshistorik (äldst först) med tidsintervall och paging
       parameters:
-        - $ref: '#/components/parameters/ValueId'
-        - name: thingid
+        - $ref: '#/components/parameters/ThingId'
+        - name: property
           in: query
+          description: Tom = alla egenskaper.
           schema: { type: string }
-        - name: urn
+        - name: from
           in: query
-          style: form
-          explode: true
-          schema:
-            type: array
-            items: { type: string }
-        - name: refdevice
+          description: Undre mättidsgräns (RFC3339, inklusive).
+          schema: { type: string, format: date-time }
+        - name: to
           in: query
-          schema: { type: string }
-        - name: n
-          in: query
-          description: Value name filter.
-          schema: { type: string }
+          description: Övre mättidsgräns (RFC3339, inklusive).
+          schema: { type: string, format: date-time }
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Offset'
-        - $ref: '#/components/parameters/Timerel'
-        - $ref: '#/components/parameters/TimeAt'
-        - $ref: '#/components/parameters/EndTimeAt'
-        - name: value
-          in: query
-          schema: { type: number, format: double }
-        - name: v
-          in: query
-          description: Alias for `value`.
-          schema: { type: number, format: double }
-        - $ref: '#/components/parameters/Operator'
-        - name: vb
-          in: query
-          schema: { type: boolean }
-        - name: timeunit
-          in: query
-          schema:
-            type: string
-            enum: [hour, day]
-        - name: distinct
-          in: query
-          schema:
-            type: string
-            enum: [v, vb]
-        - name: latest
-          in: query
-          description: Requires `thingid`; cannot be combined with `distinct` or `timeunit`.
-          schema: { type: boolean }
-        - name: options
-          in: query
-          schema:
-            type: string
-            enum: [groupByID, groupByRef]
       responses:
         '200':
-          description: Values returned
+          description: Historikrader
           content:
-            application/vnd.api+json:
+            application/json:
               schema:
-                oneOf:
-                  - $ref: '#/components/schemas/ValueCollectionResponse'
-                  - $ref: '#/components/schemas/GroupedValueCollectionResponse'
-                  - $ref: '#/components/schemas/EmptyArray'
-            text/csv:
-              schema:
-                type: string
+                type: array
+                items:
+                  $ref: '#/components/schemas/HistoryWrite'
         '400': { $ref: '#/components/responses/BadRequest' }
-        '500': { $ref: '#/components/responses/InternalServerError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /things/{id}/overview:
+    get:
+      tags: [Things]
+      summary: Förälder + direkta barns aktuella värden
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+      responses:
+        '200':
+          description: Översikt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Overview'
+        '404': { $ref: '#/components/responses/NotFound' }
+  /things/{id}/tree:
+    get:
+      tags: [Things]
+      summary: Begränsat underträd med aktuella värden
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+        - name: depth
+          in: query
+          description: Barnnivåer att följa (0 = bara saken, max 10, standard 1).
+          schema: { type: integer, minimum: 0, maximum: 10, default: 1 }
+      responses:
+        '200':
+          description: Underträd
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TreeNode'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
 components:
   securitySchemes:
     bearerAuth:
@@ -310,271 +420,335 @@ components:
       in: path
       required: true
       schema: { type: string }
-    ValueId:
+    CatalogId:
       name: id
-      in: query
+      in: path
+      required: true
+      schema: { type: string }
+    CatalogVersion:
+      name: version
+      in: path
+      required: true
       schema: { type: string }
     Limit:
       name: limit
       in: query
-      schema:
-        type: integer
-        minimum: 1
+      description: Max antal rader (0/utelämnad = alla).
+      schema: { type: integer, minimum: 0 }
     Offset:
       name: offset
       in: query
-      schema:
-        type: integer
-        minimum: 0
-    Timerel:
-      name: timerel
-      in: query
-      schema:
-        type: string
-        enum: [before, after, between]
-    TimeAt:
-      name: timeat
-      in: query
-      schema:
-        type: string
-        format: date-time
-    EndTimeAt:
-      name: endtimeat
-      in: query
-      schema:
-        type: string
-        format: date-time
-    Operator:
-      name: op
-      in: query
-      schema:
-        type: string
-        enum: [eq, ne, gt, lt]
+      description: Hoppa över de första raderna.
+      schema: { type: integer, minimum: 0 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Aktuell revision som ETag ("rev-<n>").
+      schema: { type: string }
   responses:
     BadRequest:
-      description: Bad request
+      description: Ogiltig begäran
       content:
-        text/plain:
-          schema: { type: string }
-    Forbidden:
-      description: Forbidden
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Saknar autentisering/behörighet (eller tvetydig tenant)
     NotFound:
-      description: Not found
-    Conflict:
-      description: Conflict
-    InternalServerError:
-      description: Internal server error
+      description: "Okänd resurs (tenant-isolerad: även otillåten läsning ger 404)"
       content:
-        text/plain:
-          schema: { type: string }
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: Versionskonflikt (stale revision) eller oföränderlighetsbrott
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
   schemas:
-    ApiResponse:
+    Error:
       type: object
+      required: [error]
       properties:
-        meta:
-          $ref: '#/components/schemas/Meta'
-        data: {}
-        links:
-          $ref: '#/components/schemas/Links'
-        included:
-          type: array
-          items:
-            $ref: '#/components/schemas/Resource'
-      required: [data]
-    Meta:
+        error: { type: string }
+    Location:
       type: object
+      description: GeoJSON Point eller Polygon (lon/lat, WGS84).
+      required: [type, coordinates]
       properties:
-        totalRecords:
-          type: integer
-          format: uint64
-        offset:
-          type: integer
-          format: uint64
-        limit:
-          type: integer
-          format: uint64
-        count:
-          type: integer
-          format: uint64
-      required: [totalRecords]
-    Links:
-      type: object
-      properties:
-        self: { type: string, format: uri-reference }
-        first: { type: string, format: uri-reference }
-        prev: { type: string, format: uri-reference }
-        next: { type: string, format: uri-reference }
-        last: { type: string, format: uri-reference }
-    Resource:
+        type:
+          type: string
+          enum: [Point, Polygon]
+        coordinates: {}
+    Property:
       type: object
       properties:
         id: { type: string }
-        type: { type: string }
-      required: [id, type]
-    EmptyArray:
-      type: array
-      maxItems: 0
-      items: {}
-    Location:
-      type: object
-      properties:
-        latitude: { type: number, format: double }
-        longitude: { type: number, format: double }
-      required: [latitude, longitude]
-    RefDevice:
-      type: object
-      properties:
-        deviceID: { type: string }
-        measurements:
-          type: object
-          additionalProperties:
-            $ref: '#/components/schemas/Measurement'
-      required: [deviceID]
+        displayName: { type: string }
+        dataType: { type: string }
+        quantity: { type: string }
+        unit: { type: string }
+        description: { type: string }
     Binding:
       type: object
       description: >-
-        Kopplar en signal (enhet, kanal, objekt, resurs) till en namngiven
-        ingang pa saken. Channel tom matchar alla kanaler.
+        Kopplar en signal (enhet, [kanal,] objekt, resurs) till en namngiven
+        ingång. Tom channel matchar alla kanaler.
+      required: [deviceID, object, resource, input]
       properties:
         deviceID: { type: string }
         channel: { type: string }
         object: { type: string }
         resource: { type: string }
         input: { type: string }
-      required: [deviceID, object, resource, input]
-    Thing:
+    RelationSpec:
       type: object
-      additionalProperties: true
+      properties:
+        name: { type: string }
+        allowedTargets:
+          type: array
+          items: { type: string }
+        min: { type: integer }
+        max: { type: integer }
+    Template:
+      type: object
+      required: [id, version]
       properties:
         id: { type: string }
-        type: { type: string }
-        subType: { type: string }
+        version: { type: string }
+        required:
+          type: array
+          items: { type: string }
+        optional:
+          type: array
+          items: { type: string }
+        repeatGroups:
+          type: array
+          items: { type: string }
+        allowedQuantities:
+          type: array
+          items: { type: string }
+        relations:
+          type: array
+          items:
+            $ref: '#/components/schemas/RelationSpec'
+        classification: { type: string }
+        labels:
+          type: array
+          items: { type: string }
+        primaryProperty: { type: string }
+    Recipe:
+      type: object
+      required: [name, operator, inputs, outputs]
+      properties:
         name: { type: string }
-        alternativeName: { type: string }
-        description: { type: string }
+        operator: { type: string }
+        version: { type: string }
+        inputs:
+          type: array
+          items: { type: string }
+        outputs:
+          type: array
+          items: { type: string }
+        params:
+          type: array
+          items: { type: string }
+    TemplateSpec:
+      type: object
+      required: [template]
+      properties:
+        template:
+          $ref: '#/components/schemas/Template'
+        paramDefaults:
+          type: object
+          additionalProperties: { type: number }
+        overridable:
+          type: array
+          items: { type: string }
+        recipes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Recipe'
+        operatorVersions:
+          type: object
+          additionalProperties: { type: string }
+    Variant:
+      type: object
+      required: [id, version, templateId, templateVersion]
+      properties:
+        id: { type: string }
+        version: { type: string }
+        templateId: { type: string }
+        templateVersion: { type: string }
+        paramValues:
+          type: object
+          additionalProperties: { type: number }
+    VariantSpec:
+      type: object
+      required: [variant]
+      properties:
+        variant:
+          $ref: '#/components/schemas/Variant'
+        presetProperties:
+          type: array
+          items: { type: string }
+    RelationRef:
+      type: object
+      required: [name, targetThingId]
+      properties:
+        name: { type: string }
+        targetThingId: { type: string }
+        targetTemplateId: { type: string }
+    ObjectSpec:
+      type: object
+      required: [thingId, templateId, templateVersion]
+      properties:
+        thingId: { type: string }
+        name: { type: string }
+        classification: { type: string }
         location:
           $ref: '#/components/schemas/Location'
-        area:
-          type: array
-          items:
-            type: array
-            items:
-              type: array
-              items: { type: number, format: double }
-        refDevices:
-          type: array
-          description: >-
-            Harledd fran bindningarna (distinkta enheter). Lagras inte.
-          items:
-            $ref: '#/components/schemas/RefDevice'
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        templateId: { type: string }
+        templateVersion: { type: string }
+        variantId: { type: string }
+        variantVersion: { type: string }
+        properties:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/Property'
         bindings:
           type: array
           items:
             $ref: '#/components/schemas/Binding'
-        tags:
+        paramOverrides:
+          type: object
+          additionalProperties: { type: number }
+        relations:
           type: array
-          items: { type: string }
-        tenant: { type: string }
-        observedAt: { type: string, format: date-time }
-        validURN:
-          type: array
-          items: { type: string }
-      required: [id, type, location, tenant]
-    Measurement:
-      type: object
-      properties:
-        id: { type: string }
-        urn: { type: string }
-        vb: { type: boolean, nullable: true }
-        vs: { type: string, nullable: true }
-        v: { type: number, format: double, nullable: true }
-        unit: { type: string }
-        timestamp: { type: string, format: date-time }
-        source: { type: string, nullable: true }
-        ref: { type: string }
-      required: [timestamp]
-    Value:
+          items:
+            $ref: '#/components/schemas/RelationRef'
+    EffectiveConfig:
       allOf:
-        - $ref: '#/components/schemas/Measurement'
+        - $ref: '#/components/schemas/ObjectSpec'
         - type: object
           properties:
-            ref: { type: string }
-    ThingType:
-      type: object
-      properties:
-        type: { type: string }
-        subType: { type: string }
-        name: { type: string }
-        inputs:
-          type: array
-          description: >-
-            Saktypens namngivna ingangar. Anvands for att konfigurera
-            bindningar i ett GUI.
-          items: { type: string }
-      required: [type, name]
-    ThingResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              allOf:
-                - $ref: '#/components/schemas/Thing'
-                - type: object
-                  properties:
-                    values:
-                      oneOf:
-                        - type: array
-                          items:
-                            $ref: '#/components/schemas/Value'
-                        - type: object
-                          additionalProperties:
-                            type: array
-                            items:
-                              $ref: '#/components/schemas/Value'
-    ThingCollectionResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/Thing'
-    ValueCollectionResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              type: array
-              items:
-                $ref: '#/components/schemas/Value'
-    GroupedValueCollectionResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
+            paramValues:
+              type: object
+              additionalProperties: { type: number }
+            paramSources:
               type: object
               additionalProperties:
-                type: array
-                items:
-                  $ref: '#/components/schemas/Value'
-    StringCollectionResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
-              type: array
-              items: { type: string }
-    ThingTypeCollectionResponse:
-      allOf:
-        - $ref: '#/components/schemas/ApiResponse'
-        - type: object
-          properties:
-            data:
+                type: string
+                enum: [template, variant, thing]
+            recipes:
               type: array
               items:
-                $ref: '#/components/schemas/ThingType'
+                $ref: '#/components/schemas/Recipe'
+    PropertyValue:
+      type: object
+      required: [propertyId, observedAt]
+      properties:
+        propertyId: { type: string }
+        displayName: { type: string }
+        value: { type: number, nullable: true }
+        quality:
+          type: string
+          enum: [ok, uncertain, invalid]
+        unit: { type: string }
+        observedAt: { type: string, format: date-time }
+        source: { type: string }
+    ThingSummary:
+      type: object
+      required: [thingId, tenant, templateId, templateVersion, revision]
+      properties:
+        thingId: { type: string }
+        tenant: { type: string }
+        name: { type: string }
+        classification: { type: string }
+        location:
+          $ref: '#/components/schemas/Location'
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        templateId: { type: string }
+        templateVersion: { type: string }
+        variantId: { type: string }
+        variantVersion: { type: string }
+        revision: { type: integer }
+        values:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/PropertyValue'
+        paramValues:
+          type: object
+          additionalProperties: { type: number }
+        paramSources:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [template, variant, thing]
+    HistoryWrite:
+      type: object
+      required: [propertyId, observedAt, receivedAt]
+      properties:
+        propertyId: { type: string }
+        value: { type: number, nullable: true }
+        quality:
+          type: string
+          enum: [ok, uncertain, invalid]
+        observedAt: { type: string, format: date-time }
+        receivedAt: { type: string, format: date-time }
+        source: { type: string }
+        messageId: { type: string }
+        late: { type: boolean }
+    VersionRef:
+      type: object
+      required: [templateId, templateVersion]
+      properties:
+        templateId: { type: string }
+        templateVersion: { type: string }
+        variantId: { type: string }
+        variantVersion: { type: string }
+    Diff:
+      type: object
+      properties:
+        addedProperties:
+          type: array
+          items: { type: string }
+        removedProperties:
+          type: array
+          items: { type: string }
+        addedParams:
+          type: array
+          items: { type: string }
+        removedParams:
+          type: array
+          items: { type: string }
+        changedRecipes:
+          type: array
+          items: { type: string }
+    Overview:
+      type: object
+      required: [thing]
+      properties:
+        thing:
+          $ref: '#/components/schemas/ThingSummary'
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/ThingSummary'
+    TreeNode:
+      type: object
+      required: [thing]
+      properties:
+        thing:
+          $ref: '#/components/schemas/ThingSummary'
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/TreeNode'
