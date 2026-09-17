@@ -6,7 +6,11 @@ info:
     Hanterings-API för verksamhetsobjekt (saker) skapade från versionerade
     mallar. Publicerade mall-/variantversioner är oföränderliga; ändringar
     av saker kräver aktuell revision via If-Match (svarar 409 vid konflikt)
-    och returnerar ny revision som ETag ("rev-<n>").
+    och returnerar ny revision som ETag ("rev-<n>"). Alla saker kräver namn,
+    plats, metadata och kategori (ärvd från mallen eller egen).
+    Användare med flera tenants väljer en explicit via ?tenant= på samtliga
+    endpoints; utan väljare svarar tvetydiga anrop 400 och läsningar slås
+    aldrig ihop över tenants.
 servers:
   - url: /api/v1
 security:
@@ -104,6 +108,7 @@ paths:
       tags: [Things]
       summary: Lista saker med filter och paging
       parameters:
+        - $ref: '#/components/parameters/Tenant'
         - name: template
           in: query
           schema: { type: string }
@@ -117,7 +122,7 @@ paths:
           in: query
           description: Delsträng på namn (skiftlägesokänslig).
           schema: { type: string }
-        - name: classification
+        - name: category
           in: query
           schema: { type: string }
         - name: bbox
@@ -435,6 +440,11 @@ components:
       in: query
       description: Max antal rader (0/utelämnad = alla).
       schema: { type: integer, minimum: 0 }
+    Tenant:
+      name: tenant
+      in: query
+      description: Välj tenant för fler-tenant-användare (krävs vid tvetydighet, gäller samtliga endpoints).
+      schema: { type: string }
     Offset:
       name: offset
       in: query
@@ -534,7 +544,7 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RelationSpec'
-        classification: { type: string }
+        category: { type: string }
         labels:
           type: array
           items: { type: string }
@@ -603,11 +613,11 @@ components:
         targetTemplateId: { type: string }
     ObjectSpec:
       type: object
-      required: [thingId, templateId, templateVersion]
+      required: [thingId, name, location, metadata, templateId, templateVersion]
       properties:
         thingId: { type: string }
         name: { type: string }
-        classification: { type: string }
+        category: { type: string }
         location:
           $ref: '#/components/schemas/Location'
         metadata:
@@ -664,12 +674,12 @@ components:
         source: { type: string }
     ThingSummary:
       type: object
-      required: [thingId, tenant, templateId, templateVersion, revision]
+      required: [thingId, tenant, name, location, metadata, category, templateId, templateVersion, revision]
       properties:
         thingId: { type: string }
         tenant: { type: string }
         name: { type: string }
-        classification: { type: string }
+        category: { type: string }
         location:
           $ref: '#/components/schemas/Location'
         metadata:

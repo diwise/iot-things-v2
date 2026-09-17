@@ -65,7 +65,7 @@ type ObjectSpec struct {
 	ThingID         string                     `json:"thingId"`
 	Tenant          string                     `json:"tenant,omitempty"`
 	Name            string                     `json:"name,omitempty"`
-	Classification  string                     `json:"classification,omitempty"`
+	Category        string                     `json:"category,omitempty"`
 	Location        *things.Location           `json:"location,omitempty"`
 	Metadata        map[string]string          `json:"metadata,omitempty"`
 	TemplateID      string                     `json:"templateId"`
@@ -91,7 +91,7 @@ type ResolvedRelation struct {
 type EffectiveConfig struct {
 	ThingID         string                        `json:"thingId,omitempty"`
 	Name            string                        `json:"name,omitempty"`
-	Classification  string                        `json:"classification,omitempty"`
+	Category        string                        `json:"category,omitempty"`
 	Location        *things.Location              `json:"location,omitempty"`
 	Metadata        map[string]string             `json:"metadata,omitempty"`
 	TemplateID      string                        `json:"templateId"`
@@ -481,6 +481,19 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 	if obj.TemplateID == "" || obj.TemplateVersion == "" {
 		return nil, fmt.Errorf("%w: object %q must reference a template version", things.ErrValidation, obj.ThingID)
 	}
+	// Beskrivande fält är obligatoriska för alla saker: namn, plats,
+	// metadata och kategori. Bindningar och relationer förblir valfria:
+	// överordnade objekt kan sakna egna sensorer och fristående objekt
+	// sakna föräldrar.
+	if strings.TrimSpace(obj.Name) == "" {
+		return nil, fmt.Errorf("%w: object %q must have a name", things.ErrValidation, obj.ThingID)
+	}
+	if obj.Location == nil {
+		return nil, fmt.Errorf("%w: object %q must have a location", things.ErrValidation, obj.ThingID)
+	}
+	if len(obj.Metadata) == 0 {
+		return nil, fmt.Errorf("%w: object %q must have metadata", things.ErrValidation, obj.ThingID)
+	}
 
 	c.mu.RLock()
 	tmpl, ok := c.templates[versionKey(obj.TemplateID, obj.TemplateVersion)]
@@ -561,15 +574,18 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 		props[id] = prop
 	}
 
-	classification := obj.Classification
-	if classification == "" {
-		classification = t.Classification
+	category := obj.Category
+	if category == "" {
+		category = t.Category
+	}
+	if category == "" {
+		return nil, fmt.Errorf("%w: object %q must have a category (thing or template)", things.ErrValidation, obj.ThingID)
 	}
 
 	return &EffectiveConfig{
 		ThingID:         obj.ThingID,
 		Name:            obj.Name,
-		Classification:  classification,
+		Category:        category,
 		Location:        cloneLocation(obj.Location),
 		Metadata:        cloneStringMap(obj.Metadata),
 		TemplateID:      obj.TemplateID,

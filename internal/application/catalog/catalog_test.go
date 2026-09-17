@@ -25,6 +25,7 @@ func wastebinTemplate() TemplateSpec {
 			Version:      "v1",
 			Required:     []string{"distance", "level", "fillRate"},
 			RepeatGroups: []string{},
+			Category:     "wastebin",
 		},
 		ParamDefaults: map[string]float64{"usableHeight": 1.0, "sensorToBottom": 1.5},
 		Overridable:   []string{"sensorToBottom"},
@@ -34,6 +35,14 @@ func wastebinTemplate() TemplateSpec {
 				Params: []string{"sensorToBottom"}},
 		},
 	}
+}
+
+func testLocation() *things.Location {
+	return &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)}
+}
+
+func testMetadata() map[string]string {
+	return map[string]string{"test": "true"}
 }
 
 func seedBins(t *testing.T, c *Catalog) {
@@ -58,6 +67,7 @@ func TestFourBinsShareRecipe(t *testing.T) {
 	for id, h := range map[string]float64{"wastebin-A": 0.8, "wastebin-B": 1.2, "wastebin-C": 1.5, "wastebin-D": 1.8} {
 		cfg, err := c.Compile(ObjectSpec{
 			ThingID: "bin-" + id, Tenant: "t", Name: "bin",
+			Location: testLocation(), Metadata: testMetadata(),
 			TemplateID: "wastebin", TemplateVersion: "v1",
 			VariantID: id, VariantVersion: "v1",
 			Properties: map[string]things.Property{
@@ -85,7 +95,7 @@ func TestParamPrecedenceWithOrigin(t *testing.T) {
 	c := New()
 	seedBins(t, c)
 	cfg, err := c.Compile(ObjectSpec{
-		ThingID: "bin-42", Tenant: "t",
+		ThingID: "bin-42", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		VariantID: "wastebin-B", VariantVersion: "v1",
 		Properties: map[string]things.Property{
@@ -113,7 +123,7 @@ func TestPublishedVersionsImmutable(t *testing.T) {
 		t.Fatal("republishing identical template version must conflict")
 	}
 	before, err := c.Compile(ObjectSpec{
-		ThingID: "bin-1", Tenant: "t",
+		ThingID: "bin-1", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"distance": {}, "level": {}, "fillRate": {},
@@ -129,7 +139,7 @@ func TestPublishedVersionsImmutable(t *testing.T) {
 		t.Fatalf("put v2: %v", err)
 	}
 	after, err := c.Compile(ObjectSpec{
-		ThingID: "bin-1", Tenant: "t",
+		ThingID: "bin-1", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"distance": {}, "level": {}, "fillRate": {},
@@ -150,6 +160,7 @@ func roomTemplate() TemplateSpec {
 			Version:      "v1",
 			RepeatGroups: []string{"temperature."},
 			Optional:     []string{"humidity", "illuminance", "temperature.average"},
+			Category:     "room",
 			Relations: []things.RelationSpec{
 				{Name: "partOf", AllowedTargets: []string{"building"}, Min: 0, Max: 1},
 			},
@@ -163,7 +174,7 @@ func TestTwoRoomsSameTemplate(t *testing.T) {
 		t.Fatalf("put room: %v", err)
 	}
 	a, err := c.Compile(ObjectSpec{
-		ThingID: "room-a", Tenant: "t",
+		ThingID: "room-a", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"temperature.window": {}, "temperature.center": {},
@@ -179,7 +190,7 @@ func TestTwoRoomsSameTemplate(t *testing.T) {
 		t.Fatalf("compile room-a: %v", err)
 	}
 	b, err := c.Compile(ObjectSpec{
-		ThingID: "room-b", Tenant: "t",
+		ThingID: "room-b", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"temperature.window": {}, "temperature.center": {},
@@ -213,7 +224,7 @@ func TestClosedTemplateRejects(t *testing.T) {
 		{"bare-prefix", map[string]things.Property{"temperature.": {}}},
 	} {
 		_, err := c.Compile(ObjectSpec{
-			ThingID: "room-x", Tenant: "t",
+			ThingID: "room-x", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 			TemplateID: "room", TemplateVersion: "v1",
 			Properties: tc.props,
 		})
@@ -222,7 +233,7 @@ func TestClosedTemplateRejects(t *testing.T) {
 		}
 	}
 	_, err := c.Compile(ObjectSpec{
-		ThingID: "room-x", Tenant: "t",
+		ThingID: "room-x", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"temperature.window": {}},
 		Bindings:   []things.Binding{{Object: urnTemp, Resource: "5700", Input: "temperature.window"}},
@@ -259,7 +270,7 @@ func TestUpgradePreviewKeepsOverridesVisible(t *testing.T) {
 	c := New()
 	seedBins(t, c)
 	obj := ObjectSpec{
-		ThingID: "bin-42", Tenant: "t",
+		ThingID: "bin-42", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		VariantID: "wastebin-B", VariantVersion: "v1",
 		Properties: map[string]things.Property{
@@ -302,6 +313,7 @@ func TestRelationsValidatedAgainstTemplate(t *testing.T) {
 	c := New()
 	building := TemplateSpec{Template: things.Template{
 		ID: "building", Version: "v1",
+		Category: "building",
 		Relations: []things.RelationSpec{
 			{Name: "rooms", AllowedTargets: []string{"room"}, Min: 0, Max: 10},
 		},
@@ -313,7 +325,7 @@ func TestRelationsValidatedAgainstTemplate(t *testing.T) {
 		t.Fatalf("put room: %v", err)
 	}
 	_, err := c.Compile(ObjectSpec{
-		ThingID: "building-a", Tenant: "t",
+		ThingID: "building-a", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 		Relations: []RelationRef{
@@ -325,7 +337,7 @@ func TestRelationsValidatedAgainstTemplate(t *testing.T) {
 		t.Fatal("disallowed relation target must be rejected")
 	}
 	cfg, err := c.Compile(ObjectSpec{
-		ThingID: "building-a", Tenant: "t",
+		ThingID: "building-a", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 		Relations: []RelationRef{
@@ -368,7 +380,7 @@ func TestStoredVersionsAreCopies(t *testing.T) {
 	}
 	// Compiled recipes must be deep copies as well.
 	cfg, err := c.Compile(ObjectSpec{
-		ThingID: "bin-1", Tenant: "t",
+		ThingID: "bin-1", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
 	})
@@ -382,7 +394,7 @@ func TestStoredVersionsAreCopies(t *testing.T) {
 		t.Fatal("Compile exposed shared recipe inputs")
 	}
 	cfg2, err := c.Compile(ObjectSpec{
-		ThingID: "bin-1", Tenant: "t",
+		ThingID: "bin-1", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
 	})
@@ -433,7 +445,7 @@ func TestValidationErrorsWrap(t *testing.T) {
 		}},
 		{"compile-unknown-prop", func() error {
 			_, err := c.Compile(ObjectSpec{
-				ThingID: "bin-1", Tenant: "t",
+				ThingID: "bin-1", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 				TemplateID: "wastebin", TemplateVersion: "v1",
 				Properties: map[string]things.Property{"nope": {}},
 			})
@@ -441,7 +453,7 @@ func TestValidationErrorsWrap(t *testing.T) {
 		}},
 		{"compile-bad-binding", func() error {
 			_, err := c.Compile(ObjectSpec{
-				ThingID: "bin-1", Tenant: "t",
+				ThingID: "bin-1", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 				TemplateID: "wastebin", TemplateVersion: "v1",
 				Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
 				Bindings:   []things.Binding{{DeviceID: "", Object: urnDistance, Resource: "5700", Input: "distance"}},
@@ -450,7 +462,7 @@ func TestValidationErrorsWrap(t *testing.T) {
 		}},
 		{"override-unknown", func() error {
 			_, err := c.Compile(ObjectSpec{
-				ThingID: "bin-1", Tenant: "t",
+				ThingID: "bin-1", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 				TemplateID: "wastebin", TemplateVersion: "v1",
 				Properties:     map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
 				ParamOverrides: map[string]float64{"noSuch": 1},
@@ -459,7 +471,7 @@ func TestValidationErrorsWrap(t *testing.T) {
 		}},
 		{"override-not-overridable", func() error {
 			_, err := c.Compile(ObjectSpec{
-				ThingID: "bin-1", Tenant: "t",
+				ThingID: "bin-1", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 				TemplateID: "wastebin", TemplateVersion: "v1",
 				Properties:     map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
 				ParamOverrides: map[string]float64{"usableHeight": 2},
@@ -496,6 +508,7 @@ func TestRelationsMinMaxSelfRef(t *testing.T) {
 	c := New()
 	tmpl := TemplateSpec{Template: things.Template{
 		ID: "building", Version: "v1",
+		Category: "building",
 		Relations: []things.RelationSpec{
 			{Name: "rooms", AllowedTargets: []string{"room"}, Min: 1, Max: 1},
 		},
@@ -505,7 +518,7 @@ func TestRelationsMinMaxSelfRef(t *testing.T) {
 	}
 	// Min violation: no relations while Min=1.
 	if _, err := c.Compile(ObjectSpec{
-		ThingID: "building-a", Tenant: "t",
+		ThingID: "building-a", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 	}); err == nil {
@@ -513,7 +526,7 @@ func TestRelationsMinMaxSelfRef(t *testing.T) {
 	}
 	// Max violation: two relations while Max=1.
 	if _, err := c.Compile(ObjectSpec{
-		ThingID: "building-a", Tenant: "t",
+		ThingID: "building-a", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 		Relations: []RelationRef{
@@ -525,7 +538,7 @@ func TestRelationsMinMaxSelfRef(t *testing.T) {
 	}
 	// Self reference.
 	if _, err := c.Compile(ObjectSpec{
-		ThingID: "building-a", Tenant: "t",
+		ThingID: "building-a", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 		Relations: []RelationRef{
@@ -536,7 +549,7 @@ func TestRelationsMinMaxSelfRef(t *testing.T) {
 	}
 	// Unknown slot.
 	if _, err := c.Compile(ObjectSpec{
-		ThingID: "building-a", Tenant: "t",
+		ThingID: "building-a", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 		Relations: []RelationRef{
@@ -551,7 +564,7 @@ func TestPreviewFlagsNonOverridableAndRecipeIO(t *testing.T) {
 	c := New()
 	seedBins(t, c)
 	obj := ObjectSpec{
-		ThingID: "bin-42", Tenant: "t",
+		ThingID: "bin-42", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		VariantID: "wastebin-B", VariantVersion: "v1",
 		Properties:     map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
@@ -605,7 +618,7 @@ func TestPreviewVariantPinMismatch(t *testing.T) {
 		t.Fatalf("put v2: %v", err)
 	}
 	obj := ObjectSpec{
-		ThingID: "bin-42", Tenant: "t",
+		ThingID: "bin-42", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		VariantID: "wastebin-B", VariantVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
@@ -622,10 +635,12 @@ func TestPreviewRelationConflicts(t *testing.T) {
 	c := New()
 	v1 := TemplateSpec{Template: things.Template{
 		ID: "building", Version: "v1",
+		Category:  "building",
 		Relations: []things.RelationSpec{{Name: "rooms", AllowedTargets: []string{"room"}, Min: 0, Max: 10}},
 	}}
 	v2 := TemplateSpec{Template: things.Template{
 		ID: "building", Version: "v2",
+		Category:  "building",
 		Relations: []things.RelationSpec{{Name: "rooms", AllowedTargets: []string{"office"}, Min: 0, Max: 10}},
 	}}
 	if err := c.PutTemplate(v1); err != nil {
@@ -635,7 +650,7 @@ func TestPreviewRelationConflicts(t *testing.T) {
 		t.Fatalf("put v2: %v", err)
 	}
 	obj := ObjectSpec{
-		ThingID: "building-a", Tenant: "t",
+		ThingID: "building-a", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 		Relations:  []RelationRef{{Name: "rooms", TargetThingID: "room-a", TargetTemplateID: "room"}},
@@ -661,7 +676,7 @@ func TestConcurrentReadWrite(t *testing.T) {
 			defer wg.Done()
 			_, _ = c.GetTemplate("wastebin", "v1")
 			_, _ = c.Compile(ObjectSpec{
-				ThingID: "bin-1", Tenant: "t",
+				ThingID: "bin-1", Tenant: "t", Name: "Test", Location: testLocation(), Metadata: testMetadata(),
 				TemplateID: "wastebin", TemplateVersion: "v1",
 				Properties: map[string]things.Property{"distance": {}, "level": {}, "fillRate": {}},
 			})
@@ -694,10 +709,10 @@ func TestRestore(t *testing.T) {
 	}
 }
 
-func TestCompileLocationMetadataClassification(t *testing.T) {
+func TestCompileLocationMetadataCategory(t *testing.T) {
 	c := New()
 	tmpl := wastebinTemplate()
-	tmpl.Template.Classification = "wastebin"
+	tmpl.Template.Category = "wastebin"
 	tmpl.Template.Labels = []string{"Avfall"}
 	if err := c.PutTemplate(tmpl); err != nil {
 		t.Fatalf("publish: %v", err)
@@ -716,8 +731,8 @@ func TestCompileLocationMetadataClassification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
-	if cfg.Classification != "wastebin" {
-		t.Fatalf("classification=%q, want inherited wastebin", cfg.Classification)
+	if cfg.Category != "wastebin" {
+		t.Fatalf("category=%q, want inherited wastebin", cfg.Category)
 	}
 	if cfg.Location == nil || cfg.Location.Type != "Point" {
 		t.Fatalf("location=%+v, want point", cfg.Location)
@@ -741,13 +756,13 @@ func TestCompileLocationMetadataClassification(t *testing.T) {
 	}
 	override := obj
 	override.ThingID = "bin-43"
-	override.Classification = "custom"
+	override.Category = "custom"
 	cfg2, err := c.Compile(override)
 	if err != nil {
 		t.Fatalf("compile override: %v", err)
 	}
-	if cfg2.Classification != "custom" {
-		t.Fatalf("classification=%q, want custom", cfg2.Classification)
+	if cfg2.Category != "custom" {
+		t.Fatalf("category=%q, want custom", cfg2.Category)
 	}
 }
 
@@ -803,5 +818,56 @@ func TestSeedFileRejectsObjects(t *testing.T) {
 	}
 	if _, err := ParseSeed([]byte(`{"templates": []}`)); err != nil {
 		t.Fatalf("templates-only seed: %v", err)
+	}
+}
+
+// Alla saker kräver namn, plats, metadata och kategori (ärvd eller egen).
+func TestCompileRequiresDescriptiveFields(t *testing.T) {
+	c := New()
+	if err := c.PutTemplate(wastebinTemplate()); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	base := ObjectSpec{
+		ThingID: "bin-42", Tenant: "t", Name: "Soptunna 42",
+		Location: testLocation(), Metadata: testMetadata(),
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance": {}, "level": {}, "fillRate": {},
+		},
+	}
+	if _, err := c.Compile(base); err != nil {
+		t.Fatalf("valid object: %v", err)
+	}
+	cases := map[string]func(*ObjectSpec){
+		"namnlös":      func(o *ObjectSpec) { o.Name = "  " },
+		"platslös":     func(o *ObjectSpec) { o.Location = nil },
+		"metadatalös":  func(o *ObjectSpec) { o.Metadata = nil },
+		"tom metadata": func(o *ObjectSpec) { o.Metadata = map[string]string{} },
+	}
+	for name, mutate := range cases {
+		obj := base
+		mutate(&obj)
+		if _, err := c.Compile(obj); err == nil {
+			t.Fatalf("%s must fail", name)
+		}
+	}
+
+	// Kategori vare sig på sak eller mall nekas.
+	bare := TemplateSpec{Template: things.Template{
+		ID: "bare", Version: "v1", Required: []string{"p"},
+	}}
+	if err := c.PutTemplate(bare); err != nil {
+		t.Fatalf("publish bare: %v", err)
+	}
+	obj := base
+	obj.ThingID = "bare-1"
+	obj.TemplateID = "bare"
+	obj.Properties = map[string]things.Property{"p": {}}
+	if _, err := c.Compile(obj); err == nil {
+		t.Fatal("missing category must fail")
+	}
+	obj.Category = "custom"
+	if _, err := c.Compile(obj); err != nil {
+		t.Fatalf("explicit category: %v", err)
 	}
 }

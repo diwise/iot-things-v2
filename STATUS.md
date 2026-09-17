@@ -2,6 +2,17 @@
 
 `[x]` = infört + testat i denna repo. `[ ]` = återstår (se TODO i kod).
 
+## Tillämpade beslut efter 2026-09-16
+
+- Obligatoriska sakfält: `name`, `location`, `metadata` (minst en post) och
+  `category` (egen eller ärvd från mallen) valideras i Compile. Bindningar
+  och relationer förblir valfria: sensorlösa överobjekt och fristående
+  objekt är giltiga enligt THNGS_NEW kap 5.
+- `classification` heter `category` i kod/API (v2 ej i produktion;
+  svenska dokument behåller "klassificering").
+- Fler-tenant-användare väljer tenant explicit med `?tenant=` på samtliga
+  endpoints; utan väljare ger tvetydighet 400, läsningar slås aldrig ihop.
+
 ## B – Beslut
 
 - [x] B1 Sluten mall (inkl. bart-prefix-fix)

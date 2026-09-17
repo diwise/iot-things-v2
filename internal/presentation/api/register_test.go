@@ -39,6 +39,14 @@ func v0setup(t *testing.T) (*handler, *application.Manager, *application.Runtime
 	return &handler{mgr: mgr}, mgr, rt
 }
 
+func v0loc() *things.Location {
+	return &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)}
+}
+
+func v0meta() map[string]string {
+	return map[string]string{"test": "true"}
+}
+
 func v0wastebin(t *testing.T, h *handler) {
 	t.Helper()
 	ctx := v0ctx("t")
@@ -46,6 +54,7 @@ func v0wastebin(t *testing.T, h *handler) {
 		Template: things.Template{
 			ID: "wastebin", Version: "v1",
 			Required: []string{"distance", "level", "fillRate"},
+			Category: "wastebin",
 		},
 		ParamDefaults: map[string]float64{"usableHeight": 1.0, "sensorToBottom": 1.5},
 		Overridable:   []string{"sensorToBottom"},
@@ -74,6 +83,7 @@ func v0wastebin(t *testing.T, h *handler) {
 func v0binObject() catalog.ObjectSpec {
 	return catalog.ObjectSpec{
 		ThingID: "bin-42", Name: "Soptunna 42",
+		Location: v0loc(), Metadata: v0meta(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		VariantID: "wastebin-B", VariantVersion: "v1",
 		Properties: map[string]things.Property{
@@ -239,6 +249,7 @@ func TestV0UpgradeMoveDelete(t *testing.T) {
 		Template: things.Template{
 			ID: "wastebin", Version: "v2",
 			Required: []string{"distance", "level", "fillRate"},
+			Category: "wastebin",
 		},
 		ParamDefaults: map[string]float64{"usableHeight": 1.0},
 		Recipes: []catalog.Recipe{
@@ -440,6 +451,7 @@ func TestV0MoveRequiresIfMatch(t *testing.T) {
 	roomTmpl := catalog.TemplateSpec{
 		Template: things.Template{
 			ID: "room", Version: "v1",
+			Category:     "room",
 			RepeatGroups: []string{"temperature."},
 			Relations: []things.RelationSpec{
 				{Name: "partOf", AllowedTargets: []string{"building"}, Min: 0, Max: 1},
@@ -450,13 +462,14 @@ func TestV0MoveRequiresIfMatch(t *testing.T) {
 		t.Fatalf("publish room: %d %s", rr.Code, rr.Body.String())
 	}
 	if rr := doJSON(h.publishTemplate, ctx, "", catalog.TemplateSpec{
-		Template: things.Template{ID: "building", Version: "v1"},
+		Template: things.Template{ID: "building", Version: "v1", Category: "building"},
 	}, ""); rr.Code != http.StatusCreated {
 		t.Fatalf("publish building: %d %s", rr.Code, rr.Body.String())
 	}
 	mkObj := func(id, parent string) catalog.ObjectSpec {
 		obj := catalog.ObjectSpec{
 			ThingID: id, TemplateID: "room", TemplateVersion: "v1",
+			Name: id, Location: v0loc(), Metadata: v0meta(),
 			Properties: map[string]things.Property{"temperature.window": {}},
 			Bindings: []things.Binding{
 				{DeviceID: "s-" + id, Object: v0TempURN, Resource: "5700", Input: "temperature.window"},
@@ -469,6 +482,7 @@ func TestV0MoveRequiresIfMatch(t *testing.T) {
 	}
 	bldg := catalog.ObjectSpec{
 		ThingID: "b1", TemplateID: "building", TemplateVersion: "v1",
+		Name: "Byggnad 1", Location: v0loc(), Metadata: v0meta(),
 		Properties: map[string]things.Property{},
 	}
 	if rr := doJSON(h.createThing, ctx, "", bldg, ""); rr.Code != http.StatusCreated {
@@ -627,23 +641,23 @@ func TestV0SearchLocationMetadata(t *testing.T) {
 	ctx := v0ctx("t")
 	v0wastebin(t, h)
 	obj := v0binObject()
-	obj.Classification = "wastebin"
+	obj.Category = "wastebin"
 	obj.Metadata = map[string]string{"district": "centrum"}
 	obj.Location = &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)}
 	if rr := doJSON(h.createThing, ctx, "", obj, ""); rr.Code != http.StatusCreated {
 		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
 	}
 
-	rr := doGET(h.searchThings, ctx, "", "classification=wastebin")
+	rr := doGET(h.searchThings, ctx, "", "category=wastebin")
 	if rr.Code != http.StatusOK {
-		t.Fatalf("search classification: %d %s", rr.Code, rr.Body.String())
+		t.Fatalf("search category: %d %s", rr.Code, rr.Body.String())
 	}
 	var found []application.ThingSummary
 	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if len(found) != 1 || found[0].Location == nil {
-		t.Fatalf("search classification=%+v, want bin with location", found)
+		t.Fatalf("search category=%+v, want bin with location", found)
 	}
 	rr = doGET(h.searchThings, ctx, "", "meta.district=centrum")
 	if rr.Code != http.StatusOK {
@@ -736,4 +750,60 @@ func TestV0TreeUnlinkTotal(t *testing.T) {
 	if rr := doJSON(h.unlinkThing, ro, "bin-42", nil, etag); rr.Code != http.StatusUnauthorized {
 		t.Fatalf("read-only unlink=%d, want 401", rr.Code)
 	}
+}
+
+// Fler-tenant-användare väljer tenant explicit via ?tenant=.
+func TestV0MultiTenantSelector(t *testing.T) {
+	h, _, _ := v0setup(t)
+	v0wastebin(t, h)
+	multi := auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		"t1": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+		"t2": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+	})
+	obj := v0binObject()
+	obj.ThingID = "bin-t1"
+	if rr := doJSONTenant(h.createThing, multi, "", obj, "", "t1"); rr.Code != http.StatusCreated {
+		t.Fatalf("create in t1: %d %s", rr.Code, rr.Body.String())
+	}
+	// Utan väljare: tvetydigt även vid läsning.
+	if rr := doGET(h.getThing, multi, "bin-t1", ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous get=%d, want 400", rr.Code)
+	}
+	// Med väljare: läsning i rätt tenant, 404 i fel.
+	if rr := doGET(h.getThing, multi, "bin-t1", "tenant=t1"); rr.Code != http.StatusOK {
+		t.Fatalf("selected get=%d, want 200", rr.Code)
+	}
+	if rr := doGET(h.getThing, multi, "bin-t1", "tenant=t2"); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant get=%d, want 404", rr.Code)
+	}
+	// Väljare utanför behörighet nekas.
+	if rr := doGET(h.getThing, multi, "bin-t1", "tenant=other"); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("foreign tenant=%d, want 401", rr.Code)
+	}
+	// En-tenant-användare med fel väljare nekas.
+	if rr := doGET(h.getThing, v0ctx("t1"), "bin-t1", "tenant=t2"); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong selector=%d, want 401", rr.Code)
+	}
+}
+
+func doJSONTenant(fn func(http.ResponseWriter, *http.Request), ctx context.Context, id string, body any, ifMatch, tenant string) *httptest.ResponseRecorder {
+	var buf bytes.Buffer
+	if body != nil {
+		_ = json.NewEncoder(&buf).Encode(body)
+	}
+	target := "/x"
+	if tenant != "" {
+		target += "?tenant=" + tenant
+	}
+	req := httptest.NewRequest(http.MethodPost, target, &buf)
+	req = req.WithContext(ctx)
+	if id != "" {
+		req.SetPathValue("id", id)
+	}
+	if ifMatch != "" {
+		req.Header.Set("If-Match", ifMatch)
+	}
+	rr := httptest.NewRecorder()
+	fn(rr, req)
+	return rr
 }

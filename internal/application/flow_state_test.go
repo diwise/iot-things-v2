@@ -218,6 +218,7 @@ func sewerCatalog(t *testing.T) (*catalog.Catalog, catalog.ObjectSpec) {
 	err := c.PutTemplate(catalog.TemplateSpec{
 		Template: things.Template{
 			ID: "sewer", Version: "v1",
+			Category: "sewer",
 			Required: []string{"distance", "level", "overflow", "overflowTime"},
 		},
 		ParamDefaults: map[string]float64{"sensorToBottom": 2.0, "high": 1.5, "low": 1.4},
@@ -237,7 +238,8 @@ func sewerCatalog(t *testing.T) (*catalog.Catalog, catalog.ObjectSpec) {
 		t.Fatalf("put sewer: %v", err)
 	}
 	obj := catalog.ObjectSpec{
-		ThingID: "sewer-1", Tenant: "t",
+		ThingID: "sewer-1", Tenant: "t", Name: "Avlopp 1",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "sewer", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"distance": {}, "level": {}, "overflow": {}, "overflowTime": {},
@@ -379,7 +381,7 @@ func TestSewerThresholdChangeKeepsAccumulated(t *testing.T) {
 func TestActiveTimeDuplicateNoDoubleCount(t *testing.T) {
 	c := catalog.New()
 	tmpl := catalog.TemplateSpec{
-		Template: things.Template{ID: "t", Version: "v1", Required: []string{"sig", "run"}},
+		Template: things.Template{ID: "t", Version: "v1", Required: []string{"sig", "run"}, Category: "t"},
 		Recipes: []catalog.Recipe{{Name: "run-time", Operator: "activeTime", Version: "v1",
 			Inputs: []string{"sig"}, Outputs: []string{"run"}}},
 	}
@@ -387,7 +389,8 @@ func TestActiveTimeDuplicateNoDoubleCount(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	obj := catalog.ObjectSpec{
-		ThingID: "th", Tenant: "tn",
+		ThingID: "th", Tenant: "tn", Name: "Test",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "t", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"sig": {}, "run": {}},
 		Bindings:   []things.Binding{{DeviceID: "s", Object: flowURNtemp, Resource: "5700", Input: "sig"}},
@@ -461,6 +464,7 @@ func TestThresholdSkipPreservesOutput(t *testing.T) {
 	c := catalog.New()
 	tmpl := catalog.TemplateSpec{Template: things.Template{
 		ID: "bench", Version: "v1",
+		Category: "bench",
 		Required: []string{"soilMoisture", "soilMoistureLow"},
 	},
 		ParamDefaults: map[string]float64{"high": 30, "low": 20},
@@ -535,7 +539,7 @@ func TestProcStateNoAliasing(t *testing.T) {
 	// Runtime-lagring: muterad LoadThing-kopia får inte påverka storet.
 	c := catalog.New()
 	tmpl := catalog.TemplateSpec{
-		Template: things.Template{ID: "t", Version: "v1", Required: []string{"sig", "run"}},
+		Template: things.Template{ID: "t", Version: "v1", Required: []string{"sig", "run"}, Category: "t"},
 		Recipes: []catalog.Recipe{{Name: "run-time", Operator: "activeTime", Version: "v1",
 			Inputs: []string{"sig"}, Outputs: []string{"run"}}},
 	}
@@ -543,7 +547,8 @@ func TestProcStateNoAliasing(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	obj := catalog.ObjectSpec{
-		ThingID: "th", Tenant: "tn",
+		ThingID: "th", Tenant: "tn", Name: "Test",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "t", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"sig": {}, "run": {}},
 		Bindings:   []things.Binding{{DeviceID: "s", Object: flowURNtemp, Resource: "5700", Input: "sig"}},
@@ -616,7 +621,7 @@ func TestSelfLoopRejected(t *testing.T) {
 	}
 	c := catalog.New()
 	tmpl := catalog.TemplateSpec{Template: things.Template{
-		ID: "loop", Version: "v1", Required: []string{"a"},
+		ID: "loop", Version: "v1", Required: []string{"a"}, Category: "loop",
 	},
 		Recipes: recs,
 	}
@@ -624,7 +629,8 @@ func TestSelfLoopRejected(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	cfg, err := c.Compile(catalog.ObjectSpec{
-		ThingID: "loop-1", Tenant: "t",
+		ThingID: "loop-1", Tenant: "t", Name: "Loop",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "loop", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"a": {}},
 	})

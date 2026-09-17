@@ -37,7 +37,7 @@ type ThingSummary struct {
 	ThingID         string                        `json:"thingId"`
 	Tenant          string                        `json:"tenant"`
 	Name            string                        `json:"name,omitempty"`
-	Classification  string                        `json:"classification,omitempty"`
+	Category        string                        `json:"category,omitempty"`
 	Location        *things.Location              `json:"location,omitempty"`
 	Metadata        map[string]string             `json:"metadata,omitempty"`
 	TemplateID      string                        `json:"templateId"`
@@ -382,7 +382,7 @@ type SearchFilter struct {
 	TemplateVersion string
 	VariantID       string
 	NameContains    string
-	Classification  string
+	Category        string
 	Metadata        map[string]string
 	BBox            *things.BBox
 	Limit           int
@@ -413,7 +413,7 @@ func (m *Manager) SearchObjects(_ context.Context, tenant string, f SearchFilter
 		if f.NameContains != "" && !strings.Contains(strings.ToLower(cfg.Name), strings.ToLower(f.NameContains)) {
 			continue
 		}
-		if f.Classification != "" && cfg.Classification != f.Classification {
+		if f.Category != "" && cfg.Category != f.Category {
 			continue
 		}
 		if len(f.Metadata) > 0 {
@@ -536,7 +536,7 @@ func summarize(tenant, thingID string, cfg *catalog.EffectiveConfig, st StoredTh
 		ThingID:         thingID,
 		Tenant:          tenant,
 		Name:            cfg.Name,
-		Classification:  cfg.Classification,
+		Category:        cfg.Category,
 		Location:        cfg.Location,
 		Metadata:        cfg.Metadata,
 		TemplateID:      cfg.TemplateID,
@@ -581,7 +581,7 @@ func (m *Manager) reconstructSpec(tenant, thingID string) (catalog.ObjectSpec, e
 		ThingID:         thingID,
 		Tenant:          tenant,
 		Name:            cfg.Name,
-		Classification:  cfg.Classification,
+		Category:        cfg.Category,
 		Location:        cfg.Location,
 		Metadata:        cfg.Metadata,
 		TemplateID:      cfg.TemplateID,

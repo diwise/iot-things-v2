@@ -156,14 +156,24 @@ type handler struct {
 	mgr Manager
 }
 
-// tenant resolves the single authorized tenant for the request. Reads fan
-// out is a TODO; all endpoints currently require exactly one tenant so
-// writes are never ambiguous and reads never merge tenants silently.
+// tenant resolves the authorized tenant for the request. A user with
+// several tenants selects one explicitly via ?tenant=; without a selector
+// an ambiguous request fails instead of merging tenants silently or
+// writing to the wrong one. Reads never fan out across tenants.
 // scope är endpointets eget kravscope (läs/skapa/uppdatera/ta bort):
 // tenanten måste vara auktoriserad för just den åtgärden, inte bara läs.
 func tenant(r *http.Request, scope auth.Scope) (string, error) {
 	tenants := auth.GetTenantsWithAllowedScopes(r.Context(), scope)
 	if len(tenants) == 0 {
+		return "", errUnauthorized
+	}
+	selected := r.URL.Query().Get("tenant")
+	if selected != "" {
+		for _, t := range tenants {
+			if t == selected {
+				return t, nil
+			}
+		}
 		return "", errUnauthorized
 	}
 	if len(tenants) != 1 {
@@ -182,7 +192,7 @@ func writeAPIError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errUnauthorized):
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 	case errors.Is(err, errAmbiguousTenant):
-		writeError(w, http.StatusBadRequest, "ambiguous tenant")
+		writeError(w, http.StatusBadRequest, "ambiguous tenant (select one via ?tenant=)")
 	case errors.Is(err, things.ErrValidation):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, things.ErrNotFound):
@@ -330,7 +340,7 @@ func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
 		TemplateVersion: q.Get("templateVersion"),
 		VariantID:       q.Get("variant"),
 		NameContains:    q.Get("name"),
-		Classification:  q.Get("classification"),
+		Category:        q.Get("category"),
 		Limit:           limit,
 		Offset:          offset,
 	}

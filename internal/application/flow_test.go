@@ -24,6 +24,7 @@ func flowBins(t *testing.T) (*catalog.Catalog, catalog.EffectiveConfig) {
 		Template: things.Template{
 			ID: "wastebin", Version: "v1",
 			Required: []string{"distance", "level", "fillRate"},
+			Category: "wastebin",
 		},
 		ParamDefaults: map[string]float64{"usableHeight": 1.0, "sensorToBottom": 1.5},
 		Overridable:   []string{"sensorToBottom"},
@@ -48,7 +49,8 @@ func flowBins(t *testing.T) (*catalog.Catalog, catalog.EffectiveConfig) {
 		t.Fatalf("put variant: %v", err)
 	}
 	cfg, err := c.Compile(catalog.ObjectSpec{
-		ThingID: "bin-42", Tenant: "t",
+		ThingID: "bin-42", Tenant: "t", Name: "Soptunna 42",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		VariantID: "wastebin-B", VariantVersion: "v1",
 		Properties: map[string]things.Property{
@@ -73,6 +75,7 @@ func flowRooms(t *testing.T) (*catalog.Catalog, catalog.EffectiveConfig) {
 			ID: "room", Version: "v1",
 			RepeatGroups: []string{"temperature."},
 			Optional:     []string{"temperature.average"},
+			Category:     "room",
 		},
 		Recipes: []catalog.Recipe{
 			{Name: "mean-temp", Operator: "mean", Version: "v1",
@@ -84,7 +87,8 @@ func flowRooms(t *testing.T) (*catalog.Catalog, catalog.EffectiveConfig) {
 		t.Fatalf("put room: %v", err)
 	}
 	cfg, err := c.Compile(catalog.ObjectSpec{
-		ThingID: "room-a", Tenant: "t",
+		ThingID: "room-a", Tenant: "t", Name: "Rum A",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"temperature.window": {}, "temperature.center": {},
@@ -366,6 +370,7 @@ func TestCycleDetected(t *testing.T) {
 		Template: things.Template{
 			ID: "loop", Version: "v1",
 			Required: []string{"a", "b"},
+			Category: "loop",
 		},
 		Recipes: []catalog.Recipe{
 			{Name: "r1", Operator: "passthrough", Version: "v1", Inputs: []string{"b"}, Outputs: []string{"a"}},
@@ -376,7 +381,8 @@ func TestCycleDetected(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	cfg, err := c.Compile(catalog.ObjectSpec{
-		ThingID: "loop-1", Tenant: "t",
+		ThingID: "loop-1", Tenant: "t", Name: "Loop",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "loop", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"a": {}, "b": {}},
 	})
@@ -417,13 +423,15 @@ func TestUnitMismatchRecordedInvalid(t *testing.T) {
 	c := catalog.New()
 	tmpl := catalog.TemplateSpec{Template: things.Template{
 		ID: "room", Version: "v1",
+		Category:     "room",
 		RepeatGroups: []string{"temperature."},
 	}}
 	if err := c.PutTemplate(tmpl); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	cfg, err := c.Compile(catalog.ObjectSpec{
-		ThingID: "room-u", Tenant: "t",
+		ThingID: "room-u", Tenant: "t", Name: "Rum U",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"temperature.window": {ID: "temperature.window", Unit: "°C"},
@@ -454,6 +462,7 @@ func TestThresholdHysteresisStable(t *testing.T) {
 	c := catalog.New()
 	tmpl := catalog.TemplateSpec{Template: things.Template{
 		ID: "bench", Version: "v1",
+		Category: "bench",
 		Required: []string{"soilMoisture", "soilMoistureLow"},
 	},
 		ParamDefaults: map[string]float64{"high": 30, "low": 20},
@@ -496,7 +505,8 @@ func TestThresholdHysteresisStable(t *testing.T) {
 func mustCompileBench(t *testing.T, c *catalog.Catalog) *catalog.EffectiveConfig {
 	t.Helper()
 	cfg, err := c.Compile(catalog.ObjectSpec{
-		ThingID: "bench-1", Tenant: "t",
+		ThingID: "bench-1", Tenant: "t", Name: "Bänk",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "bench", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"soilMoisture": {}, "soilMoistureLow": {},
@@ -542,12 +552,14 @@ func flowSingleTempTwoSources(t *testing.T) catalog.EffectiveConfig {
 	tmpl := catalog.TemplateSpec{Template: things.Template{
 		ID: "single", Version: "v1",
 		Required: []string{"temp"},
+		Category: "single",
 	}}
 	if err := c.PutTemplate(tmpl); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	cfg, err := c.Compile(catalog.ObjectSpec{
-		ThingID: "single-1", Tenant: "t",
+		ThingID: "single-1", Tenant: "t", Name: "Singel",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "single", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"temp": {}},
 		Bindings: []things.Binding{
@@ -909,6 +921,7 @@ func TestDuplicateOutputRejected(t *testing.T) {
 	tmpl := catalog.TemplateSpec{Template: things.Template{
 		ID: "dup", Version: "v1",
 		Required: []string{"a", "b", "c"},
+		Category: "dup",
 	},
 		Recipes: []catalog.Recipe{
 			{Name: "r1", Operator: "passthrough", Version: "v1", Inputs: []string{"a"}, Outputs: []string{"c"}},
@@ -919,7 +932,8 @@ func TestDuplicateOutputRejected(t *testing.T) {
 		t.Fatalf("put: %v", err)
 	}
 	cfg, err := c.Compile(catalog.ObjectSpec{
-		ThingID: "dup-1", Tenant: "t",
+		ThingID: "dup-1", Tenant: "t", Name: "Dupp",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "dup", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"a": {}, "b": {}, "c": {}},
 	})

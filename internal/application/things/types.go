@@ -266,7 +266,7 @@ func (l Location) IntersectsBBox(b BBox) bool {
 // Template is a versioned closed definition of allowed properties.
 // Required and Optional hold exact property IDs. RepeatGroups holds
 // repeatable measurement-point prefixes such as "temperature.".
-// Classification is the business classification (e.g. "wastebin",
+// Category is the business category (e.g. "wastebin",
 // "room"); Labels and PrimaryProperty are presentation hints.
 type Template struct {
 	ID                string         `json:"id"`
@@ -276,7 +276,7 @@ type Template struct {
 	RepeatGroups      []string       `json:"repeatGroups,omitempty"`
 	AllowedQuantities []string       `json:"allowedQuantities,omitempty"`
 	Relations         []RelationSpec `json:"relations,omitempty"`
-	Classification    string         `json:"classification,omitempty"`
+	Category          string         `json:"category,omitempty"`
 	Labels            []string       `json:"labels,omitempty"`
 	PrimaryProperty   string         `json:"primaryProperty,omitempty"`
 }
@@ -331,7 +331,7 @@ type Thing struct {
 	ID              string                 `json:"id"`
 	Tenant          string                 `json:"tenant"`
 	Name            string                 `json:"name,omitempty"`
-	Classification  string                 `json:"classification,omitempty"`
+	Category        string                 `json:"category,omitempty"`
 	Location        *Location              `json:"location,omitempty"`
 	Metadata        map[string]string      `json:"metadata,omitempty"`
 	TemplateID      string                 `json:"templateId"`

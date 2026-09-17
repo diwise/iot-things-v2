@@ -155,13 +155,14 @@ func TestAppSamePublishedAtAcrossThings(t *testing.T) {
 	rt := NewRuntime(fs)
 	c := catalog.New()
 	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
-		ID: "gauge", Version: "v1", Required: []string{"distance"},
+		ID: "gauge", Version: "v1", Required: []string{"distance"}, Category: "gauge",
 	}}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	mk := func(id string) catalog.ObjectSpec {
 		return catalog.ObjectSpec{
-			ThingID: id, Tenant: "t",
+			ThingID: id, Tenant: "t", Name: id,
+			Location: rtLoc(), Metadata: rtMeta(),
 			TemplateID: "gauge", TemplateVersion: "v1",
 			Properties: map[string]things.Property{"distance": {}},
 			Bindings: []things.Binding{

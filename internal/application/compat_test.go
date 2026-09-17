@@ -305,6 +305,7 @@ func TestCompatEndToEndRoomFromWireData(t *testing.T) {
 	c := catalog.New()
 	tmpl := catalog.TemplateSpec{Template: things.Template{
 		ID: "room", Version: "v1",
+		Category:     "room",
 		RepeatGroups: []string{"temperature."},
 		Optional:     []string{"temperature.average"},
 	}}
@@ -312,7 +313,8 @@ func TestCompatEndToEndRoomFromWireData(t *testing.T) {
 		t.Fatalf("put room: %v", err)
 	}
 	cfg, err := c.Compile(catalog.ObjectSpec{
-		ThingID: "kontorslandskap-a", Tenant: "t",
+		ThingID: "kontorslandskap-a", Tenant: "t", Name: "Kontorslandskap A",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"temperature.window": {}, "temperature.center": {},

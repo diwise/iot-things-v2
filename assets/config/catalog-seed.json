@@ -6,7 +6,7 @@
         "id": "wastebin",
         "version": "v1",
         "required": ["distance", "level", "fillRate"],
-        "classification": "container",
+        "category": "container",
         "labels": ["Avfall"],
         "primaryProperty": "fillRate"
       },
@@ -40,7 +40,7 @@
         "version": "v1",
         "optional": ["temperature", "temperature.window", "temperature.center", "temperature.door", "temperature.average", "humidity", "illuminance", "co2"],
         "repeatGroups": ["temperature."],
-        "classification": "room",
+        "category": "room",
         "labels": ["Inomhusklimat"],
         "primaryProperty": "temperature.average"
       },
@@ -59,7 +59,7 @@
         "id": "building",
         "version": "v1",
         "optional": ["energy", "power", "temperature"],
-        "classification": "building",
+        "category": "building",
         "labels": ["Byggnad"],
         "primaryProperty": "temperature"
       }
@@ -69,7 +69,7 @@
         "id": "pointofinterest",
         "version": "v1",
         "optional": ["temperature"],
-        "classification": "pointofinterest",
+        "category": "pointofinterest",
         "primaryProperty": "temperature"
       }
     },
@@ -78,7 +78,7 @@
         "id": "desk",
         "version": "v1",
         "required": ["presence"],
-        "classification": "desk",
+        "category": "desk",
         "primaryProperty": "presence"
       }
     },
@@ -87,7 +87,7 @@
         "id": "lifebuoy",
         "version": "v1",
         "required": ["presence"],
-        "classification": "lifebuoy",
+        "category": "lifebuoy",
         "primaryProperty": "presence"
       }
     },
@@ -96,7 +96,7 @@
         "id": "passage",
         "version": "v1",
         "required": ["door", "passages"],
-        "classification": "passage",
+        "category": "passage",
         "primaryProperty": "passages"
       },
       "recipes": [
@@ -114,7 +114,7 @@
         "id": "pumpingstation",
         "version": "v1",
         "required": ["run", "runTime"],
-        "classification": "pumpingstation",
+        "category": "pumpingstation",
         "primaryProperty": "runTime"
       },
       "recipes": [
@@ -132,7 +132,7 @@
         "id": "sewer",
         "version": "v1",
         "required": ["distance", "level", "fillRate", "overflow", "overflowTime"],
-        "classification": "sewer",
+        "category": "sewer",
         "labels": ["Avlopp"],
         "primaryProperty": "fillRate"
       },
@@ -172,7 +172,7 @@
         "id": "watermeter",
         "version": "v1",
         "required": ["volume", "leakage", "backflow", "fraud"],
-        "classification": "watermeter",
+        "category": "watermeter",
         "primaryProperty": "volume"
       }
     },
@@ -181,7 +181,7 @@
         "id": "sink",
         "version": "v1",
         "optional": ["temperature", "presence", "power", "energy", "distance", "digitalInput", "illuminance", "humidity"],
-        "classification": "sink"
+        "category": "sink"
       }
     }
   ],

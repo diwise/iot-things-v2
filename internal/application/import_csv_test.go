@@ -12,9 +12,9 @@ import (
 
 const importTestCSV = `id;type;subType;name;decsription;location;tenant;tags;bindings;args
 a6921a85-1f40-4e43-9719-4dabdb349075;Container;WasteContainer;GATA_Soptunnor_punkt.203;Kapacitet 160 liter. ObjektID: 203;62.387232,17.316830;default;160L;milesight:203;{'maxd':0.940000,'maxl':0.790000}
-room-1;Room;;Rum A;;59.33,18.06;default;;s-r1||urn:oma:lwm2m:ext:3303|5700|temperature;
-desk-1;Desk;;Skrivbord;;;default;;s-desk;
-pass-1;Passage;;Entré;;;default;;s-pass;
+room-1;Room;;Rum A;;59.33,18.06;default;test;s-r1||urn:oma:lwm2m:ext:3303|5700|temperature;
+desk-1;Desk;;Skrivbord;;59.33,18.06;default;test;s-desk;
+pass-1;Passage;;Entré;;59.33,18.06;default;test;s-pass;
 bad-type;Nope;;;59,18;default;;;;
 angle-bin;Container;;;;59,18;default;;milesight:9;{'maxd':0.94,'maxl':0.79,'angle':15}
 bad-loc;Desk;;D;;not-a-place;default;;s-d;
@@ -45,6 +45,9 @@ func TestImportCSV(t *testing.T) {
 	added, skipped, failures, err := mgr.ImportCSV(ctx, strings.NewReader(importTestCSV))
 	if err != nil {
 		t.Fatalf("import: %v", err)
+	}
+	for _, f := range failures {
+		t.Logf("row %d (%s): %s", f.Row, f.ID, f.Error)
 	}
 	if added != 4 || skipped != 0 {
 		t.Fatalf("added=%d skipped=%d, want 4/0", added, skipped)
@@ -96,7 +99,7 @@ func TestImportCSVBadStructure(t *testing.T) {
 func TestImportCSVSeedRoom(t *testing.T) {
 	// Rum med legacy temperature-punkt från seed-mallen.
 	raw := `id;type;subType;name;decsription;location;tenant;tags;bindings;args
-room-9;Room;;Rum Nio;;59.3,18.0;default;;s-r9||urn:oma:lwm2m:ext:3303|5700|temperature;
+room-9;Room;;Rum Nio;;59.3,18.0;default;test;s-r9||urn:oma:lwm2m:ext:3303|5700|temperature;
 `
 	ctx := context.Background()
 	mgr := importSeededManager(t)

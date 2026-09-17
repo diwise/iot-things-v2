@@ -35,6 +35,7 @@ func mgmtWastebin(t *testing.T, mgr *Manager) {
 		Template: things.Template{
 			ID: "wastebin", Version: "v1",
 			Required: []string{"distance", "level", "fillRate"},
+			Category: "wastebin",
 		},
 		ParamDefaults: map[string]float64{"usableHeight": 1.0, "sensorToBottom": 1.5},
 		Overridable:   []string{"sensorToBottom"},
@@ -181,6 +182,7 @@ func mgmtRooms(t *testing.T, mgr *Manager) {
 			ID: "room", Version: "v1",
 			RepeatGroups: []string{"temperature."},
 			Optional:     []string{"humidity", "illuminance", "temperature.average"},
+			Category:     "room",
 			Relations: []things.RelationSpec{
 				{Name: "partOf", AllowedTargets: []string{"building"}, Min: 0, Max: 1},
 			},
@@ -195,7 +197,7 @@ func mgmtRooms(t *testing.T, mgr *Manager) {
 		t.Fatalf("publish room: %v", err)
 	}
 	err = mgr.PublishTemplate(ctx, catalog.TemplateSpec{Template: things.Template{
-		ID: "building", Version: "v1",
+		ID: "building", Version: "v1", Category: "building",
 	}})
 	if err != nil {
 		t.Fatalf("publish building: %v", err)
@@ -208,6 +210,7 @@ func TestManageRoomVariants(t *testing.T) {
 	mgmtRooms(t, mgr)
 	roomA := catalog.ObjectSpec{
 		ThingID: "room-a", Tenant: "t", Name: "Kontorslandskap A",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"temperature.window":  {DisplayName: "Vid fönstret"},
@@ -223,6 +226,7 @@ func TestManageRoomVariants(t *testing.T) {
 	}
 	roomB := catalog.ObjectSpec{
 		ThingID: "room-b", Tenant: "t", Name: "Kontorslandskap B",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"temperature.window": {},
@@ -277,6 +281,7 @@ func TestManageBuildingOverview(t *testing.T) {
 	mgmtRooms(t, mgr)
 	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
 		ThingID: "building-a", Tenant: "t", Name: "Byggnad A",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 	}); err != nil {
@@ -284,7 +289,8 @@ func TestManageBuildingOverview(t *testing.T) {
 	}
 	mkRoom := func(id, parent string) catalog.ObjectSpec {
 		return catalog.ObjectSpec{
-			ThingID: id, Tenant: "t",
+			ThingID: id, Tenant: "t", Name: id,
+			Location: rtLoc(), Metadata: rtMeta(),
 			TemplateID: "room", TemplateVersion: "v1",
 			Properties: map[string]things.Property{"temperature.window": {}},
 			Bindings: []things.Binding{
@@ -328,7 +334,8 @@ func TestManageBuildingOverview(t *testing.T) {
 		t.Fatalf("re-attach: %v", err)
 	}
 	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
-		ThingID: "building-b", Tenant: "t",
+		ThingID: "building-b", Tenant: "t", Name: "Byggnad B",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 	}); err != nil {
@@ -354,6 +361,7 @@ func TestManageGreenhouseOverview(t *testing.T) {
 	err := mgr.PublishTemplate(ctx, catalog.TemplateSpec{Template: things.Template{
 		ID: "greenhouse", Version: "v1",
 		RepeatGroups: []string{"airTemp."},
+		Category:     "greenhouse",
 	}})
 	if err != nil {
 		t.Fatalf("publish greenhouse: %v", err)
@@ -362,6 +370,7 @@ func TestManageGreenhouseOverview(t *testing.T) {
 		ID: "bench", Version: "v1",
 		RepeatGroups: []string{"soilMoisture."},
 		Optional:     []string{"airTemp.bench"},
+		Category:     "bench",
 		Relations: []things.RelationSpec{
 			{Name: "partOf", AllowedTargets: []string{"greenhouse"}, Min: 0, Max: 1},
 		},
@@ -371,6 +380,7 @@ func TestManageGreenhouseOverview(t *testing.T) {
 	}
 	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
 		ThingID: "greenhouse-a", Tenant: "t", Name: "Växthus A",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "greenhouse", TemplateVersion: "v1",
 		Properties: map[string]things.Property{
 			"airTemp.common": {DisplayName: "Gemensam lufttemperatur"},
@@ -383,7 +393,8 @@ func TestManageGreenhouseOverview(t *testing.T) {
 	}
 	for _, bench := range []string{"bench-1", "bench-2"} {
 		obj := catalog.ObjectSpec{
-			ThingID: bench, Tenant: "t",
+			ThingID: bench, Tenant: "t", Name: bench,
+			Location: rtLoc(), Metadata: rtMeta(),
 			TemplateID: "bench", TemplateVersion: "v1",
 			Properties: map[string]things.Property{
 				"soilMoisture.1": {}, "airTemp.bench": {},
@@ -491,7 +502,8 @@ func TestManageSearchHistoryTenants(t *testing.T) {
 		t.Fatalf("create bin: %v", err)
 	}
 	roomObj := catalog.ObjectSpec{
-		ThingID: "room-a", Tenant: "t",
+		ThingID: "room-a", Tenant: "t", Name: "Rum A",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"temperature.window": {}},
 		Bindings: []things.Binding{
@@ -615,7 +627,8 @@ func TestManageMoveRevisionAndConfigSync(t *testing.T) {
 	mgmtRooms(t, mgr)
 	for _, id := range []string{"building-a", "building-b"} {
 		if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
-			ThingID: id, Tenant: "t",
+			ThingID: id, Tenant: "t", Name: id,
+			Location: rtLoc(), Metadata: rtMeta(),
 			TemplateID: "building", TemplateVersion: "v1",
 			Properties: map[string]things.Property{},
 		}); err != nil {
@@ -624,7 +637,8 @@ func TestManageMoveRevisionAndConfigSync(t *testing.T) {
 	}
 	// Fristående rum (ingen partOf) flyttas till building-a med revision 1.
 	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
-		ThingID: "room-x", Tenant: "t",
+		ThingID: "room-x", Tenant: "t", Name: "Rum X",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"temperature.window": {DisplayName: "Fönster"}},
 		Bindings: []things.Binding{
@@ -805,7 +819,8 @@ func TestManageOverviewCrossTenantIsNotFound(t *testing.T) {
 	ctx := context.Background()
 	mgmtRooms(t, mgr)
 	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
-		ThingID: "building-a", Tenant: "t",
+		ThingID: "building-a", Tenant: "t", Name: "Byggnad A",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "building", TemplateVersion: "v1",
 		Properties: map[string]things.Property{},
 	}); err != nil {
@@ -862,7 +877,7 @@ func TestManageCatalogPersistence(t *testing.T) {
 	mgr := NewManager(catalog.New(), NewRuntime(fs), fs, WithCatalogStore(cs))
 
 	tmpl := catalog.TemplateSpec{
-		Template:      things.Template{ID: "wastebin", Version: "v1", Required: []string{"distance"}},
+		Template:      things.Template{ID: "wastebin", Version: "v1", Required: []string{"distance"}, Category: "wastebin"},
 		ParamDefaults: map[string]float64{"usableHeight": 1.0},
 	}
 	if err := mgr.PublishTemplate(ctx, tmpl); err != nil {
@@ -888,6 +903,7 @@ func TestManageCatalogPersistence(t *testing.T) {
 	}
 	obj := catalog.ObjectSpec{
 		ThingID: "bin-42", TemplateID: "wastebin", TemplateVersion: "v1",
+		Name: "Soptunna 42", Location: rtLoc(), Metadata: rtMeta(),
 		VariantID: "wastebin-B", VariantVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}},
 		Bindings: []things.Binding{
@@ -945,6 +961,7 @@ func TestManageSearchFilterAndPaging(t *testing.T) {
 	}
 	roomObj := catalog.ObjectSpec{
 		ThingID: "room-a", Tenant: "t", Name: "Kontorslandskap A",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "room", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"temperature.window": {}},
 		Bindings: []things.Binding{
@@ -1015,16 +1032,17 @@ func TestManageLocationMetadataSearch(t *testing.T) {
 	bin := mgmtBinObject()
 	bin.Location = &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)}
 	bin.Metadata = map[string]string{"district": "centrum"}
-	bin.Classification = "wastebin"
+	bin.Category = "wastebin"
 	if _, err := mgr.CreateObject(ctx, "t", bin); err != nil {
 		t.Fatalf("create bin: %v", err)
 	}
 	roomObj := catalog.ObjectSpec{
 		ThingID: "room-a", Tenant: "t", Name: "Kontorslandskap A",
 		TemplateID: "room", TemplateVersion: "v1",
-		Classification: "room",
-		Metadata:       map[string]string{"district": "söder"},
-		Properties:     map[string]things.Property{"temperature.window": {}},
+		Category:   "room",
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[20.20,67.90]`)},
+		Metadata:   map[string]string{"district": "söder"},
+		Properties: map[string]things.Property{"temperature.window": {}},
 		Bindings: []things.Binding{
 			{DeviceID: "s1", Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
 		},
@@ -1040,12 +1058,12 @@ func TestManageLocationMetadataSearch(t *testing.T) {
 	if sum.Location == nil || sum.Location.Type != "Point" {
 		t.Fatalf("location=%+v, want point", sum.Location)
 	}
-	if sum.Metadata["district"] != "centrum" || sum.Classification != "wastebin" {
+	if sum.Metadata["district"] != "centrum" || sum.Category != "wastebin" {
 		t.Fatalf("summary=%+v", sum)
 	}
 
-	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Classification: "room"}); len(got) != 1 || got[0].ThingID != "room-a" {
-		t.Fatalf("classification filter=%+v, want room-a", got)
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Category: "room"}); len(got) != 1 || got[0].ThingID != "room-a" {
+		t.Fatalf("category filter=%+v, want room-a", got)
 	}
 	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Metadata: map[string]string{"district": "centrum"}}); len(got) != 1 || got[0].ThingID != "bin-42" {
 		t.Fatalf("metadata filter=%+v, want bin-42", got)
@@ -1082,6 +1100,7 @@ func TestManageSubtree(t *testing.T) {
 	if err := mgr.PublishTemplate(ctx, catalog.TemplateSpec{
 		Template: things.Template{
 			ID: "probe", Version: "v1",
+			Category: "probe",
 			Relations: []things.RelationSpec{
 				{Name: "partOf", AllowedTargets: []string{"room"}, Min: 0, Max: 1},
 			},
@@ -1092,6 +1111,7 @@ func TestManageSubtree(t *testing.T) {
 	mkRoom := func(id, parent string) catalog.ObjectSpec {
 		obj := catalog.ObjectSpec{
 			ThingID: id, TemplateID: "room", TemplateVersion: "v1",
+			Name: id, Location: rtLoc(), Metadata: rtMeta(),
 			Properties: map[string]things.Property{"temperature.window": {}},
 			Bindings: []things.Binding{
 				{DeviceID: "s-" + id, Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
@@ -1104,6 +1124,7 @@ func TestManageSubtree(t *testing.T) {
 	}
 	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
 		ThingID: "building-a", TemplateID: "building", TemplateVersion: "v1",
+		Name: "Byggnad A", Location: rtLoc(), Metadata: rtMeta(),
 		Properties: map[string]things.Property{},
 	}); err != nil {
 		t.Fatalf("create building: %v", err)
@@ -1113,6 +1134,7 @@ func TestManageSubtree(t *testing.T) {
 	}
 	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
 		ThingID: "probe-1", TemplateID: "probe", TemplateVersion: "v1",
+		Name: "Prob 1", Location: rtLoc(), Metadata: rtMeta(),
 		Properties: map[string]things.Property{},
 		Relations:  []catalog.RelationRef{{Name: "partOf", TargetThingID: "room-a", TargetTemplateID: "room"}},
 	}); err != nil {
@@ -1160,12 +1182,14 @@ func TestManageUnlink(t *testing.T) {
 	mgmtRooms(t, mgr)
 	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
 		ThingID: "building-a", TemplateID: "building", TemplateVersion: "v1",
+		Name: "Byggnad A", Location: rtLoc(), Metadata: rtMeta(),
 		Properties: map[string]things.Property{},
 	}); err != nil {
 		t.Fatalf("create building: %v", err)
 	}
 	if _, err := mgr.CreateObject(ctx, "t", catalog.ObjectSpec{
 		ThingID: "room-a", TemplateID: "room", TemplateVersion: "v1",
+		Name: "Rum A", Location: rtLoc(), Metadata: rtMeta(),
 		Properties: map[string]things.Property{"temperature.window": {}},
 		Bindings: []things.Binding{
 			{DeviceID: "s1", Object: rtTempURN, Resource: "5700", Input: "temperature.window"},
@@ -1216,26 +1240,26 @@ func TestManageBoolTypes(t *testing.T) {
 		}
 	}
 	publish(catalog.TemplateSpec{Template: things.Template{
-		ID: "desk", Version: "v1", Required: []string{"presence"},
+		ID: "desk", Version: "v1", Required: []string{"presence"}, Category: "desk",
 	}})
 	publish(catalog.TemplateSpec{Template: things.Template{
-		ID: "lifebuoy", Version: "v1", Required: []string{"presence"},
+		ID: "lifebuoy", Version: "v1", Required: []string{"presence"}, Category: "lifebuoy",
 	}})
 	publish(catalog.TemplateSpec{
-		Template: things.Template{ID: "passage", Version: "v1", Required: []string{"door", "passages"}},
+		Template: things.Template{ID: "passage", Version: "v1", Required: []string{"door", "passages"}, Category: "passage"},
 		Recipes: []catalog.Recipe{{Name: "count", Operator: "counter", Version: "v1",
 			Inputs: []string{"door"}, Outputs: []string{"passages"}}},
 	})
 	publish(catalog.TemplateSpec{
-		Template: things.Template{ID: "pumpingstation", Version: "v1", Required: []string{"run", "runTime"}},
+		Template: things.Template{ID: "pumpingstation", Version: "v1", Required: []string{"run", "runTime"}, Category: "pumpingstation"},
 		Recipes: []catalog.Recipe{{Name: "run-time", Operator: "activeTime", Version: "v1",
 			Inputs: []string{"run"}, Outputs: []string{"runTime"}}},
 	})
 	publish(catalog.TemplateSpec{Template: things.Template{
-		ID: "watermeter", Version: "v1", Required: []string{"volume", "leakage", "backflow", "fraud"},
+		ID: "watermeter", Version: "v1", Required: []string{"volume", "leakage", "backflow", "fraud"}, Category: "watermeter",
 	}})
 	publish(catalog.TemplateSpec{
-		Template: things.Template{ID: "sewer", Version: "v1", Required: []string{"distance", "overflow", "overflowTime"}},
+		Template: things.Template{ID: "sewer", Version: "v1", Required: []string{"distance", "overflow", "overflowTime"}, Category: "sewer"},
 		Recipes: []catalog.Recipe{{Name: "overflow-time", Operator: "activeTime", Version: "v1",
 			Inputs: []string{"overflow"}, Outputs: []string{"overflowTime"}}},
 	})
@@ -1243,6 +1267,7 @@ func TestManageBoolTypes(t *testing.T) {
 	mkBoolThing := func(id, tmpl, prop, device string) catalog.ObjectSpec {
 		return catalog.ObjectSpec{
 			ThingID: id, TemplateID: tmpl, TemplateVersion: "v1",
+			Name: id, Location: rtLoc(), Metadata: rtMeta(),
 			Properties: map[string]things.Property{prop: {}},
 			Bindings: []things.Binding{
 				{DeviceID: device, Object: dinURN, Resource: "5500", Input: prop},
@@ -1254,6 +1279,7 @@ func TestManageBoolTypes(t *testing.T) {
 		mkBoolThing("lifebuoy-1", "lifebuoy", "presence", "s-lifebuoy"),
 		{
 			ThingID: "passage-1", TemplateID: "passage", TemplateVersion: "v1",
+			Name: "Passage 1", Location: rtLoc(), Metadata: rtMeta(),
 			Properties: map[string]things.Property{"door": {}, "passages": {}},
 			Bindings: []things.Binding{
 				{DeviceID: "s-pass", Object: dinURN, Resource: "5500", Input: "door"},
@@ -1261,6 +1287,7 @@ func TestManageBoolTypes(t *testing.T) {
 		},
 		{
 			ThingID: "pump-1", TemplateID: "pumpingstation", TemplateVersion: "v1",
+			Name: "Pump 1", Location: rtLoc(), Metadata: rtMeta(),
 			Properties: map[string]things.Property{"run": {}, "runTime": {}},
 			Bindings: []things.Binding{
 				{DeviceID: "s-pump", Object: dinURN, Resource: "5500", Input: "run"},
@@ -1268,6 +1295,7 @@ func TestManageBoolTypes(t *testing.T) {
 		},
 		{
 			ThingID: "water-1", TemplateID: "watermeter", TemplateVersion: "v1",
+			Name: "Mätare 1", Location: rtLoc(), Metadata: rtMeta(),
 			Properties: map[string]things.Property{
 				"volume": {}, "leakage": {}, "backflow": {}, "fraud": {},
 			},
@@ -1280,6 +1308,7 @@ func TestManageBoolTypes(t *testing.T) {
 		},
 		{
 			ThingID: "sewer-1", TemplateID: "sewer", TemplateVersion: "v1",
+			Name: "Avlopp 1", Location: rtLoc(), Metadata: rtMeta(),
 			Properties: map[string]things.Property{
 				"distance": {}, "overflow": {}, "overflowTime": {},
 			},
@@ -1490,6 +1519,18 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 				bind("s-sink", seedDinURN, "5500", "presence"),
 			},
 		},
+	}
+	// Beskrivande fält är obligatoriska men inte under test här.
+	for i := range objects {
+		if objects[i].Name == "" {
+			objects[i].Name = objects[i].ThingID
+		}
+		if objects[i].Location == nil {
+			objects[i].Location = rtLoc()
+		}
+		if len(objects[i].Metadata) == 0 {
+			objects[i].Metadata = rtMeta()
+		}
 	}
 	_ = fs
 	for _, obj := range objects {

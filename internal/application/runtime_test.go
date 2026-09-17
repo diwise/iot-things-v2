@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -506,6 +507,7 @@ func rtBinCatalog(t *testing.T) *catalog.Catalog {
 		Template: things.Template{
 			ID: "wastebin", Version: "v1",
 			Required: []string{"distance", "level", "fillRate"},
+			Category: "wastebin",
 		},
 		ParamDefaults: map[string]float64{"usableHeight": 1.0, "sensorToBottom": 1.5},
 		Overridable:   []string{"sensorToBottom"},
@@ -534,7 +536,8 @@ func rtBinCatalog(t *testing.T) *catalog.Catalog {
 
 func rtBinObject() catalog.ObjectSpec {
 	return catalog.ObjectSpec{
-		ThingID: "bin-42", Tenant: "t",
+		ThingID: "bin-42", Tenant: "t", Name: "Soptunna 42",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "wastebin", TemplateVersion: "v1",
 		VariantID: "wastebin-B", VariantVersion: "v1",
 		Properties: map[string]things.Property{
@@ -566,6 +569,16 @@ func rtBoolObs(device, object, resource string, v bool, at time.Time) things.Obs
 		ObservedAt: at,
 		ReceivedAt: at,
 	}
+}
+
+// rtLoc/rtMeta ger giltiga beskrivande fält för testsaker: alla saker
+// kräver namn, plats, metadata och kategori.
+func rtLoc() *things.Location {
+	return &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)}
+}
+
+func rtMeta() map[string]string {
+	return map[string]string{"test": "true"}
 }
 
 type fakePublisher struct {
@@ -738,12 +751,13 @@ func TestRuntimeConcurrentBatches(t *testing.T) {
 	rt := NewRuntime(fs)
 	c := catalog.New()
 	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
-		ID: "gauge", Version: "v1", Required: []string{"distance"},
+		ID: "gauge", Version: "v1", Required: []string{"distance"}, Category: "gauge",
 	}}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	obj := catalog.ObjectSpec{
-		ThingID: "gauge-1", Tenant: "t",
+		ThingID: "gauge-1", Tenant: "t", Name: "Mätare 1",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "gauge", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}},
 		Bindings: []things.Binding{
@@ -838,12 +852,13 @@ func TestRuntimeCrossInstanceConcurrency(t *testing.T) {
 	fs := newFakeStore()
 	c := catalog.New()
 	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
-		ID: "gauge", Version: "v1", Required: []string{"distance"},
+		ID: "gauge", Version: "v1", Required: []string{"distance"}, Category: "gauge",
 	}}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	obj := catalog.ObjectSpec{
-		ThingID: "gauge-1", Tenant: "t",
+		ThingID: "gauge-1", Tenant: "t", Name: "Mätare 1",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "gauge", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}},
 		Bindings: []things.Binding{
@@ -899,13 +914,14 @@ func TestRuntimeRelationsMoveDelete(t *testing.T) {
 	c := catalog.New()
 	roomTmpl := catalog.TemplateSpec{Template: things.Template{
 		ID: "room", Version: "v1",
+		Category:     "room",
 		RepeatGroups: []string{"temperature."},
 		Relations: []things.RelationSpec{
 			{Name: "partOf", AllowedTargets: []string{"building"}, Min: 0, Max: 1},
 		},
 	}}
 	buildingTmpl := catalog.TemplateSpec{Template: things.Template{
-		ID: "building", Version: "v1",
+		ID: "building", Version: "v1", Category: "building",
 	}}
 	if err := c.PutTemplate(roomTmpl); err != nil {
 		t.Fatalf("put room: %v", err)
@@ -920,7 +936,8 @@ func TestRuntimeRelationsMoveDelete(t *testing.T) {
 			rels = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "building"}}
 		}
 		return catalog.ObjectSpec{
-			ThingID: id, Tenant: "t",
+			ThingID: id, Tenant: "t", Name: id,
+			Location: rtLoc(), Metadata: rtMeta(),
 			TemplateID: "room", TemplateVersion: "v1",
 			Properties: props,
 			Bindings: []things.Binding{
@@ -931,7 +948,8 @@ func TestRuntimeRelationsMoveDelete(t *testing.T) {
 	}
 	mkBuilding := func(id string) catalog.ObjectSpec {
 		return catalog.ObjectSpec{
-			ThingID: id, Tenant: "t",
+			ThingID: id, Tenant: "t", Name: id,
+			Location: rtLoc(), Metadata: rtMeta(),
 			TemplateID: "building", TemplateVersion: "v1",
 			Properties: map[string]things.Property{},
 		}
@@ -1095,7 +1113,7 @@ func TestRuntimeDedupNotMarkedOnEvaluateError(t *testing.T) {
 	rt := NewRuntime(fs)
 	c2 := catalog.New()
 	if err := c2.PutTemplate(catalog.TemplateSpec{Template: things.Template{
-		ID: "gauge", Version: "v1", Required: []string{"distance"}, Optional: []string{"level"},
+		ID: "gauge", Version: "v1", Required: []string{"distance"}, Category: "gauge", Optional: []string{"level"},
 	},
 		Recipes: []catalog.Recipe{{
 			Name: "bad", Operator: "bogus-operator", Version: "v1",
@@ -1105,7 +1123,8 @@ func TestRuntimeDedupNotMarkedOnEvaluateError(t *testing.T) {
 		t.Fatalf("put c2: %v", err)
 	}
 	obj := catalog.ObjectSpec{
-		ThingID: "g1", Tenant: "t",
+		ThingID: "g1", Tenant: "t", Name: "Mätare 1",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "gauge", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}, "level": {}},
 		Bindings: []things.Binding{
@@ -1193,12 +1212,13 @@ func TestRuntimeRegisterThingParentValidation(t *testing.T) {
 	c := catalog.New()
 	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
 		ID: "room", Version: "v1",
+		Category:  "room",
 		Relations: []things.RelationSpec{{Name: "partOf", AllowedTargets: []string{"building"}, Min: 0, Max: 1}},
 	}}); err != nil {
 		t.Fatalf("put room: %v", err)
 	}
 	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
-		ID: "building", Version: "v1",
+		ID: "building", Version: "v1", Category: "building",
 	}}); err != nil {
 		t.Fatalf("put building: %v", err)
 	}
@@ -1208,14 +1228,15 @@ func TestRuntimeRegisterThingParentValidation(t *testing.T) {
 			rels = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "building"}}
 		}
 		return catalog.ObjectSpec{
-			ThingID: "room-x", Tenant: "t",
+			ThingID: "room-x", Tenant: "t", Name: "Rum X",
+			Location: rtLoc(), Metadata: rtMeta(),
 			TemplateID: "room", TemplateVersion: "v1",
 			Properties: map[string]things.Property{},
 			Relations:  rels,
 		}
 	}
 	mkBuilding := func(id string) catalog.ObjectSpec {
-		return catalog.ObjectSpec{ThingID: id, Tenant: "t", TemplateID: "building", TemplateVersion: "v1", Properties: map[string]things.Property{}}
+		return catalog.ObjectSpec{ThingID: id, Tenant: "t", Name: id, Location: rtLoc(), Metadata: rtMeta(), TemplateID: "building", TemplateVersion: "v1", Properties: map[string]things.Property{}}
 	}
 	// Dangling parent ska nekas.
 	if _, err := rt.RegisterThing("t", c, mkRoom("missing"), 1); err == nil {
@@ -1385,6 +1406,7 @@ func TestRuntimeRegisterCycleDenied(t *testing.T) {
 	c := catalog.New()
 	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
 		ID: "node", Version: "v1",
+		Category:  "node",
 		Relations: []things.RelationSpec{{Name: "partOf", AllowedTargets: []string{"node"}, Min: 0, Max: 1}},
 	}}); err != nil {
 		t.Fatalf("put: %v", err)
@@ -1394,7 +1416,7 @@ func TestRuntimeRegisterCycleDenied(t *testing.T) {
 		if parent != "" {
 			rels = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "node"}}
 		}
-		return catalog.ObjectSpec{ThingID: id, Tenant: "t", TemplateID: "node", TemplateVersion: "v1", Properties: map[string]things.Property{}, Relations: rels}
+		return catalog.ObjectSpec{ThingID: id, Tenant: "t", Name: id, Location: rtLoc(), Metadata: rtMeta(), TemplateID: "node", TemplateVersion: "v1", Properties: map[string]things.Property{}, Relations: rels}
 	}
 	if _, err := rt.RegisterThing("t", c, mk("a", ""), 1); err != nil {
 		t.Fatalf("register a: %v", err)
@@ -1424,12 +1446,13 @@ func TestRuntimeConcurrentRegisterSameThing(t *testing.T) {
 	fs := newFakeStore()
 	c := catalog.New()
 	if err := c.PutTemplate(catalog.TemplateSpec{Template: things.Template{
-		ID: "gauge", Version: "v1", Required: []string{"distance"},
+		ID: "gauge", Version: "v1", Required: []string{"distance"}, Category: "gauge",
 	}}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	obj := catalog.ObjectSpec{
-		ThingID: "gauge-1", Tenant: "t",
+		ThingID: "gauge-1", Tenant: "t", Name: "Mätare 1",
+		Location: rtLoc(), Metadata: rtMeta(),
 		TemplateID: "gauge", TemplateVersion: "v1",
 		Properties: map[string]things.Property{"distance": {}},
 		Bindings: []things.Binding{
