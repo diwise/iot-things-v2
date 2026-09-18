@@ -909,6 +909,73 @@ func TestCompileRequiresDescriptiveFields(t *testing.T) {
 
 func ptr(v float64) *float64 { return &v }
 
+// Geometripolicy: default tillåter punkt + polygon men kräver plats;
+// mallen kan låsa till punkt och/eller tillåta saknad plats.
+func TestCompileGeometryPolicy(t *testing.T) {
+	polygon := &things.Location{Type: "Polygon", Coordinates: json.RawMessage(`[[[18.0,59.3],[18.1,59.3],[18.1,59.4],[18.0,59.3]]]`)}
+
+	base := ObjectSpec{
+		ThingID: "geo-1", Tenant: "t", Name: "Geo",
+		Location:   testLocation(),
+		TemplateID: "wastebin", TemplateVersion: "v1",
+		Properties: map[string]things.Property{
+			"distance": {}, "level": {}, "fillRate": {},
+		},
+	}
+
+	tmpl := wastebinTemplate()
+	if err := New().PutTemplate(tmpl); err != nil {
+		t.Fatalf("put default: %v", err)
+	}
+	badKind := wastebinTemplate()
+	badKind.Template.AllowedGeometries = []string{"Circle"}
+	if err := New().PutTemplate(badKind); err == nil {
+		t.Fatal("unknown geometry kind must fail")
+	}
+
+	c := New()
+	if err := c.PutTemplate(wastebinTemplate()); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	obj := base
+	obj.Location = polygon
+	if _, err := c.Compile(obj); err != nil {
+		t.Fatalf("polygon allowed by default: %v", err)
+	}
+
+	pointOnly := wastebinTemplate()
+	pointOnly.Template.AllowedGeometries = []string{"Point"}
+	c2 := New()
+	if err := c2.PutTemplate(pointOnly); err != nil {
+		t.Fatalf("publish point-only: %v", err)
+	}
+	obj = base
+	obj.Location = polygon
+	if _, err := c2.Compile(obj); err == nil {
+		t.Fatal("polygon must fail on point-only template")
+	}
+	obj.Location = testLocation()
+	if _, err := c2.Compile(obj); err != nil {
+		t.Fatalf("point on point-only template: %v", err)
+	}
+	obj.Location = nil
+	if _, err := c2.Compile(obj); err == nil {
+		t.Fatal("missing location must fail by default")
+	}
+
+	free := wastebinTemplate()
+	free.Template.AllowNoLocation = true
+	c3 := New()
+	if err := c3.PutTemplate(free); err != nil {
+		t.Fatalf("publish free: %v", err)
+	}
+	obj = base
+	obj.Location = nil
+	if _, err := c3.Compile(obj); err != nil {
+		t.Fatalf("missing location allowed by template: %v", err)
+	}
+}
+
 // Egenskapsdefinitioner: okänd egenskap nekas; prefill fyller tomma fält
 // men skriver aldrig över uttryckliga värden.
 func TestPropertyDefs(t *testing.T) {

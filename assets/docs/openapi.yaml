@@ -590,6 +590,15 @@ components:
         allowedQuantities:
           type: array
           items: { type: string }
+        allowedGeometries:
+          type: array
+          description: Tillåtna GeoJSON-typer för platsen (Point/Polygon). Tomt = båda.
+          items:
+            type: string
+            enum: [Point, Polygon]
+        allowNoLocation:
+          type: boolean
+          description: Tillåt saker utan plats. Default false = plats krävs.
         relations:
           type: array
           items:

@@ -334,19 +334,26 @@ func (l Location) WithinRadius(lon, lat, radiusMeters float64) bool {
 // DisplayName/Description are GUI labels; PropertyDefs documents allowed
 // properties for form building (IDs must be template-allowed).
 type Template struct {
-	ID                string                 `json:"id"`
-	Version           string                 `json:"version"`
-	Required          []string               `json:"required,omitempty"`
-	Optional          []string               `json:"optional,omitempty"`
-	RepeatGroups      []string               `json:"repeatGroups,omitempty"`
-	AllowedQuantities []string               `json:"allowedQuantities,omitempty"`
-	Relations         []RelationSpec         `json:"relations,omitempty"`
-	Category          string                 `json:"category,omitempty"`
-	Labels            []string               `json:"labels,omitempty"`
-	PrimaryProperty   string                 `json:"primaryProperty,omitempty"`
-	DisplayName       string                 `json:"displayName,omitempty"`
-	Description       string                 `json:"description,omitempty"`
-	PropertyDefs      map[string]PropertyDef `json:"propertyDefs,omitempty"`
+	ID                string   `json:"id"`
+	Version           string   `json:"version"`
+	Required          []string `json:"required,omitempty"`
+	Optional          []string `json:"optional,omitempty"`
+	RepeatGroups      []string `json:"repeatGroups,omitempty"`
+	AllowedQuantities []string `json:"allowedQuantities,omitempty"`
+	// AllowedGeometries styr vilka GeoJSON-typer platsen får ha
+	// (t.ex. ["Point"] eller ["Point","Polygon"]). Tomt = punkt +
+	// polygon (bakåtkompatibelt). Styrs per mallversion.
+	AllowedGeometries []string `json:"allowedGeometries,omitempty"`
+	// AllowNoLocation tillåter saker utan plats (t.ex. en tank som
+	// hämtar sin position från sitt växthus). Default false = plats krävs.
+	AllowNoLocation bool                   `json:"allowNoLocation,omitempty"`
+	Relations       []RelationSpec         `json:"relations,omitempty"`
+	Category        string                 `json:"category,omitempty"`
+	Labels          []string               `json:"labels,omitempty"`
+	PrimaryProperty string                 `json:"primaryProperty,omitempty"`
+	DisplayName     string                 `json:"displayName,omitempty"`
+	Description     string                 `json:"description,omitempty"`
+	PropertyDefs    map[string]PropertyDef `json:"propertyDefs,omitempty"`
 }
 
 // ValidatePropertyID reports whether id is allowed by the closed
@@ -370,6 +377,22 @@ func (t Template) ValidatePropertyID(id string) error {
 		}
 	}
 	return fmt.Errorf("%w: property %q not allowed by template %s/%s", ErrValidation, id, t.ID, t.Version)
+}
+
+// ValidateGeometryKind reports whether a GeoJSON geometry type is allowed
+// for the template's location. An empty list means point + polygon
+// (legacy behavior: the shape itself is validated by Location.Validate).
+func (t Template) ValidateGeometryKind(kind string) error {
+	allowed := t.AllowedGeometries
+	if len(allowed) == 0 {
+		allowed = []string{"Point", "Polygon"}
+	}
+	for _, k := range allowed {
+		if strings.EqualFold(k, kind) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: geometry %q not allowed by template %s/%s", ErrValidation, kind, t.ID, t.Version)
 }
 
 // Variant is a named, versioned configuration of exactly one template

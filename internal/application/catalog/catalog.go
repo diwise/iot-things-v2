@@ -238,6 +238,7 @@ func cloneTemplateSpec(spec TemplateSpec) TemplateSpec {
 	t.Optional = cloneStrings(t.Optional)
 	t.RepeatGroups = cloneStrings(t.RepeatGroups)
 	t.AllowedQuantities = cloneStrings(t.AllowedQuantities)
+	t.AllowedGeometries = cloneStrings(t.AllowedGeometries)
 	t.Labels = cloneStrings(t.Labels)
 	if t.Relations != nil {
 		rels := make([]things.RelationSpec, len(t.Relations))
@@ -309,6 +310,11 @@ func (c *Catalog) PutTemplate(spec TemplateSpec) error {
 	t := spec.Template
 	if err := validateVersionedID(t.ID, t.Version, "template"); err != nil {
 		return err
+	}
+	for _, kind := range t.AllowedGeometries {
+		if !strings.EqualFold(kind, "Point") && !strings.EqualFold(kind, "Polygon") {
+			return fmt.Errorf("%w: template %s/%s has unknown geometry kind %q", things.ErrValidation, t.ID, t.Version, kind)
+		}
 	}
 	seenProps := make(map[string]struct{}, len(t.Required)+len(t.Optional))
 	for _, id := range append(append([]string{}, t.Required...), t.Optional...) {
@@ -548,15 +554,13 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 	if obj.TemplateID == "" || obj.TemplateVersion == "" {
 		return nil, fmt.Errorf("%w: object %q must reference a template version", things.ErrValidation, obj.ThingID)
 	}
-	// Beskrivande fält är obligatoriska för alla saker: namn, plats och
-	// kategori (ärvd eller egen). Metadata, bindningar och relationer är
-	// frivilliga: överordnade objekt kan sakna egna sensorer och
-	// fristående objekt sakna föräldrar.
+	// Beskrivande fält är obligatoriska för alla saker: namn och kategori
+	// (ärvd eller egen). Plats krävs om inte mallen tillåter saknad plats;
+	// geometritypen måste finnas bland mallens tillåtna. Metadata,
+	// bindningar och relationer är frivilliga: överordnade objekt kan sakna
+	// egna sensorer och fristående objekt sakna föräldrar.
 	if strings.TrimSpace(obj.Name) == "" {
 		return nil, fmt.Errorf("%w: object %q must have a name", things.ErrValidation, obj.ThingID)
-	}
-	if obj.Location == nil {
-		return nil, fmt.Errorf("%w: object %q must have a location", things.ErrValidation, obj.ThingID)
 	}
 
 	c.mu.RLock()
@@ -601,9 +605,14 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 		}
 	}
 	if obj.Location != nil {
+		if err := t.ValidateGeometryKind(obj.Location.Type); err != nil {
+			return nil, fmt.Errorf("%w: object %q: %w", things.ErrValidation, obj.ThingID, err)
+		}
 		if err := obj.Location.Validate(); err != nil {
 			return nil, fmt.Errorf("%w: object %q: %w", things.ErrValidation, obj.ThingID, err)
 		}
+	} else if !t.AllowNoLocation {
+		return nil, fmt.Errorf("%w: object %q must have a location", things.ErrValidation, obj.ThingID)
 	}
 	if err := validateMetadata(obj.ThingID, obj.Metadata); err != nil {
 		return nil, err
