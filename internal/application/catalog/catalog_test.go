@@ -789,8 +789,8 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse seed: %v", err)
 	}
-	if len(seed.Templates) != 14 {
-		t.Fatalf("templates=%d, want 14 (11 iot-things-typer + greenhouse/tank + poi/v2)", len(seed.Templates))
+	if len(seed.Templates) != 27 {
+		t.Fatalf("templates=%d, want 27 (14 publicerade + 13 nya versioner med partOf)", len(seed.Templates))
 	}
 	c := New()
 	for _, spec := range seed.Templates {
@@ -798,16 +798,38 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 			t.Fatalf("publish %s/%s: %v", spec.Template.ID, spec.Template.Version, err)
 		}
 	}
+	// Alla nya versioner bär en öppen partOf-slot (valfri, max en förälder).
+	latest := map[string]string{}
+	for _, spec := range seed.Templates {
+		if spec.Template.Version > latest[spec.Template.ID] {
+			latest[spec.Template.ID] = spec.Template.Version
+		}
+	}
+	for id, version := range latest {
+		spec, ok := c.GetTemplate(id, version)
+		if !ok {
+			t.Fatalf("missing %s/%s", id, version)
+		}
+		found := false
+		for _, rel := range spec.Template.Relations {
+			if rel.Name == "partOf" && len(rel.AllowedTargets) == 0 && rel.Min == 0 && rel.Max == 1 {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s/%s saknar öppen partOf-slot", id, version)
+		}
+	}
 	for _, spec := range seed.Variants {
 		if err := c.PutVariant(spec); err != nil {
 			t.Fatalf("publish variant %s/%s: %v", spec.Variant.ID, spec.Variant.Version, err)
 		}
 	}
-	if got := c.ListTemplates(); len(got) != 14 {
-		t.Fatalf("listed=%d, want 14", len(got))
+	if got := c.ListTemplates(); len(got) != 27 {
+		t.Fatalf("listed=%d, want 27", len(got))
 	}
-	if got := c.ListVariants(); len(got) != 6 {
-		t.Fatalf("variants=%d, want 6 (wastebin A-D + 160L + 40L)", len(got))
+	if got := c.ListVariants(); len(got) != 12 {
+		t.Fatalf("variants=%d, want 12 (6 v1 + 6 v2)", len(got))
 	}
 }
 

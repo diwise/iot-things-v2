@@ -1422,16 +1422,16 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if added != 20 || skipped != 0 {
-		t.Fatalf("seed added=%d skipped=%d, want 20/0", added, skipped)
+	if added != 39 || skipped != 0 {
+		t.Fatalf("seed added=%d skipped=%d, want 39/0", added, skipped)
 	}
 	// Idempotent: andra seedningen skippar allt.
 	added, skipped, err = mgr.SeedCatalog(ctx, seed)
 	if err != nil {
 		t.Fatalf("reseed: %v", err)
 	}
-	if added != 0 || skipped != 20 {
-		t.Fatalf("reseed added=%d skipped=%d, want 0/20", added, skipped)
+	if added != 0 || skipped != 39 {
+		t.Fatalf("reseed added=%d skipped=%d, want 0/39", added, skipped)
 	}
 
 	bind := func(device, object, resource, input string) things.Binding {
