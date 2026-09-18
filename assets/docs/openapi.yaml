@@ -276,6 +276,20 @@ paths:
                 $ref: '#/components/schemas/ThingSummary'
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /things/{id}/config:
+    get:
+      tags: [Things]
+      summary: Läs sakens lagrade effektiva config (underlag för redigering)
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+      responses:
+        '200':
+          description: Effektiv konfiguration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EffectiveConfig'
+        '404': { $ref: '#/components/responses/NotFound' }
   /things/{id}/preview:
     put:
       tags: [Things]

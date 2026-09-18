@@ -253,6 +253,24 @@ func TestV0BindingsPreviewHistory(t *testing.T) {
 	if rr := doGET(h.getBindings, ctx, "nope", ""); rr.Code != http.StatusNotFound {
 		t.Fatalf("unknown bindings=%d, want 404", rr.Code)
 	}
+
+	rr = doGET(h.getConfig, ctx, "bin-42", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("config: %d %s", rr.Code, rr.Body.String())
+	}
+	var cfg catalog.EffectiveConfig
+	if err := json.Unmarshal(rr.Body.Bytes(), &cfg); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	if cfg.TemplateID != "wastebin" || len(cfg.Bindings) != 1 || cfg.Bindings[0].DeviceID != "milesight:215" {
+		t.Fatalf("config=%+v", cfg)
+	}
+	if len(cfg.Relations) != 0 {
+		t.Fatalf("expected no relations, got %+v", cfg.Relations)
+	}
+	if rr := doGET(h.getConfig, ctx, "nope", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown config=%d, want 404", rr.Code)
+	}
 }
 
 func TestV0UpgradeMoveDelete(t *testing.T) {

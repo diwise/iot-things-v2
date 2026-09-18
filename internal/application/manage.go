@@ -456,6 +456,20 @@ func (m *Manager) GetBindings(_ context.Context, tenant, thingID string) ([]thin
 	return cfg.Bindings, nil
 }
 
+// GetConfig läser sakens lagrade effektiva config (read-only underlag
+// för redigeringsformulär; ändras via UpdateObject/SwapBindings).
+func (m *Manager) GetConfig(_ context.Context, tenant, thingID string) (*catalog.EffectiveConfig, error) {
+	st, ok := m.store.LoadThing(tenant, thingID)
+	if !ok {
+		return nil, fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
+	}
+	cfg, err := decodeConfig(st.ConfigJSON)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // SearchFilter styr saklistning: exakta matchningar på mall/variant samt
 // skiftlägesokänslig delsträng på namn. Tomma fält filtrerar inget.
 // Limit > 0 kapar, Offset > 0 hoppar över de första (sorterat på thing-ID).
