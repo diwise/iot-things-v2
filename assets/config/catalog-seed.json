@@ -1137,6 +1137,70 @@
     },
     {
       "template": {
+        "id": "tank",
+        "version": "v3",
+        "required": [
+          "ph",
+          "co2",
+          "temperature",
+          "waterLevel"
+        ],
+        "category": "tank",
+        "labels": [
+          "Tank"
+        ],
+        "primaryProperty": "waterLevel",
+        "displayName": "Tank",
+        "description": "Tank med pH, co2, temperatur och vattennivå. Kopplas till växthus via partOf.",
+        "propertyDefs": {
+          "ph": {
+            "displayName": "pH",
+            "description": "Surhetsgrad",
+            "dataType": "number",
+            "quantity": "ph"
+          },
+          "co2": {
+            "displayName": "CO2",
+            "dataType": "number",
+            "quantity": "co2",
+            "unit": "PPM",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3428",
+                "resource": "17"
+              }
+            ]
+          },
+          "temperature": {
+            "displayName": "Temperatur",
+            "dataType": "number",
+            "quantity": "temperature",
+            "unit": "Cel",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3303",
+                "resource": "5700"
+              }
+            ]
+          },
+          "waterLevel": {
+            "displayName": "Vattennivå",
+            "dataType": "number",
+            "quantity": "distance",
+            "unit": "m"
+          }
+        },
+        "relations": [
+          {
+            "name": "partOf",
+            "min": 0,
+            "max": 1
+          }
+        ]
+      }
+    },
+    {
+      "template": {
         "id": "wastebin",
         "version": "v2",
         "required": [
