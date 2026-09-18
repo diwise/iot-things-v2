@@ -957,3 +957,61 @@ func doJSONTenant(fn func(http.ResponseWriter, *http.Request), ctx context.Conte
 	fn(rr, req)
 	return rr
 }
+
+// Scenariot: token ger default+sbk. Sökning utan parametrar hämtar exakt
+// dessa två tenants (en tredje läcker aldrig), med ?tenant= filtreras.
+func TestV0SearchDefaultAndSbk(t *testing.T) {
+	h, _, _ := v0setup(t)
+	v0wastebin(t, h)
+	user := auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		"default": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+		"sbk":     {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+	})
+	mkBin := func(id string) catalog.ObjectSpec {
+		obj := v0binObject()
+		obj.ThingID = id
+		return obj
+	}
+	// En sak per tenant, plus en i en tenant användaren saknar.
+	for _, tc := range []struct{ id, tenant string }{
+		{"bin-default", "default"}, {"bin-sbk", "sbk"},
+	} {
+		if rr := doJSONTenant(h.createThing, user, "", mkBin(tc.id), "", tc.tenant); rr.Code != http.StatusCreated {
+			t.Fatalf("create %s/%s: %d %s", tc.tenant, tc.id, rr.Code, rr.Body.String())
+		}
+	}
+	other := auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		"other": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+	})
+	otherBin := mkBin("bin-other")
+	if rr := doJSONTenant(h.createThing, other, "", otherBin, "", "other"); rr.Code != http.StatusCreated {
+		t.Fatalf("create other: %d %s", rr.Code, rr.Body.String())
+	}
+
+	rr := doGET(h.searchThings, user, "", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-Total-Count") != "2" {
+		t.Fatalf("total=%q, want 2 (default+sbk only)", rr.Header().Get("X-Total-Count"))
+	}
+	var found []application.ThingSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 2 || found[0].ThingID != "bin-default" || found[1].ThingID != "bin-sbk" {
+		t.Fatalf("merged=%+v, want default+sbk sorted", found)
+	}
+	if found[0].Tenant != "default" || found[1].Tenant != "sbk" {
+		t.Fatalf("tenants leak or mislabeled: %+v", found)
+	}
+	// Filter till en tenant.
+	rr = doGET(h.searchThings, user, "", "tenant=sbk")
+	found = nil
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 1 || found[0].ThingID != "bin-sbk" {
+		t.Fatalf("filtered=%+v, want only sbk", found)
+	}
+}
