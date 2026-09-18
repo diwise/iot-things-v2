@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -156,35 +157,46 @@ type handler struct {
 	mgr Manager
 }
 
-// tenant resolves the authorized tenant for the request. A user with
-// several tenants selects one explicitly via ?tenant=; without a selector
-// an ambiguous request fails instead of merging tenants silently or
-// writing to the wrong one. Reads never fan out across tenants.
+// tenants resolves the authorized tenants for the request from the token.
+// ?tenant= is only a filter: it must name an authorized tenant, otherwise
+// all authorized tenants are returned. Reads fan out across them; writes
+// use tenant() and require exactly one.
 // scope är endpointets eget kravscope (läs/skapa/uppdatera/ta bort):
 // tenanten måste vara auktoriserad för just den åtgärden, inte bara läs.
-func tenant(r *http.Request, scope auth.Scope) (string, error) {
-	tenants := auth.GetTenantsWithAllowedScopes(r.Context(), scope)
-	if len(tenants) == 0 {
-		return "", errUnauthorized
+func tenants(r *http.Request, scope auth.Scope) ([]string, error) {
+	authorized := auth.GetTenantsWithAllowedScopes(r.Context(), scope)
+	if len(authorized) == 0 {
+		return nil, errUnauthorized
 	}
-	selected := r.URL.Query().Get("tenant")
-	if selected != "" {
-		for _, t := range tenants {
+	if selected := r.URL.Query().Get("tenant"); selected != "" {
+		for _, t := range authorized {
 			if t == selected {
-				return t, nil
+				return []string{selected}, nil
 			}
 		}
-		return "", errUnauthorized
+		return nil, errUnauthorized
 	}
-	if len(tenants) != 1 {
+	return authorized, nil
+}
+
+// tenant resolves the single tenant for endpoints that cannot fan out
+// (all mutations, previews): the selected tenant, or the sole authorized
+// one. Anything else fails instead of writing to the wrong tenant.
+func tenant(r *http.Request, scope auth.Scope) (string, error) {
+	ts, err := tenants(r, scope)
+	if err != nil {
+		return "", err
+	}
+	if len(ts) != 1 {
 		return "", errAmbiguousTenant
 	}
-	return tenants[0], nil
+	return ts[0], nil
 }
 
 var (
 	errUnauthorized    = errors.New("unauthorized")
 	errAmbiguousTenant = errors.New("ambiguous tenant")
+	errAmbiguousThing  = errors.New("ambiguous thing")
 )
 
 func writeAPIError(w http.ResponseWriter, err error) {
@@ -193,6 +205,8 @@ func writeAPIError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 	case errors.Is(err, errAmbiguousTenant):
 		writeError(w, http.StatusBadRequest, "ambiguous tenant (select one via ?tenant=)")
+	case errors.Is(err, errAmbiguousThing):
+		writeError(w, http.StatusBadRequest, "ambiguous thing id (select tenant via ?tenant=)")
 	case errors.Is(err, things.ErrValidation):
 		writeError(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, things.ErrNotFound):
@@ -234,7 +248,7 @@ func (h *handler) publishTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) listTemplates(w http.ResponseWriter, r *http.Request) {
-	if _, err := tenant(r, ReadThings); err != nil {
+	if _, err := tenants(r, ReadThings); err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -259,7 +273,7 @@ func (h *handler) publishVariant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) listVariants(w http.ResponseWriter, r *http.Request) {
-	if _, err := tenant(r, ReadThings); err != nil {
+	if _, err := tenants(r, ReadThings); err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -267,7 +281,7 @@ func (h *handler) listVariants(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getTemplate(w http.ResponseWriter, r *http.Request) {
-	if _, err := tenant(r, ReadThings); err != nil {
+	if _, err := tenants(r, ReadThings); err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -280,7 +294,7 @@ func (h *handler) getTemplate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getVariant(w http.ResponseWriter, r *http.Request) {
-	if _, err := tenant(r, ReadThings); err != nil {
+	if _, err := tenants(r, ReadThings); err != nil {
 		writeAPIError(w, err)
 		return
 	}
@@ -319,7 +333,7 @@ func (h *handler) createThing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
-	t, err := tenant(r, ReadThings)
+	ts, err := tenants(r, ReadThings)
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -341,8 +355,6 @@ func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
 		VariantID:       q.Get("variant"),
 		NameContains:    q.Get("name"),
 		Category:        q.Get("category"),
-		Limit:           limit,
-		Offset:          offset,
 	}
 	for key, vals := range q {
 		name, ok := strings.CutPrefix(key, "meta.")
@@ -370,19 +382,68 @@ func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.Near = &near
 	}
-	// Total före paging i X-Total-Count (egen ofiltrerad räkning;
-	// dyr vid stora kataloger, men korrekt utan separat count-väg).
-	totalFilter := filter
-	totalFilter.Limit = 0
-	totalFilter.Offset = 0
-	w.Header().Set("X-Total-Count", strconv.Itoa(len(h.mgr.SearchObjects(r.Context(), t, totalFilter))))
-	writeJSON(w, http.StatusOK, h.mgr.SearchObjects(r.Context(), t, filter))
+	// Fanout över tenants (?tenant= filtrerar): paging appliceras globalt
+	// efter merge, total före paging i X-Total-Count.
+	var merged []application.ThingSummary
+	for _, t := range ts {
+		merged = append(merged, h.mgr.SearchObjects(r.Context(), t, filter)...)
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].ThingID != merged[j].ThingID {
+			return merged[i].ThingID < merged[j].ThingID
+		}
+		return merged[i].Tenant < merged[j].Tenant
+	})
+	w.Header().Set("X-Total-Count", strconv.Itoa(len(merged)))
+	if offset > 0 {
+		if offset >= len(merged) {
+			merged = nil
+		} else {
+			merged = merged[offset:]
+		}
+	}
+	if limit > 0 && len(merged) > limit {
+		merged = merged[:limit]
+	}
+	if merged == nil {
+		merged = []application.ThingSummary{}
+	}
+	writeJSON(w, http.StatusOK, merged)
 }
 
-func (h *handler) getThing(w http.ResponseWriter, r *http.Request) {
-	t, err := tenant(r, ReadThings)
+// resolveThing finds the tenant owning id across authorized tenants:
+// exactly one hit is required (0 -> 404, several -> 400), so reads never
+// silently pick a tenant for the caller.
+func (h *handler) resolveThing(w http.ResponseWriter, r *http.Request, id string) (string, bool) {
+	ts, err := tenants(r, ReadThings)
 	if err != nil {
 		writeAPIError(w, err)
+		return "", false
+	}
+	if len(ts) == 1 {
+		return ts[0], true
+	}
+	var found string
+	hits := 0
+	for _, t := range ts {
+		if _, err := h.mgr.GetObject(r.Context(), t, id); err == nil {
+			found, hits = t, hits+1
+		}
+	}
+	switch hits {
+	case 0:
+		writeAPIError(w, fmt.Errorf("%w: thing %q", things.ErrNotFound, id))
+		return "", false
+	case 1:
+		return found, true
+	default:
+		writeAPIError(w, fmt.Errorf("%w: thing %q exists in %d tenants", errAmbiguousThing, id, hits))
+		return "", false
+	}
+}
+func (h *handler) getThing(w http.ResponseWriter, r *http.Request) {
+	t, ok := h.resolveThing(w, r, r.PathValue("id"))
+	if !ok {
 		return
 	}
 	sum, err := h.mgr.GetObject(r.Context(), t, r.PathValue("id"))
@@ -595,9 +656,8 @@ func (h *handler) moveThing(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
-	t, err := tenant(r, ReadThings)
-	if err != nil {
-		writeAPIError(w, err)
+	t, ok := h.resolveThing(w, r, r.PathValue("id"))
+	if !ok {
 		return
 	}
 	q := r.URL.Query()
@@ -633,9 +693,8 @@ func (h *handler) getHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getOverview(w http.ResponseWriter, r *http.Request) {
-	t, err := tenant(r, ReadThings)
-	if err != nil {
-		writeAPIError(w, err)
+	t, ok := h.resolveThing(w, r, r.PathValue("id"))
+	if !ok {
 		return
 	}
 	ov, err := h.mgr.Overview(r.Context(), t, r.PathValue("id"))
@@ -647,11 +706,11 @@ func (h *handler) getOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) getTree(w http.ResponseWriter, r *http.Request) {
-	t, err := tenant(r, ReadThings)
-	if err != nil {
-		writeAPIError(w, err)
+	t, ok := h.resolveThing(w, r, r.PathValue("id"))
+	if !ok {
 		return
 	}
+	var err error
 	depth := 1
 	if raw := r.URL.Query().Get("depth"); raw != "" {
 		depth, err = strconv.Atoi(raw)

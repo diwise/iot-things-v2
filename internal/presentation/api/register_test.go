@@ -461,8 +461,9 @@ func TestV0AmbiguousTenant(t *testing.T) {
 	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusBadRequest {
 		t.Fatalf("ambiguous create=%d, want 400", rr.Code)
 	}
-	if rr := doGET(h.getThing, ctx, "bin-42", ""); rr.Code != http.StatusBadRequest {
-		t.Fatalf("ambiguous get=%d, want 400", rr.Code)
+	// Läsningar fanar ut: okänt överallt ger 404, inte 400.
+	if rr := doGET(h.getThing, ctx, "bin-42", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("ambiguous get missing=%d, want 404", rr.Code)
 	}
 }
 
@@ -813,9 +814,9 @@ func TestV0MultiTenantSelector(t *testing.T) {
 	if rr := doJSONTenant(h.createThing, multi, "", obj, "", "t1"); rr.Code != http.StatusCreated {
 		t.Fatalf("create in t1: %d %s", rr.Code, rr.Body.String())
 	}
-	// Utan väljare: tvetydigt även vid läsning.
-	if rr := doGET(h.getThing, multi, "bin-t1", ""); rr.Code != http.StatusBadRequest {
-		t.Fatalf("ambiguous get=%d, want 400", rr.Code)
+	// Utan väljare fanas läsningen ut: träff i exakt en tenant ger 200.
+	if rr := doGET(h.getThing, multi, "bin-t1", ""); rr.Code != http.StatusOK {
+		t.Fatalf("fanout get=%d, want 200", rr.Code)
 	}
 	// Med väljare: läsning i rätt tenant, 404 i fel.
 	if rr := doGET(h.getThing, multi, "bin-t1", "tenant=t1"); rr.Code != http.StatusOK {
@@ -829,8 +830,109 @@ func TestV0MultiTenantSelector(t *testing.T) {
 		t.Fatalf("foreign tenant=%d, want 401", rr.Code)
 	}
 	// En-tenant-användare med fel väljare nekas.
-	if rr := doGET(h.getThing, v0ctx("t1"), "bin-t1", "tenant=t2"); rr.Code != http.StatusUnauthorized {
+	if rr := doJSONTenant(h.createThing, v0ctx("t1"), "", obj, "", "t2"); rr.Code != http.StatusUnauthorized {
 		t.Fatalf("wrong selector=%d, want 401", rr.Code)
+	}
+}
+
+// Samma sak-ID i två tenants: läsning utan väljare ger 400, med väljare 200.
+func TestV0MultiTenantAmbiguousThing(t *testing.T) {
+	h, _, _ := v0setup(t)
+	v0wastebin(t, h)
+	multi := auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		"t1": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+		"t2": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+	})
+	obj := v0binObject()
+	obj.ThingID = "bin-dup"
+	if rr := doJSONTenant(h.createThing, multi, "", obj, "", "t1"); rr.Code != http.StatusCreated {
+		t.Fatalf("create t1: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doJSONTenant(h.createThing, multi, "", obj, "", "t2"); rr.Code != http.StatusCreated {
+		t.Fatalf("create t2: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doGET(h.getThing, multi, "bin-dup", ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous thing=%d, want 400", rr.Code)
+	}
+	if rr := doGET(h.getThing, multi, "bin-dup", "tenant=t2"); rr.Code != http.StatusOK {
+		t.Fatalf("selected dup=%d, want 200", rr.Code)
+	}
+	var found application.ThingSummary
+	rr := doGET(h.getThing, multi, "bin-dup", "tenant=t2")
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if found.Tenant != "t2" {
+		t.Fatalf("tenant=%q, want t2", found.Tenant)
+	}
+}
+
+// Sökning fanar ut över tenants: träffar slås ihop sorterat, total summeras,
+// paging appliceras globalt. Katalogläsning kräver bara behörighet.
+func TestV0MultiTenantSearchMerge(t *testing.T) {
+	h, _, _ := v0setup(t)
+	v0wastebin(t, h)
+	multi := auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		"t1": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+		"t2": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+	})
+	mkBin := func(id string) catalog.ObjectSpec {
+		obj := v0binObject()
+		obj.ThingID = id
+		return obj
+	}
+	for _, tc := range []struct{ id, tenant string }{
+		{"bin-b", "t1"}, {"bin-a", "t1"}, {"bin-c", "t2"},
+	} {
+		if rr := doJSONTenant(h.createThing, multi, "", mkBin(tc.id), "", tc.tenant); rr.Code != http.StatusCreated {
+			t.Fatalf("create %s/%s: %d %s", tc.tenant, tc.id, rr.Code, rr.Body.String())
+		}
+	}
+	rr := doGET(h.searchThings, multi, "", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("search: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-Total-Count") != "3" {
+		t.Fatalf("total=%q, want 3", rr.Header().Get("X-Total-Count"))
+	}
+	var found []application.ThingSummary
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 3 || found[0].ThingID != "bin-a" || found[1].ThingID != "bin-b" || found[2].ThingID != "bin-c" {
+		t.Fatalf("merged=%+v, want sorted a/b/c", found)
+	}
+	if found[2].Tenant != "t2" {
+		t.Fatalf("tenant=%q, want t2", found[2].Tenant)
+	}
+	// Global paging: limit 2 ger a,b med total 3; offset 2 ger c.
+	rr = doGET(h.searchThings, multi, "", "limit=2")
+	if rr.Header().Get("X-Total-Count") != "3" {
+		t.Fatalf("paged total=%q, want 3", rr.Header().Get("X-Total-Count"))
+	}
+	found = nil
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 2 || found[0].ThingID != "bin-a" || found[1].ThingID != "bin-b" {
+		t.Fatalf("paged=%+v, want a/b", found)
+	}
+	rr = doGET(h.searchThings, multi, "", "offset=2")
+	found = nil
+	if err := json.Unmarshal(rr.Body.Bytes(), &found); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(found) != 1 || found[0].ThingID != "bin-c" {
+		t.Fatalf("offset=%+v, want c", found)
+	}
+	// ?tenant= filtrerar till en tenant.
+	rr = doGET(h.searchThings, multi, "", "tenant=t2")
+	if rr.Header().Get("X-Total-Count") != "1" {
+		t.Fatalf("filtered total=%q, want 1", rr.Header().Get("X-Total-Count"))
+	}
+	// Katalog läsbar med flera tenants (delad katalog, ingen fanout).
+	if rr := doGET(h.listTemplates, multi, "", ""); rr.Code != http.StatusOK {
+		t.Fatalf("catalog multi=%d, want 200", rr.Code)
 	}
 }
 

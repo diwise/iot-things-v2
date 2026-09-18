@@ -8,9 +8,10 @@ info:
     av saker kräver aktuell revision via If-Match (svarar 409 vid konflikt)
     och returnerar ny revision som ETag ("rev-<n>"). Alla saker kräver namn,
     plats och kategori (ärvd från mallen eller egen); metadata är frivillig.
-    Användare med flera tenants väljer en explicit via ?tenant= på samtliga
-    endpoints; utan väljare svarar tvetydiga anrop 400 och läsningar slås
-    aldrig ihop över tenants.
+    Användare med flera tenants får som standard alla de har access till
+    (läsningar fanar ut serverside; ?tenant= filtrerar till en).
+    Enskilda sak-anrop kräver entydig träff (0 -> 404, flera -> 400);
+    skrivningar kräver exakt en tenant (?tenant= vid tvetydighet).
     Muterande anrop dränerar livscykel-/relationshändelser inline: ett 500-svar
     efter lyckad validering kan betyda att tillståndet sparats men
     publiceringen väntar i outbox (levereras vid omstart); läs aktuellt
@@ -118,7 +119,7 @@ paths:
   /things:
     get:
       tags: [Things]
-      summary: Lista saker med filter och paging
+      summary: Lista saker med filter och paging (slås ihop över alla auktoriserade tenants)
       parameters:
         - $ref: '#/components/parameters/Tenant'
         - name: template
@@ -459,7 +460,7 @@ components:
     Tenant:
       name: tenant
       in: query
-      description: Välj tenant för fler-tenant-användare (krävs vid tvetydighet, gäller samtliga endpoints).
+      description: Filtrera till en tenant (måste vara auktoriserad). Utelämnad = alla auktoriserade tenants (läsningar); skrivningar kräver entydighet.
       schema: { type: string }
     Offset:
       name: offset

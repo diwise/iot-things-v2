@@ -16,8 +16,9 @@
   aktuella värden (nil utan primaryProperty/aktiverad egenskap).
 - `classification` heter `category` i kod/API (v2 ej i produktion;
   svenska dokument behåller "klassificering").
-- Fler-tenant-användare väljer tenant explicit med `?tenant=` på samtliga
-  endpoints; utan väljare ger tvetydighet 400, läsningar slås aldrig ihop.
+- Fler-tenant-användare: läsningar fanar ut serverside över token-auktoriserade
+  tenants (?tenant= filtrerar); enskild sak kräver entydig träff (0 -> 404,
+  flera -> 400); skrivningar kräver exakt en tenant.
 
 ## B – Beslut
 
