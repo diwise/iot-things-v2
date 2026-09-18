@@ -236,6 +236,23 @@ func TestV0BindingsPreviewHistory(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("bad limit=%d, want 400", rr.Code)
 	}
+
+	rr = doGET(h.getBindings, ctx, "bin-42", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("bindings: %d %s", rr.Code, rr.Body.String())
+	}
+	var bound struct {
+		Bindings []things.Binding `json:"bindings"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &bound); err != nil {
+		t.Fatalf("decode bindings: %v", err)
+	}
+	if len(bound.Bindings) != 1 || bound.Bindings[0].DeviceID != "milesight:215" {
+		t.Fatalf("bindings=%+v", bound.Bindings)
+	}
+	if rr := doGET(h.getBindings, ctx, "nope", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown bindings=%d, want 404", rr.Code)
+	}
 }
 
 func TestV0UpgradeMoveDelete(t *testing.T) {

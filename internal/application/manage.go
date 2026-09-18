@@ -439,6 +439,23 @@ func (m *Manager) GetObject(_ context.Context, tenant, thingID string) (ThingSum
 	return summarize(tenant, thingID, cfg, st), nil
 }
 
+// GetBindings läser sakens sensorkopplingar ur lagrad effektiv config
+// (read-only; ändras via SwapBindings).
+func (m *Manager) GetBindings(_ context.Context, tenant, thingID string) ([]things.Binding, error) {
+	st, ok := m.store.LoadThing(tenant, thingID)
+	if !ok {
+		return nil, fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
+	}
+	cfg, err := decodeConfig(st.ConfigJSON)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Bindings == nil {
+		return []things.Binding{}, nil
+	}
+	return cfg.Bindings, nil
+}
+
 // SearchFilter styr saklistning: exakta matchningar på mall/variant samt
 // skiftlägesokänslig delsträng på namn. Tomma fält filtrerar inget.
 // Limit > 0 kapar, Offset > 0 hoppar över de första (sorterat på thing-ID).

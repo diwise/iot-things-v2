@@ -230,6 +230,25 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
   /things/{id}/bindings:
+    get:
+      tags: [Things]
+      summary: Läs sakens sensorkopplingar
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+      responses:
+        '200':
+          description: Kopplingar
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [bindings]
+                properties:
+                  bindings:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Binding'
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       tags: [Things]
       summary: Byt sensorkopplingar utan att byta identitet/historik (kräver If-Match)

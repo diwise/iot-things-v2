@@ -66,6 +66,7 @@ type Manager interface {
 	UnlinkObject(ctx context.Context, tenant, childID string, revision int64) error
 	History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) ([]application.HistoryWrite, error)
 	GetObject(ctx context.Context, tenant, thingID string) (application.ThingSummary, error)
+	GetBindings(ctx context.Context, tenant, thingID string) ([]things.Binding, error)
 	SearchObjects(ctx context.Context, tenant string, filter application.SearchFilter) []application.ThingSummary
 	Overview(ctx context.Context, tenant, thingID string) (application.Overview, error)
 	Subtree(ctx context.Context, tenant, thingID string, depth int) (application.TreeNode, error)
@@ -122,6 +123,7 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, poli
 			r.Use(authz.RequireAccess(ReadThings))
 			r.Get("", h.searchThings)
 			r.Get("{id}", h.getThing)
+			r.Get("{id}/bindings", h.getBindings)
 			r.Get("{id}/history", h.getHistory)
 			r.Get("{id}/overview", h.getOverview)
 			r.Get("{id}/tree", h.getTree)
@@ -501,6 +503,20 @@ func (h *handler) deleteThing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) getBindings(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	t, ok := h.resolveThing(w, r, id)
+	if !ok {
+		return
+	}
+	bindings, err := h.mgr.GetBindings(r.Context(), t, id)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string][]things.Binding{"bindings": bindings})
 }
 
 func (h *handler) swapBindings(w http.ResponseWriter, r *http.Request) {
