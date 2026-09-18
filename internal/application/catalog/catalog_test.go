@@ -789,8 +789,8 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse seed: %v", err)
 	}
-	if len(seed.Templates) != 28 {
-		t.Fatalf("templates=%d, want 28 (14 publicerade + 14 nya versioner med partOf)", len(seed.Templates))
+	if len(seed.Templates) != 29 {
+		t.Fatalf("templates=%d, want 29 (14 publicerade + 15 nya versioner; tank/v4 låst till greenhouse)", len(seed.Templates))
 	}
 	c := New()
 	for _, spec := range seed.Templates {
@@ -810,6 +810,20 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 		if !ok {
 			t.Fatalf("missing %s/%s", id, version)
 		}
+		if id == "tank" {
+			// Tanken är avsiktligt låst till växthus (får ej kopplas till
+			// t.ex. soptunnor); övriga mallar har öppen partOf-slot.
+			found := false
+			for _, rel := range spec.Template.Relations {
+				if rel.Name == "partOf" && len(rel.AllowedTargets) == 1 && rel.AllowedTargets[0] == "greenhouse" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("%s/%s saknar greenhouse-låst partOf-slot", id, version)
+			}
+			continue
+		}
 		found := false
 		for _, rel := range spec.Template.Relations {
 			if rel.Name == "partOf" && len(rel.AllowedTargets) == 0 && rel.Min == 0 && rel.Max == 1 {
@@ -825,8 +839,8 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 			t.Fatalf("publish variant %s/%s: %v", spec.Variant.ID, spec.Variant.Version, err)
 		}
 	}
-	if got := c.ListTemplates(); len(got) != 28 {
-		t.Fatalf("listed=%d, want 28", len(got))
+	if got := c.ListTemplates(); len(got) != 29 {
+		t.Fatalf("listed=%d, want 29", len(got))
 	}
 	if got := c.ListVariants(); len(got) != 12 {
 		t.Fatalf("variants=%d, want 12 (6 v1 + 6 v2)", len(got))
