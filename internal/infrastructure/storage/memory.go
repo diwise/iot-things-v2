@@ -496,8 +496,9 @@ type OutboxEvent struct {
 
 // MemOutbox är ett minnesbaserat utbox-lager med idempotent append på ID.
 // Tomt ID kan inte dedupliceras och läggs alltid till. Sedda ID:n behålls
-// även efter ListAndClear så att retry med samma ID inte återpubliceras
-// (minnesstorlek växer obegränsat; retention enligt K4 återstår för drift).
+// även efter ListAndClear så att retry med samma ID inte återpubliceras.
+// Sedda ID:n saknar åldersmetadata och omfattas inte av K4-retention
+// (historik rensas via PurgeOlderThan); de rensas per sak vid delete/purge.
 type MemOutbox struct {
 	mu     sync.Mutex
 	events []OutboxEvent
@@ -590,6 +591,33 @@ func (s *MemHistoryStore) PurgeThing(tenant, thingID string) int {
 			delete(s.seen, key)
 		}
 	}
+	return removed
+}
+
+// PurgeOlderThan tar bort historikrader äldre än cutoff (K4 retention) och
+// bygger om sedda dedup-nycklar från överlevarna så att minnet hålls
+// avgränsat. Rader exakt på cutoff behålls. Returnerar antal borttagna rader.
+func (s *MemHistoryStore) PurgeOlderThan(cutoff time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	kept := s.recs[:0]
+	removed := 0
+	for _, r := range s.recs {
+		if !r.ObservedAt.IsZero() && r.ObservedAt.Before(cutoff) {
+			removed++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	for i := len(kept); i < len(s.recs); i++ {
+		s.recs[i] = HistoryRecord{}
+	}
+	s.recs = kept
+	seen := make(map[string]struct{}, len(kept))
+	for _, r := range kept {
+		seen[historyDedupKey(r.Tenant, r.ThingID, r.PropertyID, r.ObservedAt, r.Source, r.Quality, r.Value)] = struct{}{}
+	}
+	s.seen = seen
 	return removed
 }
 

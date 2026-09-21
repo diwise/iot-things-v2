@@ -75,6 +75,9 @@ type RuntimeStore interface {
 	// dedup/sedda ID:n (K6 GDPR-radering). Fungerar för levande och
 	// borttagna saker; idempotent. Returnerar antal raderade historikrader.
 	PurgeThingHistory(tenant, thingID string) int64
+	// PurgeHistoryOlderThan raderar historikrader äldre än cutoff i alla
+	// tenants (K4 retention). Returnerar antal raderade rader.
+	PurgeHistoryOlderThan(cutoff time.Time) int64
 	ListThingIDs(tenant string) []string
 	ListTenants() []string
 	AppendHistory(tenant, thingID string, h HistoryWrite) bool

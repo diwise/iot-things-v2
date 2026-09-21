@@ -48,6 +48,9 @@ func defaultFlags() flagMap {
 		thingsFile:        "/opt/diwise/config/things.csv",
 		catalogSeedFile:   "/opt/diwise/config/catalog-seed.json",
 		migrateBindings:   "true",
+		// K4: 0 = obegränsad retention (B6-default); >0 raderar historik
+		// äldre än så många dygn vid start och därefter dygnsvis.
+		historyRetentionDays: "0",
 
 		logLevel: "debug",
 	}
@@ -269,6 +272,12 @@ func initialize(ctx context.Context, flags flagMap, cfg *appConfig, policiesFile
 				log.Info("republished pending outbox batches", "count", n)
 			}
 
+			if days := retentionDays(flags); days > 0 {
+				stop := make(chan struct{})
+				owned.stopPurge = func() { close(stop) }
+				startRetentionPurge(ctx, mgr, days, stop)
+			}
+
 			return nil
 		}),
 		onshutdown(func(ctx context.Context, appCfg *appConfig) error {
@@ -304,6 +313,52 @@ func migrateBindingsEnabled(flags flagMap) bool {
 	return flags[migrateBindings] == "true"
 }
 
+// retentionDays tolkar HISTORY_RETENTION_DAYS: >0 dagar aktiverar K4-
+// radering av äldre historik, allt annat (tomt, 0, negativt, ogiltigt)
+// betyder obegränsad retention (B6-default).
+func retentionDays(flags flagMap) int {
+	n, err := strconv.Atoi(flags[historyRetentionDays])
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// retentionInterval är schemaläggningen för K4-radering: en gång per dygn
+// efter en inledande körning vid start.
+const retentionInterval = 24 * time.Hour
+
+// runRetentionPurge raderar historik äldre än cutoff via managern och
+// loggar utfallet (K4-övervakning: antal + gräns per körning).
+func runRetentionPurge(ctx context.Context, mgr *application.Manager, days int) {
+	cutoff := time.Now().UTC().AddDate(0, 0, -days)
+	n := mgr.PurgeHistory(ctx, cutoff)
+	logging.GetFromContext(ctx).Info("history retention purge",
+		"deleted", n, "older_than", cutoff.Format(time.RFC3339), "retention_days", days)
+}
+
+// startRetentionPurge kör en inledande radering och schemalägger därefter
+// dygnsvisa körningar tills stop stängs. No-op när retention är av (0).
+func startRetentionPurge(ctx context.Context, mgr *application.Manager, days int, stop <-chan struct{}) {
+	if days <= 0 {
+		return
+	}
+	logging.GetFromContext(ctx).Info("history retention enabled", "retention_days", days)
+	go func() {
+		runRetentionPurge(ctx, mgr, days)
+		ticker := time.NewTicker(retentionInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				runRetentionPurge(ctx, mgr, days)
+			}
+		}
+	}()
+}
+
 // readinessProbes returns the named readiness stubs. Per harmonization
 // standard they always report OK and never call any dependency.
 func readinessProbes() map[string]k8shandlers.ServiceProber {
@@ -332,10 +387,15 @@ type ownedResources struct {
 	once      sync.Once
 	messenger messaging.MsgContext
 	storage   interface{ Close() }
+	stopPurge func()
 }
 
 func (o *ownedResources) close(ctx context.Context) {
 	o.once.Do(func() {
+		if o.stopPurge != nil {
+			o.stopPurge()
+			o.stopPurge = nil
+		}
 		if o.messenger != nil {
 			// Egen budget, oberoende av en redan avbruten stoppsignal.
 			stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
@@ -372,6 +432,7 @@ func parseExternalConfig(ctx context.Context, flags flagMap) (context.Context, f
 	flags[thingsFile] = envOrDef(ctx, "THINGS_FILE", flags[thingsFile])
 	flags[catalogSeedFile] = envOrDef(ctx, "CATALOG_SEED_FILE", flags[catalogSeedFile])
 	flags[migrateBindings] = envOrDef(ctx, "THINGS_MIGRATE_BINDINGS", flags[migrateBindings])
+	flags[historyRetentionDays] = envOrDef(ctx, "HISTORY_RETENTION_DAYS", flags[historyRetentionDays])
 
 	flags[dbHost] = envOrDef(ctx, "POSTGRES_HOST", flags[dbHost])
 	flags[dbPort] = envOrDef(ctx, "POSTGRES_PORT", flags[dbPort])
@@ -394,6 +455,7 @@ func parseExternalConfig(ctx context.Context, flags flagMap) (context.Context, f
 	flag.Func("authz-access-object", "enable access-object authorization policy result model", apply(authzAccessObject))
 	flag.Func("things", "list of known things", apply(thingsFile))
 	flag.Func("catalog-seed", "seed file with start catalog (templates/variants)", apply(catalogSeedFile))
+	flag.Func("history-retention-days", "delete history older than this many days (0 = keep forever)", apply(historyRetentionDays))
 	flag.Func("loglevel", "set the log level", apply(logLevel))
 	flag.Parse()
 

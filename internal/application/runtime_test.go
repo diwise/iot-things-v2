@@ -187,6 +187,27 @@ func (f *fakeStore) PurgeThingHistory(tenant, thingID string) int64 {
 	return n
 }
 
+// PurgeHistoryOlderThan speglar lagringens K4-retention: historikrader
+// äldre än cutoff tas bort i alla tenants.
+func (f *fakeStore) PurgeHistoryOlderThan(cutoff time.Time) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	kept := f.hist[:0]
+	var n int64
+	for _, h := range f.hist {
+		if !h.w.ObservedAt.IsZero() && h.w.ObservedAt.Before(cutoff) {
+			n++
+			continue
+		}
+		kept = append(kept, h)
+	}
+	for i := len(kept); i < len(f.hist); i++ {
+		f.hist[i] = storedHistory{}
+	}
+	f.hist = kept
+	return n
+}
+
 func (f *fakeStore) forgetTransientLocked(tenant, thingID string) {
 	key := fkey(tenant, thingID)
 	delete(f.pending, key)

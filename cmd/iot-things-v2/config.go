@@ -25,6 +25,7 @@ const (
 	thingsFile
 	catalogSeedFile
 	migrateBindings
+	historyRetentionDays
 
 	logLevel
 )

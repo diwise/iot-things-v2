@@ -389,6 +389,12 @@ func (m *Manager) PurgeThingHistory(_ context.Context, tenant, thingID string) i
 	return m.store.PurgeThingHistory(tenant, thingID)
 }
 
+// PurgeHistory raderar historikrader äldre än cutoff i alla tenants
+// (K4 retention). Returnerar antal raderade rader.
+func (m *Manager) PurgeHistory(_ context.Context, olderThan time.Time) int64 {
+	return m.store.PurgeHistoryOlderThan(olderThan)
+}
+
 // MoveObject flyttar ett barns partOf-förälder atomärt med optimistisk
 // låsning (B19): revision måste matcha lagrad revision, annars 409.
 // Flytten går via omkompilering+RegisterThing (samma väg som Update) så att

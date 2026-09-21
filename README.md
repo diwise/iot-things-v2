@@ -27,3 +27,16 @@ docker build -f deployments/Dockerfile .
 ```
 
 Källkod och `go.mod` är facit. Ingen `replace` mot syskonmappar.
+
+## Retention och övervakning (K4)
+
+- `HISTORY_RETENTION_DAYS` (default `0` = obegränsat, B6): `>0` raderar
+  historik äldre än så många dygn vid start och därefter dygnsvis
+  (samma i minne och PostgreSQL). Väntande outbox, dedup/sedda ID:n,
+  blobbar, katalog och livscykel-/relationshändelser påverkas inte.
+- Varje körning loggar antal + gräns (`history retention purge`).
+  Radantal per tabell för drift: `SELECT count(*),
+  min(observed_at), max(observed_at) FROM history_v2;` (index
+  `history_v2_observed_at`, migration 006; Timescale-hypertabell med
+  chunk-exkludering när tillägget finns).
+- Explicit GDPR-radering per sak: `DELETE /things/{id}/history`.

@@ -224,6 +224,21 @@ func (s *PgStore) PurgeThingHistory(tenant, thingID string) int64 {
 	return tag.RowsAffected()
 }
 
+// PurgeHistoryOlderThan raderar historikrader äldre än cutoff i alla tenants
+// (K4 retention). Väntande outbox, dedup/sedda ID:n, blobbar, katalog och
+// livscykel-/relationshändelser påverkas inte. På Timescale-hypertabell
+// gäller chunk-exkludering; på vanliga tabeller används indexet från
+// migration 006. Returnerar antal raderade rader.
+func (s *PgStore) PurgeHistoryOlderThan(cutoff time.Time) int64 {
+	ctx, cancel := s.ctx()
+	defer cancel()
+	tag, err := s.pool.Exec(ctx, `DELETE FROM history_v2 WHERE observed_at < $1`, cutoff)
+	if err != nil {
+		return 0
+	}
+	return tag.RowsAffected()
+}
+
 func (s *PgStore) ListThingIDs(tenant string) []string {
 	ctx, cancel := s.ctx()
 	defer cancel()

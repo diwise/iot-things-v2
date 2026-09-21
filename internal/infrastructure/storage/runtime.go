@@ -110,6 +110,13 @@ func (a *RuntimeAdapter) PurgeThingHistory(tenant, thingID string) int64 {
 	return n
 }
 
+// PurgeHistoryOlderThan raderar historikrader äldre än cutoff i alla tenants
+// (K4 retention). Väntande outbox, dedup/sedda ID:n, blobbar, katalog och
+// livscykel-/relationshändelser påverkas inte. Returnerar antal raderade rader.
+func (a *RuntimeAdapter) PurgeHistoryOlderThan(cutoff time.Time) int64 {
+	return int64(a.S.History.PurgeOlderThan(cutoff))
+}
+
 func (a *RuntimeAdapter) ListThingIDs(tenant string) []string {
 	recs := a.S.Things.ListByTenant(tenant)
 	out := make([]string, 0, len(recs))

@@ -40,7 +40,7 @@
 - [x] B3 Aktuellt = senaste mättid, ingen TTL
 - [x] B4 Enkelt medel, alla krävs
 - [x] B5 Endast inom sak (graf-check saknas delvis, se K1)
-- [x] B6 Sak-historik i things, sensor i events (minne + PostgreSQL via PgStore; retention återstår)
+- [x] B6 Sak-historik i things, sensor i events (minne + PostgreSQL via PgStore; retention via HISTORY_RETENTION_DAYS, default obegränsat)
 - [x] B7 Endast framåt (ingen omräkning)
 - [x] B8 Ej manuellt (skrivskydd i API: mätvärdesfält — values/value/observedAt/receivedAt/quality — i sakskrivningar (create/update/preview) nekas med 400 i stället för att tyst ignoreras; värden anländer endast via message.accepted; configparametrar fortsatt tillåtna)
 - [x] B9 Tillstånd utan notis/styrning
@@ -71,6 +71,6 @@
 - [x] G1-G6, G8-G9 (kärna testbar utan broker/DB); G7 delvis (slog utan hemligheter, metrics/tracing återstår)
 - [x] E1-E6 (E6-resten: beständig katalog, plats/metadata/sök, träd/detach/total, OpenAPI); E7 steg 1–2 verifierade i drill 2026-09-21 (isolering, samexistens, paritet), steg 3 konsumentstöd implementerat+live-verifierat (hos konsumenten, flag-gatat), steg 4 kriterier dokumenterade i INTEGRATION.md §8 (observationsperiod återstår som driftaktivitet; relations/lifecycle-konsumtion ingår ej)
 - [x] A1/A3-A7 (struktur); A2/A8-A29 delvis via enhetstester (full E2E återstår)
-- [x] K1-K6 klara: K1 (v1-schema + quality-tabell); K2 (vertical-down låst); K3 (sendetalj per operator); K5 (tak 64/32/64 per mall, 64/16 per sak; latens-SLO kräver lasttest); K6 (borttagna mätpunkter rensas från blob vid omregistrering, historik bevaras; sak-delete bevarar historik; GDPR-radering via DELETE /things/{id}/history); K4-backend + beständig katalog + startkatalog klara (retention + övervakning återstår)
+- [x] K1-K6 klara: K1 (v1-schema + quality-tabell); K2 (vertical-down låst); K3 (sendetalj per operator); K4 (retention via HISTORY_RETENTION_DAYS, default obegränsat; purge i båda backendarna + index 006 + körningslogg); K5 (tak 64/32/64 per mall, 64/16 per sak; latens-SLO kräver lasttest); K6 (borttagna mätpunkter rensas från blob vid omregistrering, historik bevaras; sak-delete bevarar historik; GDPR-radering via DELETE /things/{id}/history)
 
 Review 2026-09-16: 10 fynd fixade (bare-prefix, device-krav, ok/uncertain-strikthet, dedup-tenant, outbox-idempotens, historik-kvalitet, cykelskydd, relationsvalidering, kontrakt-tid/version, API-tester). `gofmt`/`vet`/`test` grönt.
