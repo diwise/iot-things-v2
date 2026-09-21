@@ -671,7 +671,13 @@ components:
       required: [name, operator, inputs, outputs]
       properties:
         name: { type: string }
-        operator: { type: string }
+        operator:
+          type: string
+          description: >-
+            distanceToLevel/level v1 beräknar lodrät nedåtriktad geometri
+            (K2: nivå = sensorToBottom − distans). Vinkel (angle) och andra
+            geometrier stöds inte; vinkelparametrar och extra
+            receptparametrar nekas vid publicering.
         version: { type: string }
         inputs:
           type: array

@@ -349,7 +349,7 @@ func csvArgs(col string) (map[string]float64, map[string]string, string) {
 			out["usableHeight"] = num
 		case "angle", "meanl", "offset":
 			if num != 0 {
-				return nil, nil, fmt.Sprintf("args %q: %q=%v cannot be expressed (no angle/offset operator)", col, k, num)
+				return nil, nil, fmt.Sprintf("args %q: %q=%v cannot be expressed (level supports only vertical-down geometry, K2)", col, k, num)
 			}
 		default:
 			return nil, nil, fmt.Sprintf("args %q: unknown numeric key %q", col, k)

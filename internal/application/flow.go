@@ -808,6 +808,13 @@ func validateRecipeStatic(cfg *catalog.EffectiveConfig, r catalog.Recipe) error 
 		if err := needInputs(1); err != nil {
 			return err
 		}
+		// K2: endast vertical-down med ett bottenavstånd; fler
+		// deklarerade parametrar signalerar geometri som inte hedras.
+		// Speglar catalog.validateRecipe (vinkelparametern angle nekas
+		// vid publicering/kompilering och syns aldrig här).
+		if len(r.Params) > 1 {
+			return fmt.Errorf("operator %q supports only vertical-down geometry (K2): single bottom-distance param, got %d declared params", r.Operator, len(r.Params))
+		}
 		return needPositive(recipeParamKey(r, 0, "sensorToBottom"))
 	case "fillRate", "percent", "percentage":
 		if err := needInputs(1); err != nil {

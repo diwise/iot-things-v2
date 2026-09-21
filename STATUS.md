@@ -62,7 +62,7 @@
 
 - [x] F1-F7 (struktur, ej driftbevis)
 - [x] D1-D2, T1-T10 (inkl. versionsdiff före aktivering via upgrade/preview)
-- [x] S1-S4, R1-R6 (fixtures + recept; geometri-bredd återstår K2)
+- [x] S1-S4, R1-R6 (fixtures + recept; geometri låst i K2: vertical-down, vinkel/extra parametrar nekas)
 - [x] H1-H10 (minneslager + API-filter; DB-constraint återstår)
 - [x] C1-C10 (operatorer + regler; quality-tabell per operator låst i K1: functions.go-tabell + min/max- och falling/both-flödestester)
 - [x] L1-L7 (regler + minnes-outbox + PostgreSQL-PgStore med samma protokolltester; dedupmarkering atomär i commit, omtag spelar upp vid samtidig slutförd batch; DLX/ack-verifiering i messaging-lib återstår), L8-L10 delvis
@@ -71,6 +71,6 @@
 - [x] G1-G6, G8-G9 (kärna testbar utan broker/DB); G7 delvis (slog utan hemligheter, metrics/tracing återstår)
 - [x] E1-E6 (E6-resten: beständig katalog, plats/metadata/sök, träd/detach/total, OpenAPI); E7 steg 1–2 verifierade i drill 2026-09-21 (isolering, samexistens, paritet), steg 3 konsumentstöd implementerat+live-verifierat (hos konsumenten, flag-gatat), steg 4 kriterier dokumenterade i INTEGRATION.md §8 (observationsperiod återstår som driftaktivitet; relations/lifecycle-konsumtion ingår ej)
 - [x] A1/A3-A7 (struktur); A2/A8-A29 delvis via enhetstester (full E2E återstår)
-- [ ] K1-K6 kvarstår delvis: K1 klart (se ovan); K4-backend + beständig katalog + startkatalog klara (retention + övervakning återstår); övriga se kod-TODO + THNGS_NEW.md kap 12
+- [ ] K1-K6 kvarstår delvis: K1 klart (se ovan); K2 klart (vertical-down låst, angle/extra parametrar nekas vid publicering/kompilering/statisk validering); K4-backend + beständig katalog + startkatalog klara (retention + övervakning återstår); övriga se kod-TODO + THNGS_NEW.md kap 12
 
 Review 2026-09-16: 10 fynd fixade (bare-prefix, device-krav, ok/uncertain-strikthet, dedup-tenant, outbox-idempotens, historik-kvalitet, cykelskydd, relationsvalidering, kontrakt-tid/version, API-tester). `gofmt`/`vet`/`test` grönt.

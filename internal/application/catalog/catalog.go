@@ -366,6 +366,9 @@ func (c *Catalog) PutTemplate(spec TemplateSpec) error {
 			return fmt.Errorf("%w: template %s/%s has empty parameter name", things.ErrValidation, t.ID, t.Version)
 		}
 	}
+	if err := checkLevelGeometry(spec); err != nil {
+		return err
+	}
 	if spec.Template.PrimaryProperty != "" {
 		if err := t.ValidatePropertyID(spec.Template.PrimaryProperty); err != nil {
 			return fmt.Errorf("%w: template %s/%s primary property: %w", things.ErrValidation, t.ID, t.Version, err)
@@ -423,6 +426,38 @@ func validateRecipe(t things.Template, r Recipe) error {
 		if err := t.ValidatePropertyID(in); err != nil {
 			return fmt.Errorf("%w: recipe %q references %q: %w", things.ErrValidation, r.Name, in, err)
 		}
+	}
+	// K2: nivåoperatorn (distanceToLevel/level v1) stödjer endast
+	// vertical-down-geometri med ett enda mått (bottenavståndet).
+	// Fler deklarerade parametrar signalerar geometri/optioner som
+	// operatorn inte kan hedra och nekas i stället för att tyst ignoreras.
+	if (r.Operator == "distanceToLevel" || r.Operator == "level") && len(r.Params) > 1 {
+		return fmt.Errorf("%w: recipe %q operator %q supports only vertical-down geometry (K2): single bottom-distance param, got %d declared params",
+			things.ErrValidation, r.Name, r.Operator, len(r.Params))
+	}
+	return nil
+}
+
+// checkLevelGeometry tillämpar K2 på mallnivå: en mall vars recept
+// innehåller nivåoperatorn får inte deklarera vinkelparametern angle —
+// lutande sensor stöds inte och ett tyst ignorerat värde vore en
+// felkonfigurering. Anropas vid publicering (nya mallar) och vid
+// kompilering (saker mot redan publicerade mallar); varianter och saker
+// kan bara sätta parametrar ur mallens defaults och täcks därmed också.
+func checkLevelGeometry(spec TemplateSpec) error {
+	hasLevel := false
+	for _, r := range spec.Recipes {
+		if r.Operator == "distanceToLevel" || r.Operator == "level" {
+			hasLevel = true
+			break
+		}
+	}
+	if !hasLevel {
+		return nil
+	}
+	if _, ok := spec.ParamDefaults["angle"]; ok {
+		return fmt.Errorf("%w: template %s/%s: level operator supports only vertical-down geometry (K2): param %q is not honored",
+			things.ErrValidation, spec.Template.ID, spec.Template.Version, "angle")
 	}
 	return nil
 }
@@ -592,6 +627,9 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 		return nil, fmt.Errorf("%w: unknown template %s/%s", things.ErrValidation, obj.TemplateID, obj.TemplateVersion)
 	}
 	t := tmpl.Template
+	if err := checkLevelGeometry(tmpl); err != nil {
+		return nil, err
+	}
 
 	var variant things.Variant
 	var variantID, variantVersion string

@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -608,6 +609,26 @@ func TestStaticRejectsNonPositiveParams(t *testing.T) {
 		if _, err := EvaluateBatchFlow(&cfg, current, nil, nil, time.Now().UTC(), "m", 1); err == nil {
 			t.Fatalf("%s %s=%v must fail even when untouched", tc.op, tc.param, tc.v)
 		}
+	}
+}
+
+// Regression K2: nivårecept med fler än ett bottenavstånd nekas statiskt
+// (extra parametrar signalerar geometri som inte hedras). Vinkelparametern
+// angle nekas vid publicering/kompilering och når aldrig flödet.
+func TestStaticRejectsLevelExtraParams(t *testing.T) {
+	cfg := catalog.EffectiveConfig{
+		Properties:  map[string]things.Property{"p": {}, "q": {}},
+		ParamValues: map[string]float64{"sensorToBottom": 1.5, "usableHeight": 1.0},
+		Recipes: []catalog.Recipe{{Name: "r", Operator: "level", Version: "v1",
+			Inputs: []string{"p"}, Outputs: []string{"q"},
+			Params: []string{"sensorToBottom", "usableHeight"}}},
+	}
+	err := validateRecipeStatic(&cfg, cfg.Recipes[0])
+	if err == nil {
+		t.Fatal("level recipe with 2 params must fail static validation")
+	}
+	if !strings.Contains(err.Error(), "vertical-down") {
+		t.Fatalf("error should name the supported geometry, got %q", err)
 	}
 }
 

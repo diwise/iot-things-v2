@@ -1148,3 +1148,30 @@ func TestB8NestedPropertyValueRejected(t *testing.T) {
 		t.Fatalf("create with nested property value=%d, want 400", rr.Code)
 	}
 }
+
+// K2 end-to-end: mall med vinkelparameter för nivårecept nekas vid
+// publicering (lutande sensor stöds inte).
+func TestK2PublishRejectsAngle(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	tmpl := catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "tilted", Version: "v1",
+			Required: []string{"distance", "level"},
+			Category: "wastebin",
+		},
+		ParamDefaults: map[string]float64{"sensorToBottom": 1.5, "angle": 15},
+		Recipes: []catalog.Recipe{
+			{Name: "tilted-level", Operator: "distanceToLevel", Version: "v1",
+				Inputs: []string{"distance"}, Outputs: []string{"level"},
+				Params: []string{"sensorToBottom"}},
+		},
+	}
+	rr := doJSON(h.publishTemplate, ctx, "", tmpl, "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("publish with angle=%d, want 400", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "vertical-down") {
+		t.Fatalf("error should name the supported geometry, got %q", body)
+	}
+}

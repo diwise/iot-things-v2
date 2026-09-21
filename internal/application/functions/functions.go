@@ -119,8 +119,19 @@ func Max(vals []NumberWithQuality) (float64, string, error) {
 	return max, quality, nil
 }
 
+// LevelGeometryVerticalDown är den enda sensorgeometri nivåoperatorn
+// (distanceToLevel/level v1) stödjer (K2): lodrät, nedåtriktad sensor.
+//
+// Stöds: vertical-down — level = sensorToBottom − distance.
+//
+// Stöds uttryckligen inte (nekas vid konfigurering, aldrig tyst
+// omtolkning av v1): lutande/vinklad sensor (angle), sidoförskjuten
+// montering (offset), icke-plant botten, rörlig sensor. Nya geometrier
+// kräver nya operatornamn/versioner och uttryckliga beslut.
+const LevelGeometryVerticalDown = "vertical-down"
+
 // Level converts a measured distance to a level for a vertical,
-// downward-facing sensor:
+// downward-facing sensor (geometry vertical-down, K2):
 //
 //	level = distanceToBottom - distance
 //
