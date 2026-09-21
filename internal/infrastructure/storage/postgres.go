@@ -166,6 +166,15 @@ func (s *PgStore) DeleteThingState(tenant, thingID string) {
 	_ = tx.Commit(ctx)
 }
 
+// seenKey versionerar outbox_seen-nycklar så att tvetydiga legacy-rader
+// (lagrade med den äldre "/"->"~"-kodningen) aldrig kan ge falsk dedup
+// för nya skrivningar. outbox_v2-raderna behåller wire-EventID:t; endast
+// seen-tabellen nycklas om. Disjunkta per konstruktion: legacy-rader
+// börjar alltid med "v1/", nya nycklar alltid med "s2:".
+func seenKey(id string) string {
+	return "s2:" + id
+}
+
 // deleteThingTransient rensar väntande outbox samt sedda ID:n och dedup för
 // saken. Delad av DeleteThingState (historik bevaras, B6) och
 // PurgeThingHistory (historik raderas, K6 GDPR).
@@ -173,25 +182,28 @@ func (s *PgStore) deleteThingTransient(ctx context.Context, tx pgx.Tx, tenant, t
 	if _, err := tx.Exec(ctx, `DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2`, tenant, thingID); err != nil {
 		return err
 	}
-	// Stabila outbox-ID:n har formen v1/<tenant>/<thing>/<msg>/<prop> med
-	// "/" -> "~" (se StableEventID): glöm levererade + väntande ID:n för saken.
+	// Stabila outbox-ID:n har formen v1/<tenant>/<thing>/<msg>/<prop> (se
+	// StableEventID): glöm levererade + väntande ID:n för saken.
 	// starts_with undviker LIKE-wildcards (%_\) i tenant/thing-ID:n som
 	// annars skulle radera andra sakars seen-rader (LIKE 'a_b/%' matchar
 	// även 'aXb/...').
-	sanitize := func(v string) string {
-		out := make([]byte, 0, len(v))
-		for i := 0; i < len(v); i++ {
-			if v[i] == '/' {
-				out = append(out, '~')
-			} else {
-				out = append(out, v[i])
-			}
-		}
-		return string(out)
-	}
-	prefix := "v1/" + sanitize(tenant) + "/" + sanitize(thingID) + "/"
+	//
+	// outbox_seen_v2 nycklas globalt på ID:t (ingen tenantkolumn), så
+	// seen-nycklarna versioneras med "s2:"-prefix: nya skrivningar kan
+	// aldrig matcha tvetydiga legacy-rader och orsaka cross-tenant
+	// falsk dedup. Legacy-prefixet rensar redan lagrade ID:n; det är
+	// bara exakt när tenant+sak saknar "~" (då är det bevisbart samma
+	// tenant — annars skulle det kunna matcha nya ID:n för en
+	// kolliderande tenant som "a/b" vs "a~b").
+	prefix := seenKey("v1/" + application.EncodeEventSegment(tenant) + "/" + application.EncodeEventSegment(thingID) + "/")
 	if _, err := tx.Exec(ctx, `DELETE FROM outbox_seen_v2 WHERE starts_with(id, $1)`, prefix); err != nil {
 		return err
+	}
+	if !strings.ContainsAny(tenant+thingID, "~") {
+		legacy := "v1/" + application.LegacyEncodeEventSegment(tenant) + "/" + application.LegacyEncodeEventSegment(thingID) + "/"
+		if _, err := tx.Exec(ctx, `DELETE FROM outbox_seen_v2 WHERE starts_with(id, $1)`, legacy); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM dedup_v2 WHERE tenant=$1 AND thing_id=$2`, tenant, thingID); err != nil {
 		return err
@@ -367,13 +379,16 @@ func (s *PgStore) StorePending(tenant, thingID string, events []application.Flow
 		id := application.StableEventID(tenant, thingID, e.MessageID, e.PropertyID)
 		// Atomär seen+pending: exakt en instans vinner kapplöpningen; crash
 		// mellan seen och pending är omöjlig (en sats).
+		// Seen-nyckeln versioneras (seenKey): tvetydiga legacy-rader från
+		// före injektiv kodning kan aldrig ge falsk dedup för nya
+		// skrivningar; outbox-radens id är fortsatt wire-EventID:t.
 		_, _ = s.pool.Exec(ctx, `
 			WITH s AS (
 				INSERT INTO outbox_seen_v2(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id
 			)
 			INSERT INTO outbox_v2(id, tenant, thing_id, property_id, observed_at, revision, payload, topic)
-			SELECT $1,$2,$3,$4,$5,$6,$7,$8 WHERE EXISTS (SELECT 1 FROM s)`,
-			id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, raw, pkgtypes.TopicThingValues)
+			SELECT $2,$3,$4,$5,$6,$7,$8,$9 WHERE EXISTS (SELECT 1 FROM s)`,
+			seenKey(id), id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, raw, pkgtypes.TopicThingValues)
 	}
 }
 
@@ -402,8 +417,8 @@ func (s *PgStore) StoreRawEvents(tenant, thingID string, events []application.Ra
 				INSERT INTO outbox_seen_v2(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id
 			)
 			INSERT INTO outbox_v2(id, tenant, thing_id, observed_at, revision, payload, topic)
-			SELECT $1,$2,$3,$4,$5,$6,$7 WHERE EXISTS (SELECT 1 FROM s)`,
-			e.ID, tenant, thingID, e.ObservedAt, e.Revision, e.Payload, e.Topic)
+			SELECT $2,$3,$4,$5,$6,$7,$8 WHERE EXISTS (SELECT 1 FROM s)`,
+			seenKey(e.ID), e.ID, tenant, thingID, e.ObservedAt, e.Revision, e.Payload, e.Topic)
 	}
 }
 
@@ -503,8 +518,8 @@ func (s *PgStore) CommitBatch(tenant, thingID, messageID string, expected int64,
 				INSERT INTO outbox_seen_v2(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id
 			)
 			INSERT INTO outbox_v2(id, tenant, thing_id, property_id, observed_at, revision, payload)
-			SELECT $1,$2,$3,$4,$5,$6,$7 WHERE EXISTS (SELECT 1 FROM s)`,
-			id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, payload); err != nil {
+			SELECT $2,$3,$4,$5,$6,$7,$8 WHERE EXISTS (SELECT 1 FROM s)`,
+			seenKey(id), id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, payload); err != nil {
 			return false
 		}
 	}

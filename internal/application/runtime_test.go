@@ -1559,6 +1559,58 @@ func TestRuntimeBatchEventIDSanitizes(t *testing.T) {
 	}
 }
 
+// Regression TV-04: segmentkodningen är injektiv — tupler som bara skiljer
+// på "/" vs "~" (t.ex. tenant "a/b" vs "a~b") får olika ID:n och kan inte
+// deduplicera eller rensa varandras outbox-rader.
+func TestStableEventIDInjective(t *testing.T) {
+	cases := map[string]string{
+		"":      "",
+		"abc":   "abc",
+		"a/b":   "a~b",
+		"a~b":   "a~~b",
+		"a~/b":  "a~~~b",
+		"a/b/c": "a~b~c",
+		"~":     "~~",
+		"/":     "~",
+		"~~":    "~~~~",
+	}
+	seen := map[string]string{}
+	for in, want := range cases {
+		if got := EncodeEventSegment(in); got != want {
+			t.Fatalf("EncodeEventSegment(%q)=%q, want %q", in, got, want)
+		}
+		if prev, dup := seen[want]; dup {
+			t.Fatalf("collision: %q and %q both encode to %q", prev, in, want)
+		}
+		seen[want] = in
+	}
+	// Segment utan "~" kodas byte-identiskt med legacy-regeln (wire-kompat).
+	for _, s := range []string{"", "abc", "a/b", "a/b/c", "t", "room-a", "m1", "temperature.window"} {
+		if EncodeEventSegment(s) != LegacyEncodeEventSegment(s) {
+			t.Fatalf("EncodeEventSegment(%q) diverges from legacy without tilde", s)
+		}
+	}
+	// Kolliderande tupler ger olika fullständiga ID:n.
+	ids := map[string]bool{}
+	for _, tc := range [][4]string{
+		{"a/b", "c", "m", "p"},
+		{"a~b", "c", "m", "p"},
+		{"a", "b/c", "m", "p"},
+		{"a", "b~c", "m", "p"},
+		{"t", "thing", "m/1", "p"},
+		{"t", "thing", "m~1", "p"},
+	} {
+		id := StableEventID(tc[0], tc[1], tc[2], tc[3])
+		if ids[id] {
+			t.Fatalf("collision on StableEventID%v = %q", tc, id)
+		}
+		ids[id] = true
+	}
+	if StableEventID("a~b", "c", "m", "p") != "v1/a~~b/c/m/p" {
+		t.Fatalf("tilde must escape: %q", StableEventID("a~b", "c", "m", "p"))
+	}
+}
+
 // Regression L7: partiellt lyckad drain rensar lyckade grupper direkt.
 func TestRuntimePartialDrainClearsIncrementally(t *testing.T) {
 	fs := newFakeStore()

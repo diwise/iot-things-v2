@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/diwise/iot-things-v2/internal/application"
 	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 )
 
@@ -716,19 +717,9 @@ func (o *MemOutbox) Forget(tenant, thingID string) {
 	}
 	// Rensa även redan levererade (ej längre väntande) ID:n för saken så att
 	// nyskapad sak med samma ID inte dedupliceras mot gammal livscykel.
-	// Stabila ID:n har formen v1/<tenant>/<thing>/<msg>/<prop> med "/" -> "~".
-	sanitize := func(s string) string {
-		out := make([]byte, 0, len(s))
-		for i := 0; i < len(s); i++ {
-			if s[i] == '/' {
-				out = append(out, '~')
-			} else {
-				out = append(out, s[i])
-			}
-		}
-		return string(out)
-	}
-	prefix := "v1/" + sanitize(tenant) + "/" + sanitize(thingID) + "/"
+	// Minneslagret nollställs vid omstart, så här finns bara nya ID:n:
+	// ingen legacy-rensning behövs (jfr postgres deleteThingTransient).
+	prefix := "v1/" + application.EncodeEventSegment(tenant) + "/" + application.EncodeEventSegment(thingID) + "/"
 	for id := range o.seen {
 		if len(id) >= len(prefix) && id[:len(prefix)] == prefix {
 			delete(o.seen, id)

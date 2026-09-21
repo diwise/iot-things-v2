@@ -301,9 +301,27 @@ func pruneRemovedState(cfg *catalog.EffectiveConfig, st *StoredThingState) {
 	}
 }
 
+// EncodeEventSegment gör ett ID-segment brokersäkert för event-ID:n.
+// Kodningen är injektiv: först escapes "~" till "~~", sedan "/" till "~".
+// Olika (tenant, sak, meddelande, egenskap)-tupler ger därför alltid olika
+// ID:n — även mellan tenants som "a/b" och "a~b". Segment utan "~" kodas
+// byte-identiskt med den äldre "/"->"~"-regeln, så lagrade/publicerade
+// ID:n utan tilde påverkas inte av bytet (TV-04).
+func EncodeEventSegment(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "~", "~~"), "/", "~")
+}
+
+// LegacyEncodeEventSegment är kodningen före injektiviteten (enbart
+// "/"->"~"). Den kan kollidera mellan t.ex. tenant "a/b" och "a~b" och
+// får inte användas för nya ID:n — endast för rensning av redan lagrade
+// ID:n (se deleteThingTransient/Forget).
+func LegacyEncodeEventSegment(s string) string {
+	return strings.ReplaceAll(s, "/", "~")
+}
+
 // sanitizeEventID gör ID-segment broker-säkra (samma regel som StableEventID).
 func sanitizeEventID(s string) string {
-	return strings.ReplaceAll(s, "/", "~")
+	return EncodeEventSegment(s)
 }
 
 // describeThing bygger sakdeskriptorn för events från effektiv config.
@@ -645,10 +663,7 @@ func (rt *Runtime) MoveThing(tenant, childID, newParentID string) error {
 // StableEventID är det stabila deduplicerings-ID:t per (sak, meddelande,
 // egenskap): återleverans ger samma ID så att konsumenter deduplicerar.
 func StableEventID(tenant, thingID, messageID, property string) string {
-	sanitize := func(s string) string {
-		return strings.ReplaceAll(s, "/", "~")
-	}
-	return "v1/" + sanitize(tenant) + "/" + sanitize(thingID) + "/" + sanitize(messageID) + "/" + sanitize(property)
+	return "v1/" + EncodeEventSegment(tenant) + "/" + EncodeEventSegment(thingID) + "/" + EncodeEventSegment(messageID) + "/" + EncodeEventSegment(property)
 }
 
 // buildThingValuesEvent mappar en batchs FlowEvents till ett versionerat
@@ -683,8 +698,8 @@ func buildThingValuesEvent(tenant, thingID, thingType, thingTypeVersion string, 
 	}
 	return pkgtypes.ThingValuesEventV1{
 		Schema: pkgtypes.SchemaV1,
-		EventID: "v1/" + strings.ReplaceAll(tenant, "/", "~") + "/" +
-			strings.ReplaceAll(thingID, "/", "~") + "/" + strings.ReplaceAll(messageID, "/", "~"),
+		EventID: "v1/" + EncodeEventSegment(tenant) + "/" +
+			EncodeEventSegment(thingID) + "/" + EncodeEventSegment(messageID),
 		Tenant:           tenant,
 		ThingID:          thingID,
 		ThingType:        thingType,

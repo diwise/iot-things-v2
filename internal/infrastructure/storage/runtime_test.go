@@ -100,6 +100,53 @@ func TestAdapterHistoryPendingDedup(t *testing.T) {
 	}
 }
 
+// Regression TV-04: tenants "a/b" och "a~b" (samt sak-ID:n med "/" vs "~")
+// får aldrig deduplicera eller rensa varandras outbox-rader.
+func TestAdapterOutboxTenantIsolation(t *testing.T) {
+	a := newAdapter(t)
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	ev := application.FlowEvent{
+		PropertyID: "p", Value: 1.0, Quality: "ok",
+		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
+	}
+	// Samma meddelande för kolliderande tenants lagras i båda.
+	a.StorePending("a/b", "c", []application.FlowEvent{ev})
+	a.StorePending("a~b", "c", []application.FlowEvent{ev})
+	if n := len(a.PendingEvents("a/b", "c")); n != 1 {
+		t.Fatalf("pending a/b=%d, want 1", n)
+	}
+	if n := len(a.PendingEvents("a~b", "c")); n != 1 {
+		t.Fatalf("pending a~b=%d, want 1 (no cross-tenant false dedup)", n)
+	}
+	// Glömska för ena tenanten lämnar den andra intakt (pending + seen).
+	a.DeleteThingState("a/b", "c")
+	if n := len(a.PendingEvents("a~b", "c")); n != 1 {
+		t.Fatalf("pending a~b after forget=%d, want 1", n)
+	}
+	a.StorePending("a~b", "c", []application.FlowEvent{ev})
+	if n := len(a.PendingEvents("a~b", "c")); n != 1 {
+		t.Fatalf("redelivery for survivor must stay deduped, pending=%d", n)
+	}
+	// Glömd tenant tar emot nya skrivningar igen.
+	a.StorePending("a/b", "c", []application.FlowEvent{ev})
+	if n := len(a.PendingEvents("a/b", "c")); n != 1 {
+		t.Fatalf("pending a/b after forget=%d, want 1", n)
+	}
+	// Sak-ID:n med "/" vs "~" isoleras likadant.
+	a.StorePending("t", "x/y", []application.FlowEvent{ev})
+	a.StorePending("t", "x~y", []application.FlowEvent{ev})
+	if n := len(a.PendingEvents("t", "x/y")); n != 1 {
+		t.Fatalf("pending x/y=%d, want 1", n)
+	}
+	if n := len(a.PendingEvents("t", "x~y")); n != 1 {
+		t.Fatalf("pending x~y=%d, want 1 (no cross-thing false dedup)", n)
+	}
+	a.DeleteThingState("t", "x/y")
+	if n := len(a.PendingEvents("t", "x~y")); n != 1 {
+		t.Fatalf("pending x~y after forget=%d, want 1", n)
+	}
+}
+
 func TestAdapterRelations(t *testing.T) {
 	a := newAdapter(t)
 	if err := a.AttachChild("t", "room-a", "building-a"); err != nil {

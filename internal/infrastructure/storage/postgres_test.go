@@ -264,6 +264,35 @@ func TestPostgresOutbox(t *testing.T) {
 	}
 }
 
+// Regression TV-04: tenants "a/b" och "a~b" får aldrig deduplicera eller
+// rensa varandras outbox-rader i postgres heller (seen-nycklarna är
+// versionerade med "s2:" och segmentkodningen injektiv).
+func TestPostgresOutboxTenantIsolation(t *testing.T) {
+	s := pgTestStore(t)
+	a := application.RuntimeStore(s)
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	ev := application.FlowEvent{
+		PropertyID: "p", Value: 1.0, Quality: "ok",
+		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
+	}
+	a.StorePending("a/b", "c", []application.FlowEvent{ev})
+	a.StorePending("a~b", "c", []application.FlowEvent{ev})
+	if pending := a.PendingEvents("a/b", "c"); len(pending) != 1 {
+		t.Fatalf("pending a/b=%d, want 1", len(pending))
+	}
+	if pending := a.PendingEvents("a~b", "c"); len(pending) != 1 {
+		t.Fatalf("pending a~b=%d, want 1 (no cross-tenant false dedup)", len(pending))
+	}
+	a.DeleteThingState("a/b", "c")
+	if pending := a.PendingEvents("a~b", "c"); len(pending) != 1 {
+		t.Fatalf("pending a~b after forget=%d, want 1", len(pending))
+	}
+	a.StorePending("a~b", "c", []application.FlowEvent{ev})
+	if pending := a.PendingEvents("a~b", "c"); len(pending) != 1 {
+		t.Fatalf("redelivery for survivor must stay deduped, pending=%d", len(pending))
+	}
+}
+
 func TestPostgresRelations(t *testing.T) {
 	s := pgTestStore(t)
 	a := application.RuntimeStore(s)
