@@ -42,7 +42,7 @@
 - [x] B5 Endast inom sak (graf-check saknas delvis, se K1)
 - [x] B6 Sak-historik i things, sensor i events (minne + PostgreSQL via PgStore; retention återstår)
 - [x] B7 Endast framåt (ingen omräkning)
-- [x] B8 Ej manuellt (API saknar skrivskydd för mätvärde ännu, se P3)
+- [x] B8 Ej manuellt (skrivskydd i API: mätvärdesfält — values/value/observedAt/receivedAt/quality — i sakskrivningar (create/update/preview) nekas med 400 i stället för att tyst ignoreras; värden anländer endast via message.accepted; configparametrar fortsatt tillåtna)
 - [x] B9 Tillstånd utan notis/styrning
 - [x] B10 Gemensam katalog + tenant-isolering (OPA återstår, X-Tenant scaffold)
 - [x] B11 `device/[channel]/object/resource`, wildcard

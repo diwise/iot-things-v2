@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/diwise/iot-things-v2/internal/application"
@@ -1048,5 +1049,102 @@ func TestV0SearchDefaultAndSbk(t *testing.T) {
 	}
 	if len(found) != 1 || found[0].ThingID != "bin-sbk" {
 		t.Fatalf("filtered=%+v, want only sbk", found)
+	}
+}
+
+// B8: manuellt inmatade mätvärden stöds inte. Kroppar som bär
+// mätvärdesfält nekas med 400 i stället för att tyst ignoreras.
+// Konfigurationsparametrar (paramOverrides) är fortsatt tillåtna.
+func b8BodyWithValues(t *testing.T) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(v0binObject())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	m["values"] = map[string]any{
+		"fillRate": map[string]any{"value": 42.0, "observedAt": "2026-09-21T12:00:00Z", "quality": "ok"},
+	}
+	return m
+}
+
+func TestB8CreateRejectsManualValues(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+
+	rr := doJSON(h.createThing, ctx, "", b8BodyWithValues(t), "")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("create with values=%d, want 400", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "B8") {
+		t.Fatalf("error should reference B8, got %q", body)
+	}
+	// Nekad skrivning får inte persistera.
+	if rr := doGET(h.getThing, ctx, "bin-42", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("rejected create must not persist, get=%d", rr.Code)
+	}
+
+	// Ren kropp med configparametrar går fortfarande igenom.
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("clean create=%d, want 201: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestB8UpdateAndPreviewRejectManualValues(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	etag := doGET(h.getThing, ctx, "bin-42", "").Header().Get("ETag")
+
+	if rr := doJSON(h.updateThing, ctx, "bin-42", b8BodyWithValues(t), etag); rr.Code != http.StatusBadRequest {
+		t.Fatalf("update with values=%d, want 400", rr.Code)
+	}
+	if rr := doJSON(h.previewThing, ctx, "bin-42", b8BodyWithValues(t), ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("preview with values=%d, want 400", rr.Code)
+	}
+
+	// Fristående observedAt på toppnivå nekas också.
+	onlyTime := b8BodyWithValues(t)
+	delete(onlyTime, "values")
+	onlyTime["observedAt"] = "2026-09-21T12:00:00Z"
+	if rr := doJSON(h.updateThing, ctx, "bin-42", onlyTime, etag); rr.Code != http.StatusBadRequest {
+		t.Fatalf("update with observedAt=%d, want 400", rr.Code)
+	}
+
+	// Ren uppdatering fungerar fortfarande (ETag ska avancera).
+	obj := v0binObject()
+	obj.Name = "Soptunna 42 ny"
+	rr := doJSON(h.updateThing, ctx, "bin-42", obj, etag)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("clean update=%d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("ETag") == etag {
+		t.Fatal("ETag must advance after clean update")
+	}
+}
+
+func TestB8NestedPropertyValueRejected(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+
+	raw, err := json.Marshal(v0binObject())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	m["properties"].(map[string]any)["distance"] = map[string]any{"value": 1.5, "observedAt": "2026-09-21T12:00:00Z"}
+	if rr := doJSON(h.createThing, ctx, "", m, ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("create with nested property value=%d, want 400", rr.Code)
 	}
 }

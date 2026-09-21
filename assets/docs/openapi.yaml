@@ -173,6 +173,11 @@ paths:
     post:
       tags: [Things]
       summary: Skapa sak från mall/variant
+      description: >-
+        Manuella mätvärden stöds inte (B8): kroppar som bär mätvärdesfält
+        (values/value/observedAt/receivedAt/quality, även inuti properties)
+        nekas med 400. Värden anländer endast via mätflödet.
+        Konfigurationsparametrar (paramOverrides) är tillåtna.
       requestBody:
         required: true
         content:
@@ -212,6 +217,10 @@ paths:
     put:
       tags: [Things]
       summary: Uppdatera sak (kräver If-Match)
+      description: >-
+        Manuella mätvärden stöds inte (B8): kroppar som bär mätvärdesfält
+        (values/value/observedAt/receivedAt/quality, även inuti properties)
+        nekas med 400. Värden anländer endast via mätflödet.
       parameters:
         - $ref: '#/components/parameters/IfMatch'
       requestBody:
@@ -302,6 +311,9 @@ paths:
     put:
       tags: [Things]
       summary: Förhandsgranska effektiv konfiguration utan att lagra
+      description: >-
+        Samma B8-skrivskydd som vid skapa/uppdatera: mätvärdesfält nekas
+        med 400.
       parameters:
         - $ref: '#/components/parameters/ThingId'
       requestBody:

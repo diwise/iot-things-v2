@@ -234,6 +234,69 @@ func decodeBody[T any](r *http.Request) (T, error) {
 	return v, nil
 }
 
+// manualValueFieldOrder är B8-markörer för manuellt inmatade mätvärden,
+// i deterministisk rapporteringsordning. ObjectSpec (skrivytan för
+// POST/PUT things + preview) bär avsiktligt inga värdefält: aktuella
+// värden och historik skrivs endast via mätflödet (message.accepted ->
+// HandleMeasurements). Kroppar som bär mätvärdesfält nekas explicit i
+// stället för att tyst ignoreras, så att klienter som ekar tillbaka en
+// GET-sammanfattning (ThingSummary med values) får ett tydligt fel.
+// Konfigurationsparametrar (paramOverrides) påverkas inte: de anges av
+// användaren per beslut.
+var manualValueFieldOrder = []string{"values", "value", "observedAt", "receivedAt", "quality"}
+
+func firstManualField(m map[string]json.RawMessage) string {
+	for _, field := range manualValueFieldOrder {
+		if _, ok := m[field]; ok {
+			return field
+		}
+	}
+	return ""
+}
+
+// decodeThingSpec avkodar en sakskrivning (create/update/preview) med
+// B8-skrivskydd: mätvärdesfält på toppnivå samt inuti properties-poster
+// (things.Property bär enbart identitet/metadata, aldrig värden) nekas
+// med 400. Övriga skrivvägar (bindings/move/upgrade/mallar/varianter)
+// har inga värdefält i sina kroppar och behöver inget skydd.
+func decodeThingSpec(r *http.Request) (catalog.ObjectSpec, error) {
+	var obj catalog.ObjectSpec
+	if r.Body == nil {
+		return obj, fmt.Errorf("%w: empty body", things.ErrValidation)
+	}
+	defer r.Body.Close()
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
+		return obj, fmt.Errorf("%w: invalid JSON body: %v", things.ErrValidation, err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return obj, fmt.Errorf("%w: invalid JSON body: %v", things.ErrValidation, err)
+	}
+	if field := firstManualField(top); field != "" {
+		return obj, fmt.Errorf("%w: manual measurement values are not supported (B8): body field %q is read-only (values arrive via message.accepted)", things.ErrValidation, field)
+	}
+	if rawProps, ok := top["properties"]; ok {
+		var props map[string]json.RawMessage
+		if err := json.Unmarshal(rawProps, &props); err != nil {
+			return obj, fmt.Errorf("%w: invalid properties: %v", things.ErrValidation, err)
+		}
+		for id, rawProp := range props {
+			var entry map[string]json.RawMessage
+			if err := json.Unmarshal(rawProp, &entry); err != nil {
+				return obj, fmt.Errorf("%w: invalid properties: %v", things.ErrValidation, err)
+			}
+			if field := firstManualField(entry); field != "" {
+				return obj, fmt.Errorf("%w: manual measurement values are not supported (B8): properties.%q field %q is read-only", things.ErrValidation, id, field)
+			}
+		}
+	}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return obj, fmt.Errorf("%w: invalid JSON body: %v", things.ErrValidation, err)
+	}
+	return obj, nil
+}
+
 func (h *handler) publishTemplate(w http.ResponseWriter, r *http.Request) {
 	if _, err := tenant(r, CreateThings); err != nil {
 		writeAPIError(w, err)
@@ -316,7 +379,7 @@ func (h *handler) createThing(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	obj, err := decodeBody[catalog.ObjectSpec](r)
+	obj, err := decodeThingSpec(r)
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -470,7 +533,7 @@ func (h *handler) updateThing(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	obj, err := decodeBody[catalog.ObjectSpec](r)
+	obj, err := decodeThingSpec(r)
 	if err != nil {
 		writeAPIError(w, err)
 		return
@@ -578,7 +641,7 @@ func (h *handler) previewThing(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
-	obj, err := decodeBody[catalog.ObjectSpec](r)
+	obj, err := decodeThingSpec(r)
 	if err != nil {
 		writeAPIError(w, err)
 		return
