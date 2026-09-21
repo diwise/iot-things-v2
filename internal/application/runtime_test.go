@@ -1132,7 +1132,7 @@ func TestRuntimeRetryReplaysFinishedBatch(t *testing.T) {
 
 	// Förloraren med underskrivet staket: replay, ingen omskrivning.
 	rtB := NewRuntime(fs)
-	out, err := rtB.persistBatch("t", "m1", "passage-1", staleSD, door, base)
+	out, err := rtB.persistBatch(context.Background(), "t", "m1", "passage-1", staleSD, door, base)
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}

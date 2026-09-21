@@ -40,3 +40,22 @@ Källkod och `go.mod` är facit. Ingen `replace` mot syskonmappar.
   `history_v2_observed_at`, migration 006; Timescale-hypertabell med
   chunk-exkludering när tillägget finns).
 - Explicit GDPR-radering per sak: `DELETE /things/{id}/history`.
+
+## Tracing (OTEL via exporter/collector)
+
+Allt skickas via OTLP-exporter till otel-collector — ingen `/metrics`.
+Sätt `OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318` (se
+`docker-compose.o11y.yaml` i compose-repot; tjänsten är ännu inte
+tillagd där). Utan endpoint är SDK:t noop.
+
+Spankedja mätvärde → beräkning → värdesevent (propageras via
+broker-headers av messaging-biblioteket):
+
+- `receive-measurements` (broker-ingress) → `handle-batch`
+  (tenant/message/antal) → `evaluate-thing` per sak (sak-ID,
+  events/historik-antal) → `drain-publish` (publicering av
+  `things.v1.values`, injicerar samma context) + `drain-raw`
+  (livscykel/relationer). `drain-all` vid omstart, `retention-purge`
+  vid K4-körning.
+- HTTP-ingress: otelhttp server-spans + `check-auth`-span; fel
+  markeras med Error-status i hela kedjan.

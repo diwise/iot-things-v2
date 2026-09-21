@@ -31,7 +31,17 @@ import (
 	"github.com/diwise/iot-things-v2/internal/application/things"
 	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 	"github.com/diwise/messaging-golang/pkg/messaging"
+	"github.com/diwise/service-chassis/pkg/infrastructure/o11y/tracing"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracer bär kedjan vidare: HandleBatch anropas med remote-context från
+// brokerkonsumtionen (messaging extraherar trace-headers) och publicering
+// (DrainAndPublish/DrainRaw) injicerar samma context, så mätvärde ->
+// beräkning -> värdesevent hänger ihop i collectorn.
+var runtimeTracer = otel.Tracer("iot-things-v2/runtime")
 
 // StoredThingState är det persisterade tillståndet per sak. Revision är
 // konfigurationsversionen (API-ytan, If-Match); DataRevision är
@@ -390,14 +400,19 @@ type BatchOutcome struct {
 // och tillstånd + historik + outbox persisteras innan retur. Samma
 // (tenant, messageID, sak) twice -> ingen omberäkning; lagrade händelser
 // returneras för återpublicering.
-func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, obs []things.Observation, receivedAt time.Time) ([]BatchOutcome, error) {
+func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, obs []things.Observation, receivedAt time.Time) (outcomes []BatchOutcome, err error) {
 	if tenant == "" {
 		return nil, fmt.Errorf("%w: tenant must be provided", things.ErrValidation)
 	}
 	if messageID == "" {
 		return nil, fmt.Errorf("%w: messageID must be provided", things.ErrValidation)
 	}
-	_ = ctx
+	ctx, span := runtimeTracer.Start(ctx, "handle-batch", trace.WithAttributes(
+		attribute.String("tenant", tenant),
+		attribute.String("messaging.message_id", messageID),
+		attribute.Int("observations", len(obs)),
+	))
+	defer func() { tracing.RecordAnyErrorAndEndSpan(err, span) }()
 	if receivedAt.IsZero() {
 		receivedAt = time.Now().UTC()
 	}
@@ -441,7 +456,7 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 		}
 	}
 
-	outcomes := make([]BatchOutcome, 0, len(order))
+	outcomes = make([]BatchOutcome, 0, len(order))
 	for _, id := range order {
 		sd := states[id]
 		// Atomär dedup (L6/L10): check-only före beräkning; markeringen sker
@@ -456,12 +471,14 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 			})
 			continue
 		}
-		outcome, err := rt.persistBatch(tenant, messageID, id, sd, grouped[id], receivedAt)
-		if err != nil {
+		outcome, perr := rt.persistBatch(ctx, tenant, messageID, id, sd, grouped[id], receivedAt)
+		if perr != nil {
+			err = perr
 			return nil, err
 		}
 		outcomes = append(outcomes, BatchOutcome{ThingID: id, Outcome: outcome})
 	}
+	span.SetAttributes(attribute.Int("things", len(outcomes)))
 	return outcomes, nil
 }
 
@@ -476,14 +493,21 @@ const maxBatchAttempts = 10
 // historik/outbox-skrivningar är idempotenta, sak-blobben skyddas av CAS på
 // revision. Vid CAS-konflikt läses färskt tillstånd om och rundan räknas om
 // (deterministisk: samma resultat givet samma indata) innan nytt försök.
-func (rt *Runtime) persistBatch(tenant, messageID, id string, sd *storedDecoded, obs []things.Observation, receivedAt time.Time) (*FlowOutcome, error) {
-	var outcome *FlowOutcome
+func (rt *Runtime) persistBatch(ctx context.Context, tenant, messageID, id string, sd *storedDecoded, obs []things.Observation, receivedAt time.Time) (outcome *FlowOutcome, err error) {
+	ctx, span := runtimeTracer.Start(ctx, "evaluate-thing", trace.WithAttributes(
+		attribute.String("tenant", tenant),
+		attribute.String("thing.id", id),
+		attribute.String("messaging.message_id", messageID),
+		attribute.Int("observations", len(obs)),
+	))
+	defer func() { tracing.RecordAnyErrorAndEndSpan(err, span) }()
 	for attempt := range maxBatchAttempts {
-		var err error
-		outcome, err = EvaluateBatchFlow(sd.config, sd.state.Current, sd.state.ProcessorStates, obs, receivedAt, messageID, sd.state.Revision)
-		if err != nil {
-			return nil, fmt.Errorf("runtime: thing %q: %w", id, err)
+		evalOut, evalErr := EvaluateBatchFlow(sd.config, sd.state.Current, sd.state.ProcessorStates, obs, receivedAt, messageID, sd.state.Revision)
+		if evalErr != nil {
+			err = fmt.Errorf("runtime: thing %q: %w", id, evalErr)
+			return nil, err
 		}
+		outcome = evalOut
 		for k, v := range outcome.Updated {
 			if sd.state.Current == nil {
 				sd.state.Current = make(map[string]CurrentValue)
@@ -508,6 +532,10 @@ func (rt *Runtime) persistBatch(tenant, messageID, id string, sd *storedDecoded,
 		fence := sd.state.DataRevision
 		sd.state.DataRevision++
 		if rt.store.CommitBatch(tenant, id, messageID, fence, sd.state, outcome.History, outcome.Events) {
+			span.SetAttributes(
+				attribute.Int("events", len(outcome.Events)),
+				attribute.Int("history", len(outcome.History)),
+			)
 			return outcome, nil
 		}
 		// CAS-konflikt: inget från försöket blev synligt (CommitBatch är
@@ -519,26 +547,30 @@ func (rt *Runtime) persistBatch(tenant, messageID, id string, sd *storedDecoded,
 		}
 		fresh, ok := rt.store.LoadThing(tenant, id)
 		if !ok {
-			return nil, fmt.Errorf("%w: thing %q deleted concurrently", things.ErrConflict, id)
+			err = fmt.Errorf("%w: thing %q deleted concurrently", things.ErrConflict, id)
+			return nil, err
 		}
 		if rt.store.DedupCheck(tenant, messageID, id) {
 			// En samtidig skribent slutförde samma batch under vårt omtag:
 			// spela upp lagrade händelser i stället för att räkna om.
 			// Omberäkning är inte konvergent för tillståndsbärande
 			// operatorer (räknare/summor/deltan dubbelräknar).
-			return &FlowOutcome{
+			outcome = &FlowOutcome{
 				Updated: map[string]CurrentValue{},
 				Events:  append([]FlowEvent(nil), fresh.LastEvents...),
-			}, nil
+			}
+			return outcome, nil
 		}
-		freshCfg, err := decodeConfig(fresh.ConfigJSON)
-		if err != nil {
-			return nil, fmt.Errorf("runtime: thing %q has undecodable config: %w", id, err)
+		freshCfg, ferr := decodeConfig(fresh.ConfigJSON)
+		if ferr != nil {
+			err = fmt.Errorf("runtime: thing %q has undecodable config: %w", id, ferr)
+			return nil, err
 		}
 		sd.state = fresh
 		sd.config = freshCfg
 	}
-	return nil, fmt.Errorf("%w: thing %q busy, retry delivery", things.ErrConflict, id)
+	err = fmt.Errorf("%w: thing %q busy, retry delivery", things.ErrConflict, id)
+	return nil, err
 }
 
 type storedDecoded struct {
@@ -669,14 +701,23 @@ func buildThingValuesEvent(tenant, thingID, thingType, thingTypeVersion string, 
 // ID:n som levererats. Fel behåller kön för retry.
 // Revision stämplas per batchgrupp från lagrade händelser (låst revision vid
 // beräkning), inte från aktuell config (som kan ha uppdaterats efter batch).
-func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tenant, thingID string, now time.Time) (int, error) {
+func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tenant, thingID string, now time.Time) (published int, err error) {
 	if tenant == "" || thingID == "" {
 		return 0, fmt.Errorf("%w: tenant and thing ID must be provided", things.ErrValidation)
 	}
+	ctx, span := runtimeTracer.Start(ctx, "drain-publish", trace.WithAttributes(
+		attribute.String("tenant", tenant),
+		attribute.String("thing.id", thingID),
+	))
+	defer func() {
+		span.SetAttributes(attribute.Int("published", published))
+		tracing.RecordAnyErrorAndEndSpan(err, span)
+	}()
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	if _, err := rt.DrainRaw(ctx, pub, tenant, thingID); err != nil {
+	if _, derr := rt.DrainRaw(ctx, pub, tenant, thingID); derr != nil {
+		err = derr
 		return 0, err
 	}
 	rt.mu.Lock()
@@ -689,9 +730,10 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 	if len(pending) == 0 {
 		return 0, nil
 	}
-	cfg, err := decodeConfig(st.ConfigJSON)
-	if err != nil {
-		return 0, fmt.Errorf("runtime: thing %q has undecodable config: %w", thingID, err)
+	cfg, cerr := decodeConfig(st.ConfigJSON)
+	if cerr != nil {
+		err = fmt.Errorf("runtime: thing %q has undecodable config: %w", thingID, cerr)
+		return 0, err
 	}
 	units := make(map[string]string, len(cfg.Properties))
 	for id, prop := range cfg.Properties {
@@ -707,7 +749,7 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 		index[e.MessageID] = len(groups)
 		groups = append(groups, []FlowEvent{e})
 	}
-	published := 0
+	published = 0
 	for _, group := range groups {
 		rev := st.Revision
 		if len(group) > 0 {
@@ -716,11 +758,13 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 		ev := buildThingValuesEvent(tenant, thingID, cfg.TemplateID, cfg.TemplateVersion, units, group, rev, now)
 		ev.Thing = describeThing(cfg)
 		for _, v := range ev.Values {
-			if err := v.Validate(); err != nil {
-				return published, fmt.Errorf("runtime: invalid value event: %w", err)
+			if verr := v.Validate(); verr != nil {
+				err = fmt.Errorf("runtime: invalid value event: %w", verr)
+				return published, err
 			}
 		}
-		if err := pub.PublishThingValues(ctx, ev); err != nil {
+		if perr := pub.PublishThingValues(ctx, ev); perr != nil {
+			err = perr
 			return published, err
 		}
 		published++
@@ -739,7 +783,12 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 
 // DrainAll publicerar väntande händelser för alla saker i alla tenants
 // (uppstartsdränering efter omstart). Returnerar antal levererade batchar.
-func (rt *Runtime) DrainAll(ctx context.Context, pub EventPublisher, now time.Time) (int, error) {
+func (rt *Runtime) DrainAll(ctx context.Context, pub EventPublisher, now time.Time) (total int, err error) {
+	ctx, span := runtimeTracer.Start(ctx, "drain-all")
+	defer func() {
+		span.SetAttributes(attribute.Int("published", total))
+		tracing.RecordAnyErrorAndEndSpan(err, span)
+	}()
 	type target struct{ tenant, thing string }
 	var targets []target
 	rt.mu.Lock()
@@ -751,10 +800,11 @@ func (rt *Runtime) DrainAll(ctx context.Context, pub EventPublisher, now time.Ti
 		}
 	}
 	rt.mu.Unlock()
-	total := 0
+	total = 0
 	for _, t := range targets {
-		n, err := rt.DrainAndPublish(ctx, pub, t.tenant, t.thing, now)
-		if err != nil {
+		n, derr := rt.DrainAndPublish(ctx, pub, t.tenant, t.thing, now)
+		if derr != nil {
+			err = derr
 			return total, err
 		}
 		total += n
@@ -765,7 +815,8 @@ func (rt *Runtime) DrainAll(ctx context.Context, pub EventPublisher, now time.Ti
 	rawTargets := rt.store.ListRawTargets()
 	rt.mu.Unlock()
 	for _, t := range rawTargets {
-		if _, err := rt.DrainRaw(ctx, pub, t.Tenant, t.ThingID); err != nil {
+		if _, rerr := rt.DrainRaw(ctx, pub, t.Tenant, t.ThingID); rerr != nil {
+			err = rerr
 			return total, err
 		}
 	}
@@ -775,30 +826,41 @@ func (rt *Runtime) DrainAll(ctx context.Context, pub EventPublisher, now time.Ti
 // DrainRaw levererar väntande livscykel-/relationshändelser för en sak.
 // Till skillnad från DrainAndPublish kräver den ingen lagrad sakblob:
 // borttagna saker dräneras likadant. Returnerar antal levererade händelser.
-func (rt *Runtime) DrainRaw(ctx context.Context, pub EventPublisher, tenant, thingID string) (int, error) {
+func (rt *Runtime) DrainRaw(ctx context.Context, pub EventPublisher, tenant, thingID string) (delivered int, err error) {
 	if tenant == "" || thingID == "" {
 		return 0, fmt.Errorf("%w: tenant and thing ID must be provided", things.ErrValidation)
 	}
+	ctx, span := runtimeTracer.Start(ctx, "drain-raw", trace.WithAttributes(
+		attribute.String("tenant", tenant),
+		attribute.String("thing.id", thingID),
+	))
+	defer func() {
+		span.SetAttributes(attribute.Int("delivered", delivered))
+		tracing.RecordAnyErrorAndEndSpan(err, span)
+	}()
 	rt.mu.Lock()
 	pending := rt.store.PendingRawEvents(tenant, thingID)
 	rt.mu.Unlock()
-	delivered := 0
+	delivered = 0
 	for _, re := range pending {
 		var msg messaging.TopicMessage
 		switch re.Topic {
 		case pkgtypes.TopicLifecycleChanges:
 			var ev pkgtypes.ThingLifecycleV1
-			if err := json.Unmarshal(re.Payload, &ev); err != nil {
-				return delivered, fmt.Errorf("runtime: invalid lifecycle event %q: %w", re.ID, err)
+			if uerr := json.Unmarshal(re.Payload, &ev); uerr != nil {
+				err = fmt.Errorf("runtime: invalid lifecycle event %q: %w", re.ID, uerr)
+				return delivered, err
 			}
-			if err := ev.Validate(); err != nil {
-				return delivered, fmt.Errorf("runtime: invalid lifecycle event %q: %w", re.ID, err)
+			if verr := ev.Validate(); verr != nil {
+				err = fmt.Errorf("runtime: invalid lifecycle event %q: %w", re.ID, verr)
+				return delivered, err
 			}
 			msg = ev
 		case pkgtypes.TopicRelationChanges:
 			var ev pkgtypes.RelationChangeV1
-			if err := json.Unmarshal(re.Payload, &ev); err != nil {
-				return delivered, fmt.Errorf("runtime: invalid relation event %q: %w", re.ID, err)
+			if uerr := json.Unmarshal(re.Payload, &ev); uerr != nil {
+				err = fmt.Errorf("runtime: invalid relation event %q: %w", re.ID, uerr)
+				return delivered, err
 			}
 			msg = ev
 		default:
@@ -806,7 +868,8 @@ func (rt *Runtime) DrainRaw(ctx context.Context, pub EventPublisher, tenant, thi
 			// lämnas för framtida konsumenter utan att blockera kön.
 			continue
 		}
-		if err := pub.PublishMessage(ctx, msg); err != nil {
+		if perr := pub.PublishMessage(ctx, msg); perr != nil {
+			err = perr
 			return delivered, err
 		}
 		delivered++

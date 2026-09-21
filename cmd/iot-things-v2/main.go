@@ -25,7 +25,12 @@ import (
 	"github.com/diwise/service-chassis/pkg/infrastructure/o11y"
 	"github.com/diwise/service-chassis/pkg/infrastructure/o11y/logging"
 	"github.com/diwise/service-chassis/pkg/infrastructure/servicerunner"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
+
+var retentionTracer = otel.Tracer("iot-things-v2/retention")
 
 const serviceName string = "iot-things-v2"
 
@@ -331,8 +336,13 @@ const retentionInterval = 24 * time.Hour
 // runRetentionPurge raderar historik äldre än cutoff via managern och
 // loggar utfallet (K4-övervakning: antal + gräns per körning).
 func runRetentionPurge(ctx context.Context, mgr *application.Manager, days int) {
+	ctx, span := retentionTracer.Start(ctx, "retention-purge", trace.WithAttributes(
+		attribute.Int("retention_days", days),
+	))
+	defer span.End()
 	cutoff := time.Now().UTC().AddDate(0, 0, -days)
 	n := mgr.PurgeHistory(ctx, cutoff)
+	span.SetAttributes(attribute.Int64("deleted", n))
 	logging.GetFromContext(ctx).Info("history retention purge",
 		"deleted", n, "older_than", cutoff.Format(time.RFC3339), "retention_days", days)
 }
