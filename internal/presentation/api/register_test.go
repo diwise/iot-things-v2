@@ -1202,3 +1202,60 @@ func TestK6PurgeHistoryEndpoint(t *testing.T) {
 		t.Fatalf("purge after delete=%d, want 204", rr.Code)
 	}
 }
+
+// Tenantisolering skrivvägar: främmande tenant läcker aldrig existens
+// (404, inte 401/403); tvetydig multi-tenant-skrivning utan väljare ger
+// 400; väljare utanför behörighet ger 401.
+func TestTenantIsolationWrites(t *testing.T) {
+	h, _, _ := v0setup(t)
+	v0wastebin(t, h)
+	if rr := doJSON(h.createThing, v0ctx("t"), "", v0binObject(), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	etag := doGET(h.getThing, v0ctx("t"), "bin-42", "").Header().Get("ETag")
+	other := v0ctx("other")
+
+	obj := v0binObject()
+	obj.Name = "Intrång"
+	if rr := doJSON(h.updateThing, other, "bin-42", obj, etag); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant update=%d, want 404", rr.Code)
+	}
+	if rr := doGET(h.deleteThing, other, "bin-42", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant delete=%d, want 404", rr.Code)
+	}
+	if rr := doGET(h.getHistory, other, "bin-42", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant history=%d, want 404", rr.Code)
+	}
+	if rr := doGET(h.getTree, other, "bin-42", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant tree=%d, want 404", rr.Code)
+	}
+	if rr := doGET(h.getOverview, other, "bin-42", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant overview=%d, want 404", rr.Code)
+	}
+	swapped := map[string]any{"bindings": []things.Binding{}}
+	if rr := doJSON(h.swapBindings, other, "bin-42", swapped, etag); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant swap=%d, want 404", rr.Code)
+	}
+	// Purge är idempotent och röjer inget: 204 även för främmande tenant,
+	// saken består i sin tenant.
+	if rr := doGET(h.purgeHistory, other, "bin-42", ""); rr.Code != http.StatusNoContent {
+		t.Fatalf("cross-tenant purge=%d, want 204", rr.Code)
+	}
+	if rr := doGET(h.getThing, v0ctx("t"), "bin-42", ""); rr.Code != http.StatusOK {
+		t.Fatalf("thing must survive foreign purge, get=%d", rr.Code)
+	}
+
+	// Fler-tenant-användare utan väljare: skrivning tvetydig (400).
+	multi := auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		"t1": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+		"t2": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+	})
+	dup := v0binObject()
+	dup.ThingID = "bin-m"
+	if rr := doJSON(h.createThing, multi, "", dup, ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous create=%d, want 400", rr.Code)
+	}
+	if rr := doGET(h.deleteThing, multi, "bin-m", "tenant=other"); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("foreign selector delete=%d, want 401", rr.Code)
+	}
+}

@@ -44,7 +44,7 @@
 - [x] B7 Endast framåt (ingen omräkning)
 - [x] B8 Ej manuellt (skrivskydd i API: mätvärdesfält — values/value/observedAt/receivedAt/quality — i sakskrivningar (create/update/preview) nekas med 400 i stället för att tyst ignoreras; värden anländer endast via message.accepted; configparametrar fortsatt tillåtna)
 - [x] B9 Tillstånd utan notis/styrning
-- [x] B10 Gemensam katalog + tenant-isolering (OPA återstår, X-Tenant scaffold)
+- [x] B10 Gemensam katalog + tenant-isolering (middleware testad i båda modellerna: legacy-tenants + access-objekt bakom AUTHZ_ACCESS_OBJECT_ENABLED; legacy beviljar begärt scope utan prövning — skarp auktorisering kräver access-policy i compose; läsningar fanar ut över token-tenants, skrivningar kräver exakt en; främmande tenant ger 404 utan existensläckage; X-Tenant-header saknas, ?tenant= gäller)
 - [x] B11 `device/[channel]/object/resource`, wildcard
 - [x] B12 Strikt kvalitet/enhet (enhetsmatch vid config delvis, se O2)
 - [x] B13 Sen sparas + tie-break
