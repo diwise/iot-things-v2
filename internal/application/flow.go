@@ -99,6 +99,22 @@ type FlowOutcome struct {
 // körs om någon ingång uppdaterats i rundan, annars återanvänds aktuellt
 // värde tyst. Paramändringar slår därför igenom vid nästa beröringsrunda
 // för berörda recept.
+//
+// K3 sendetalj per operator: sena observationer (äldre mättid än aktuellt)
+// sparas alltid i historik med Late-flagg (B13) men blir aldrig aktuella
+// och berör därmed aldrig recept — tillståndsoperatorer ser dem aldrig:
+//   - threshold: utdata = f(aktuella ingångar); sen input flippar inget.
+//   - activeTime: endast framåtriktad händelsetid ackumuleras; en sen aktiv
+//     period korrigerar aldrig ackumulerad tid i efterhand.
+//   - counter: sena flanker räknas aldrig.
+//   - delta: sen observation seedar/jämför aldrig; första aktuella seedar
+//     utan resultat, differens = aktuell − föregående aktuell.
+//   - sum: sena värden adderas aldrig.
+//   - tillståndslösa (mean/min/max/level/fillRate/linear/subtract/
+//     passthrough): körs endast på berörda recept med aktuella värden.
+//
+// Blandad omgång (ny + sen i samma rapport): receptet körs på aktuella
+// värden; den sena raden sparas med Late-flagg utan event.
 func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentValue, proc map[string]StoredProcessor, obs []things.Observation, receivedAt time.Time, messageID string, configRevision int64) (*FlowOutcome, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("flow: nil effective config")

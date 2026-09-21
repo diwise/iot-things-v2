@@ -866,3 +866,221 @@ func TestSumLifecycle(t *testing.T) {
 		t.Fatalf("persisted total=%v, want ~0.9", st.Total)
 	}
 }
+
+// K3: sen flank påverkar aldrig räknarens tillstånd.
+func TestCounterLateDoesNotCount(t *testing.T) {
+	cfg := counterCfg()
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	t1 := base.Add(5 * time.Minute)
+	current := map[string]CurrentValue{}
+	proc := map[string]StoredProcessor{}
+	round := func(v bool, at, rx time.Time, id string) *FlowOutcome {
+		t.Helper()
+		obs := boolObs("s", flowURNpresence, "5500", v, at)
+		obs.ReceivedAt = rx
+		out, err := EvaluateBatchFlow(&cfg, current, proc, []things.Observation{obs}, rx, id, 1)
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		current, proc = mergeCurrent(current, out), mergeProc(proc, out)
+		return out
+	}
+
+	if out := round(true, t1, t1, "m1"); *out.Updated["passages"].Value != 1 {
+		t.Fatalf("r1 passages=%v, want 1", *out.Updated["passages"].Value)
+	}
+	// Sen inaktiv flank (äldre än aktuellt): rör ej tillstånd.
+	late := round(false, base, t1.Add(time.Minute), "m2")
+	if len(late.ProcStates) != 0 {
+		t.Fatalf("late must not touch processor state: %+v", late.ProcStates)
+	}
+	if len(late.History) != 1 || !late.History[0].Late {
+		t.Fatalf("late must only record late history: %+v", late.History)
+	}
+	var st functions.CounterState
+	if err := json.Unmarshal(proc["passages"].StateJSON, &st); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if st.Count != 1 || !st.LastActive {
+		t.Fatalf("state corrupted by late flank: %+v", st)
+	}
+	// Ny aktiv igen: ingen ny flank (senast sedda är aktiv).
+	if out := round(true, t1.Add(2*time.Minute), t1.Add(2*time.Minute), "m3"); *out.Updated["passages"].Value != 1 {
+		t.Fatalf("r3 passages=%v, want still 1", *out.Updated["passages"].Value)
+	}
+}
+
+// K3: sen observation seedar/jämför aldrig deltats tillstånd.
+func TestDeltaLateDoesNotSeed(t *testing.T) {
+	cfg := meterCfg("delta")
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	t1 := base.Add(5 * time.Minute)
+	current := map[string]CurrentValue{}
+	proc := map[string]StoredProcessor{}
+	round := func(v float64, at, rx time.Time, id string) *FlowOutcome {
+		t.Helper()
+		obs := sigObs("s", v, at)
+		obs.ReceivedAt = rx
+		out, err := EvaluateBatchFlow(&cfg, current, proc, []things.Observation{obs}, rx, id, 1)
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		current, proc = mergeCurrent(current, out), mergeProc(proc, out)
+		return out
+	}
+
+	round(12.5, t1, t1, "m1") // seedar utan resultat
+	late := round(99.0, base, t1.Add(time.Minute), "m2")
+	if len(late.ProcStates) != 0 {
+		t.Fatalf("late must not touch processor state: %+v", late.ProcStates)
+	}
+	if len(late.History) != 1 || !late.History[0].Late {
+		t.Fatalf("late must only record late history: %+v", late.History)
+	}
+	// Differens mot föregående aktuella (12.5), inte mot sena 99.
+	if out := round(13.0, t1.Add(2*time.Minute), t1.Add(2*time.Minute), "m3"); *out.Updated["consumption"].Value != 0.5 {
+		t.Fatalf("consumption=%v, want 0.5", *out.Updated["consumption"].Value)
+	}
+}
+
+// K3: sena värden adderas aldrig till summan.
+func TestSumLateDoesNotAdd(t *testing.T) {
+	cfg := meterCfg("sum")
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	t1 := base.Add(5 * time.Minute)
+	current := map[string]CurrentValue{}
+	proc := map[string]StoredProcessor{}
+	round := func(v float64, at, rx time.Time, id string) *FlowOutcome {
+		t.Helper()
+		obs := sigObs("s", v, at)
+		obs.ReceivedAt = rx
+		out, err := EvaluateBatchFlow(&cfg, current, proc, []things.Observation{obs}, rx, id, 1)
+		if err != nil {
+			t.Fatalf("%s: %v", id, err)
+		}
+		current, proc = mergeCurrent(current, out), mergeProc(proc, out)
+		return out
+	}
+
+	if out := round(5.0, t1, t1, "m1"); *out.Updated["total"].Value != 5.0 {
+		t.Fatalf("r1 total=%v, want 5", *out.Updated["total"].Value)
+	}
+	late := round(100.0, base, t1.Add(time.Minute), "m2")
+	if len(late.ProcStates) != 0 {
+		t.Fatalf("late must not touch processor state: %+v", late.ProcStates)
+	}
+	if out := round(7.0, t1.Add(2*time.Minute), t1.Add(2*time.Minute), "m3"); *out.Updated["total"].Value != 12.0 {
+		t.Fatalf("r3 total=%v, want 12", *out.Updated["total"].Value)
+	}
+}
+
+// K3: sen input flippar aldrig tröskelns utgång.
+func TestThresholdLateDoesNotFlip(t *testing.T) {
+	cfg := catalog.EffectiveConfig{
+		Properties:  map[string]things.Property{"temp": {}, "hot": {}},
+		ParamValues: map[string]float64{"high": 30, "low": 20},
+		Bindings: []things.Binding{
+			{DeviceID: "s", Object: flowURNtemp, Resource: "5700", Input: "temp"},
+		},
+		Recipes: []catalog.Recipe{
+			{Name: "heat", Operator: "threshold", Version: "v1",
+				Inputs: []string{"temp"}, Outputs: []string{"hot"},
+				Params: []string{"high", "low"}},
+		},
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	t1 := base.Add(5 * time.Minute)
+	current := map[string]CurrentValue{}
+	proc := map[string]StoredProcessor{}
+
+	out, err := EvaluateBatchFlow(&cfg, current, proc, []things.Observation{sigObs("s", 35, t1)}, t1, "m1", 1)
+	if err != nil {
+		t.Fatalf("r1: %v", err)
+	}
+	current, proc = mergeCurrent(current, out), mergeProc(proc, out)
+	if *current["hot"].Value != 1 {
+		t.Fatalf("r1 hot=%v, want 1", *current["hot"].Value)
+	}
+	lateObs := sigObs("s", 10, base) // skulle släcka om den tillämpades
+	out, err = EvaluateBatchFlow(&cfg, current, proc, []things.Observation{lateObs}, t1.Add(time.Minute), "m2", 1)
+	if err != nil {
+		t.Fatalf("late: %v", err)
+	}
+	if _, ok := out.Updated["hot"]; ok {
+		t.Fatalf("late must not flip threshold output: %+v", out.Updated["hot"])
+	}
+	if len(out.History) != 1 || !out.History[0].Late {
+		t.Fatalf("late must only record late history: %+v", out.History)
+	}
+	if *current["hot"].Value != 1 {
+		t.Fatalf("hot=%v after late, want still 1", *current["hot"].Value)
+	}
+}
+
+// K3: blandad omgång (ny + sen i samma rapport) beräknar på aktuella
+// värden; den sena raden sparas med Late-flagg utan event.
+func TestMixedBatchLateCoexistsWithNew(t *testing.T) {
+	cfg := catalog.EffectiveConfig{
+		Properties: map[string]things.Property{"a": {}, "b": {}, "m": {}},
+		Bindings: []things.Binding{
+			{DeviceID: "sA", Object: flowURNtemp, Resource: "5700", Input: "a"},
+			{DeviceID: "sB", Object: flowURNtemp, Resource: "5700", Input: "b"},
+		},
+		Recipes: []catalog.Recipe{
+			{Name: "avg", Operator: "mean", Version: "v1",
+				Inputs: []string{"a", "b"}, Outputs: []string{"m"}},
+		},
+	}
+	mkObs := func(device string, v float64, at time.Time) things.Observation {
+		return things.Observation{
+			Signal:     things.ParseSignalID(device, "", flowURNtemp, "5700"),
+			Value:      new(float64(v)),
+			Quality:    things.QualityOK,
+			ObservedAt: at,
+			ReceivedAt: at,
+		}
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	t1 := base.Add(5 * time.Minute)
+	current := map[string]CurrentValue{}
+	proc := map[string]StoredProcessor{}
+
+	out, err := EvaluateBatchFlow(&cfg, current, proc,
+		[]things.Observation{mkObs("sA", 10, t1), mkObs("sB", 20, t1)}, t1, "m1", 1)
+	if err != nil {
+		t.Fatalf("r1: %v", err)
+	}
+	current, proc = mergeCurrent(current, out), mergeProc(proc, out)
+	if *out.Updated["m"].Value != 15 {
+		t.Fatalf("r1 mean=%v, want 15", *out.Updated["m"].Value)
+	}
+	t2 := t1.Add(time.Minute)
+	out, err = EvaluateBatchFlow(&cfg, current, proc,
+		[]things.Observation{mkObs("sA", 14, t2), mkObs("sB", 99, base)}, t2, "m2", 1)
+	if err != nil {
+		t.Fatalf("r2: %v", err)
+	}
+	if *out.Updated["m"].Value != 17 {
+		t.Fatalf("r2 mean=%v, want 17 (new a + current b)", *out.Updated["m"].Value)
+	}
+	var lateB, eventsB int
+	for _, h := range out.History {
+		if h.PropertyID == "b" {
+			if !h.Late {
+				t.Fatalf("late b row must carry Late flag: %+v", h)
+			}
+			lateB++
+		}
+	}
+	if lateB != 1 {
+		t.Fatalf("want exactly 1 late b history row, got %d (%+v)", lateB, out.History)
+	}
+	for _, e := range out.Events {
+		if e.PropertyID == "b" {
+			eventsB++
+		}
+	}
+	if eventsB != 0 {
+		t.Fatalf("late b must not emit events, got %d", eventsB)
+	}
+}
