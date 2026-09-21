@@ -270,6 +270,32 @@ paths:
                     items:
                       $ref: '#/components/schemas/Binding'
         '404': { $ref: '#/components/responses/NotFound' }
+  /things/{id}/relations:
+    get:
+      tags: [Things]
+      summary: Läs sakens namngivna relationer med upplösta mål
+      description: >-
+        Löser varje relation mot målsaken vid läsning (inkl. partOf).
+        Saknat mål (borttaget efter länkning) ger target:null —
+        raden behålls så att brutna referenser syns. Inga
+        relationshändelser publiceras utom partOf set/removed.
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+      responses:
+        '200':
+          description: Relationer (tom lista vid relationslös sak)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [relations]
+                properties:
+                  relations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RelationResolve'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
     put:
       tags: [Things]
       summary: Byt sensorkopplingar utan att byta identitet/historik (kräver If-Match)
@@ -609,6 +635,19 @@ components:
           items: { type: string }
         min: { type: integer }
         max: { type: integer }
+    RelationResolve:
+      type: object
+      description: >-
+        Namngiven relation med målet upplöst vid läsning. target är null
+        när målet saknas (borttaget efter länkning).
+      required: [name, targetThingId]
+      properties:
+        name: { type: string }
+        targetThingId: { type: string }
+        target:
+          allOf:
+            - $ref: '#/components/schemas/ThingSummary'
+          nullable: true
     Template:
       type: object
       required: [id, version]

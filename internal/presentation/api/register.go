@@ -68,6 +68,7 @@ type Manager interface {
 	History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) ([]application.HistoryWrite, error)
 	GetObject(ctx context.Context, tenant, thingID string) (application.ThingSummary, error)
 	GetBindings(ctx context.Context, tenant, thingID string) ([]things.Binding, error)
+	Relations(ctx context.Context, tenant, thingID string) ([]application.RelationResolve, error)
 	GetConfig(ctx context.Context, tenant, thingID string) (*catalog.EffectiveConfig, error)
 	SearchObjects(ctx context.Context, tenant string, filter application.SearchFilter) []application.ThingSummary
 	Overview(ctx context.Context, tenant, thingID string) (application.Overview, error)
@@ -129,6 +130,7 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, poli
 			r.Get("{id}/config", h.getConfig)
 			r.Get("{id}/history", h.getHistory)
 			r.Get("{id}/overview", h.getOverview)
+			r.Get("{id}/relations", h.getRelations)
 			r.Get("{id}/tree", h.getTree)
 		})
 
@@ -598,6 +600,20 @@ func (h *handler) getBindings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string][]things.Binding{"bindings": bindings})
+}
+
+func (h *handler) getRelations(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	t, ok := h.resolveThing(w, r, id)
+	if !ok {
+		return
+	}
+	rels, err := h.mgr.Relations(r.Context(), t, id)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string][]application.RelationResolve{"relations": rels})
 }
 
 func (h *handler) getConfig(w http.ResponseWriter, r *http.Request) {

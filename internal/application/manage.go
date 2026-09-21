@@ -474,6 +474,41 @@ func (m *Manager) GetBindings(_ context.Context, tenant, thingID string) ([]thin
 	return cfg.Bindings, nil
 }
 
+// RelationResolve är en namngiven relation med upplöst mål. Target är nil
+// när målet saknas (borttaget efter länkning) — raden behålls så att
+// brutna referenser syns i stället för att tyst försvinna.
+type RelationResolve struct {
+	Name          string        `json:"name"`
+	TargetThingID string        `json:"targetThingId"`
+	Target        *ThingSummary `json:"target"`
+}
+
+// Relations löser sakens namngivna relationer mot målsaker vid läsning
+// (read-only vy över lagrad config; ändras via UpdateObject/MoveObject).
+// Mål slås upp i samma tenant — strikt intra-tenant (B17) — och saknade
+// mål ger nil-Target. Tom lista (ej null) vid relationslös sak.
+// Uppslagning är N+1 men avgränsad av K5-taket (max 16 relationer).
+func (m *Manager) Relations(ctx context.Context, tenant, thingID string) ([]RelationResolve, error) {
+	st, ok := m.store.LoadThing(tenant, thingID)
+	if !ok {
+		return nil, fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
+	}
+	cfg, err := decodeConfig(st.ConfigJSON)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RelationResolve, 0, len(cfg.Relations))
+	for _, r := range cfg.Relations {
+		res := RelationResolve{Name: r.Name, TargetThingID: r.TargetThingID}
+		if sum, err := m.GetObject(ctx, tenant, r.TargetThingID); err == nil {
+			cp := sum
+			res.Target = &cp
+		}
+		out = append(out, res)
+	}
+	return out, nil
+}
+
 // GetConfig läser sakens lagrade effektiva config (read-only underlag
 // för redigeringsformulär; ändras via UpdateObject/SwapBindings).
 func (m *Manager) GetConfig(_ context.Context, tenant, thingID string) (*catalog.EffectiveConfig, error) {

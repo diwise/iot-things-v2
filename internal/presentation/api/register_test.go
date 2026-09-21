@@ -1259,3 +1259,114 @@ func TestTenantIsolationWrites(t *testing.T) {
 		t.Fatalf("foreign selector delete=%d, want 401", rr.Code)
 	}
 }
+
+// Plan A: namngivna relationer löses mot målsaker vid läsning.
+// Saknat mål ger target:null (raden behålls); okänd/främmande sak ger 404.
+func TestRelationsResolveTargets(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	tmpl := catalog.TemplateSpec{
+		Template: things.Template{
+			ID: "rel", Version: "v1",
+			Required: []string{"distance"},
+			Category: "wastebin",
+			Relations: []things.RelationSpec{
+				{Name: "partOf", Min: 0, Max: 1},
+				{Name: "sibling", Min: 0, Max: 1},
+			},
+		},
+	}
+	if rr := doJSON(h.publishTemplate, ctx, "", tmpl, ""); rr.Code != http.StatusCreated {
+		t.Fatalf("publish: %d %s", rr.Code, rr.Body.String())
+	}
+	mkObj := func(id string) catalog.ObjectSpec {
+		return catalog.ObjectSpec{
+			ThingID: id, Name: id,
+			Location: v0loc(), Metadata: v0meta(),
+			TemplateID: "rel", TemplateVersion: "v1",
+			Properties: map[string]things.Property{"distance": {}},
+		}
+	}
+	for _, id := range []string{"rel-a", "rel-b"} {
+		if rr := doJSON(h.createThing, ctx, "", mkObj(id), ""); rr.Code != http.StatusCreated {
+			t.Fatalf("create %s: %d %s", id, rr.Code, rr.Body.String())
+		}
+	}
+	getRels := func(id string) []application.RelationResolve {
+		t.Helper()
+		rr := doGET(h.getRelations, ctx, id, "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("relations %s=%d, want 200: %s", id, rr.Code, rr.Body.String())
+		}
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(rr.Body.Bytes(), &raw); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if string(raw["relations"]) == "null" {
+			t.Fatal("relations must be an array, never null")
+		}
+		var body struct {
+			Relations []application.RelationResolve `json:"relations"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return body.Relations
+	}
+	if got := getRels("rel-a"); len(got) != 0 {
+		t.Fatalf("relations=%+v, want empty (not null)", got)
+	}
+
+	// Länka a -> b via sibling-sloten.
+	etag := doGET(h.getThing, ctx, "rel-a", "").Header().Get("ETag")
+	link := mkObj("rel-a")
+	link.Relations = []catalog.RelationRef{{Name: "sibling", TargetThingID: "rel-b"}}
+	if rr := doJSON(h.updateThing, ctx, "rel-a", link, etag); rr.Code != http.StatusOK {
+		t.Fatalf("link: %d %s", rr.Code, rr.Body.String())
+	}
+	got := getRels("rel-a")
+	if len(got) != 1 || got[0].Name != "sibling" || got[0].TargetThingID != "rel-b" {
+		t.Fatalf("relations=%+v, want one sibling->rel-b", got)
+	}
+	if got[0].Target == nil || got[0].Target.Name != "rel-b" || got[0].Target.Tenant != "t" {
+		t.Fatalf("target=%+v, want resolved rel-b in t", got[0].Target)
+	}
+
+	// Målet tas bort: raden behålls med target:null.
+	if rr := doGET(h.deleteThing, ctx, "rel-b", ""); rr.Code != http.StatusNoContent {
+		t.Fatalf("delete target=%d, want 204", rr.Code)
+	}
+	got = getRels("rel-a")
+	if len(got) != 1 || got[0].Target != nil {
+		t.Fatalf("relations=%+v, want one row with null target", got)
+	}
+
+	if rr := doGET(h.getRelations, ctx, "unknown", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown=%d, want 404", rr.Code)
+	}
+	if rr := doGET(h.getRelations, v0ctx("other"), "rel-a", ""); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant=%d, want 404", rr.Code)
+	}
+
+	// Samma ID i två tenants: utan väljare 400, främmande väljare 401.
+	multi := auth.WithAccess(context.Background(), map[string]map[auth.Scope]struct{}{
+		"t1": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+		"t2": {ReadThings: {}, CreateThings: {}, UpdateThings: {}, DeleteThings: {}},
+	})
+	dup := mkObj("rel-dup")
+	if rr := doJSONTenant(h.createThing, multi, "", dup, "", "t1"); rr.Code != http.StatusCreated {
+		t.Fatalf("create t1: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doJSONTenant(h.createThing, multi, "", dup, "", "t2"); rr.Code != http.StatusCreated {
+		t.Fatalf("create t2: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doGET(h.getRelations, multi, "rel-dup", ""); rr.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous=%d, want 400", rr.Code)
+	}
+	if rr := doGET(h.getRelations, multi, "rel-dup", "tenant=t2"); rr.Code != http.StatusOK {
+		t.Fatalf("selected=%d, want 200", rr.Code)
+	}
+	if rr := doGET(h.getRelations, multi, "rel-dup", "tenant=other"); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("foreign selector=%d, want 401", rr.Code)
+	}
+}

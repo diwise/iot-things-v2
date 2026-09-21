@@ -63,7 +63,7 @@
 - [x] F1-F7 (struktur, ej driftbevis)
 - [x] D1-D2, T1-T10 (inkl. versionsdiff före aktivering via upgrade/preview)
 - [x] S1-S4, R1-R6 (fixtures + recept; geometri låst i K2: vertical-down, vinkel/extra parametrar nekas)
-- [x] H1-H10 (minneslager + API-filter; DB-constraint återstår)
+- [x] H1-H10 (minneslager + API-filter; namngivna relationer läsbara via GET /things/{id}/relations med upplösta mål, saknat mål ger null; DB-constraint återstår)
 - [x] C1-C10 (operatorer + regler; quality-tabell per operator låst i K1: functions.go-tabell + min/max- och falling/both-flödestester)
 - [x] L1-L7 (regler + minnes-outbox + PostgreSQL-PgStore med samma protokolltester; dedupmarkering atomär i commit, omtag spelar upp vid samtidig slutförd batch; DLX/ack-verifiering i messaging-lib återstår), L8-L10 delvis
 - [x] P1-P9: katalog publish/list/get enstaka (immutable, ingen update/delete), sak-CRUD, sökning med filter (mall/version/variant/namn/category/metadata/bbox) + limit/offset + X-Total-Count, historik med egenskap + from/to-intervall + limit/offset, underträd med djupgräns, detach, OpenAPI för /api/v1
