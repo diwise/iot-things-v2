@@ -10,6 +10,12 @@ services:
   rabbitmq:
     image: rabbitmq:3-management
     hostname: rabbitmq
+    environment:
+      # Matchar tjänstens RABBITMQ_USER/PASS nedan (messaging-golang läser
+      # samma variabler). Default-imagen har annars bara guest/guest som
+      # inte får ansluta remote, så drillen skulle aldrig koppla upp.
+      RABBITMQ_DEFAULT_USER: user
+      RABBITMQ_DEFAULT_PASS: bitnami
     ports:
       - "5673:5672"
       - "15673:15672"
@@ -48,7 +54,12 @@ services:
     ports:
       - "8081:8080"
       - "8001:8000"
+    volumes:
+      # Drill-only OPA-policy (statisk drill-token, tenant "drill").
+      # Ersätter aldrig den bakade produktionspolicyn utanför drillen.
+      - ./drill-authz.rego:/opt/diwise/config/drill-authz.rego:ro
     environment:
+      POLICIES_FILE: /opt/diwise/config/drill-authz.rego
       LISTEN_ADDRESS: "0.0.0.0"
       SERVICE_PORT: "8080"
       CONTROL_PORT: "8000"

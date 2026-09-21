@@ -1683,7 +1683,7 @@ func TestManageMigrate160LBins(t *testing.T) {
 	}
 }
 
-// Livscykel + relationer för konsumenter (FIWARE): create/move/unlink/
+// Livscykel + relationer för konsumenter: create/move/unlink/
 // delete ger created/updated/deleted samt partOf set/removed; värdesevent
 // bär sakdeskriptor så att entiteter byggs utan API-join.
 func TestManageLifecycleAndRelations(t *testing.T) {

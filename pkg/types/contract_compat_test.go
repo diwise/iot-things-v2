@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// Konsumentkompatibilitet Etapp 7: thing.updated-konsumenter
-// (iot-transform-fiware låser kuvertet id/type/thing/tenant/timestamp)
-// måste kunna mappa utan katalogjoin. Tabellen:
+// Konsumentkompatibilitet Etapp 7: konsumenter av thing.updated
+// (kuvertet id/type/thing/tenant/timestamp) måste kunna mappa utan
+// katalogjoin. Tabellen:
 //
 //	thing.updated.id        <- ThingValuesEventV1.ThingID (+ per value)
 //	thing.updated.type      <- ThingValuesEventV1.ThingType (mall-ID)
@@ -75,7 +75,7 @@ func TestConsumerMappingComplete(t *testing.T) {
 }
 
 // Golden JSON: kontraktet är stabilt; ändringar kräver medvetet beslut
-// (samma princip som fiware-konsumentens kuvertlås). EventID formateras som
+// (samma princip som konsumentens kuvertlås). EventID formateras som
 // StableEventID i internal/application (v1/tenant/thing/messageID[/egenskap]);
 // golden hårdkodar samma strängar eftersom pkg/types inte får importera
 // internal (importcykel). ReceivedAt/ComputedAt sätts alltid i produktion

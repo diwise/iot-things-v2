@@ -258,8 +258,14 @@ func (m *Manager) csvRow(record []string) (catalog.ObjectSpec, string) {
 	for k, v := range meta {
 		md[k] = v
 	}
+	// K1: subType och alternativeName befordras till förstklassiga fält
+	// (bakåtkompatibelt: de stannar även i metadata för äldre konsumenter).
 	if sub := strings.TrimSpace(record[2]); sub != "" {
 		md["subType"] = sub
+		obj.SubType = sub
+	}
+	if alt, ok := meta["alternativeName"]; ok && strings.TrimSpace(alt) != "" {
+		obj.AlternativeName = strings.TrimSpace(alt)
 	}
 	if desc := strings.TrimSpace(record[4]); desc != "" {
 		md["description"] = desc

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -31,18 +33,67 @@ type GeoLocationV1 struct {
 }
 
 // ThingDescriptorV1 describes the thing an event belongs to, valid for the
-// event's config revision. It carries what consumers (e.g. FIWARE mapping
-// to Smart Data Models) need without an API join: identity for the entity
-// URN, category for rule matching, location for GeoProperties and metadata
-// for the remaining attributes.
+// event's config revision. It carries what consumers need without an API
+// join: identity for the entity URN, category for rule matching, location
+// for GeoProperties and metadata for the remaining attributes.
+//
+// K1 schema: thingId/tenant/configRevision are required; name, category,
+// alternativeName, subType, location, metadata, variantId/variantVersion
+// are optional and additive (omitempty). AlternativeName feeds NameOrID
+// (alternativeName > name > thingId); SubType feeds TypeName
+// (subType > thingType). Description/tags stay in metadata, never as new
+// top-level fields in v1.
 type ThingDescriptorV1 struct {
-	ThingID        string            `json:"thingId"`
-	Name           string            `json:"name,omitempty"`
-	Category       string            `json:"category,omitempty"`
-	Location       *GeoLocationV1    `json:"location,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
-	VariantID      string            `json:"variantId,omitempty"`
-	VariantVersion string            `json:"variantVersion,omitempty"`
+	ThingID         string            `json:"thingId"`
+	Name            string            `json:"name,omitempty"`
+	AlternativeName string            `json:"alternativeName,omitempty"`
+	SubType         string            `json:"subType,omitempty"`
+	Category        string            `json:"category,omitempty"`
+	Location        *GeoLocationV1    `json:"location,omitempty"`
+	Metadata        map[string]string `json:"metadata,omitempty"`
+	VariantID       string            `json:"variantId,omitempty"`
+	VariantVersion  string            `json:"variantVersion,omitempty"`
+}
+
+// nonSafeURI matches the shared URN-segment normalisation: everything
+// outside the allowed set becomes ":".
+var nonSafeURI = regexp.MustCompile(`[^\w\-~:/?#\[\]@!$&'()*+,;=%.]+`)
+
+// SafeURISegment normalises s for use as a URI segment. ":" and "/" are
+// kept by convention (percent-encoding would also encode them), so the
+// shared rule is ":"-substitution, not percent-encoding.
+func SafeURISegment(s string) string {
+	return nonSafeURI.ReplaceAllString(strings.TrimSpace(s), ":")
+}
+
+// NameOrID returns alternativeName > name > thingId, raw (unsanitised).
+// Use SafeURISegment on the result for URN construction.
+func (d ThingDescriptorV1) NameOrID() string {
+	if d.AlternativeName != "" {
+		return d.AlternativeName
+	}
+	if d.Name != "" {
+		return d.Name
+	}
+	return d.ThingID
+}
+
+// TypeName returns subType when set, otherwise the event's thingType
+// (template ID). The caller supplies thingType since the descriptor does
+// not repeat it.
+func (d ThingDescriptorV1) TypeName(thingType string) string {
+	if d.SubType != "" {
+		return d.SubType
+	}
+	return thingType
+}
+
+// UUID returns the trailing ://-segment of an ID.
+func UUID(id string) string {
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		return id[i+1:]
+	}
+	return id
 }
 
 // ThingValueV1 is a single versioned thing property observation.
@@ -95,8 +146,7 @@ func (v ThingValueV1) Validate() error {
 
 // ThingValuesEventV1 groups property values (and related relation changes)
 // for one thing at one config revision. ThingType carries the template ID
-// (e.g. "wastebin") so thing.updated-consumers (FIWARE mapping needs the
-// thing type) can route without a catalog join.
+// (e.g. "wastebin") so consumers can route without a catalog join.
 type ThingValuesEventV1 struct {
 	Schema           string             `json:"schema,omitempty"`
 	EventID          string             `json:"eventId"`
@@ -147,9 +197,9 @@ const (
 )
 
 // ThingLifecycleV1 announces thing creation, configuration change or
-// deletion. Consumers that materialize things (e.g. FIWARE entities)
-// subscribe to stay in sync, including deletes. The snapshot carries the
-// thing descriptor at ConfigRevision.
+// deletion. Consumers that materialize things subscribe to stay in sync,
+// including deletes. The snapshot carries the thing descriptor at
+// ConfigRevision.
 type ThingLifecycleV1 struct {
 	Schema           string             `json:"schema,omitempty"`
 	EventID          string             `json:"eventId"`
@@ -189,6 +239,58 @@ func (e ThingLifecycleV1) Validate() error {
 		return fmt.Errorf("types: invalid kind %q (want created/updated/deleted)", e.Kind)
 	}
 	return nil
+}
+
+// EventTimestamp är konsumentens tid för ett värdesevent (K1.3):
+// max(values[].observedAt) — mättid, aldrig transporttid (B3).
+// Rekommendationen i INTEGRATION.md är därmed kontrakt.
+func (e ThingValuesEventV1) EventTimestamp() time.Time {
+	var latest time.Time
+	for _, v := range e.Values {
+		if v.ObservedAt.After(latest) {
+			latest = v.ObservedAt
+		}
+	}
+	return latest
+}
+
+// ValueByProperty returnerar värdet för en egenskap eller nil när den
+// saknas i eventet. K1.4: konsumentregler adresserar egenskaper via
+// values.<propertyId>.{value,observedAt,quality,unit,source} —
+// ersättaren för gamla field:-vägar (temperature.v, measured.level,
+// percent, refDevices[0].deviceID). Full proveniens (antal
+// tillgängliga/förväntade per ingång) stannar i historik/outbox;
+// kontraktet bär kommaseparerad source
+// (device/[channel]/object/resource, tom channel = alla).
+func (e ThingValuesEventV1) ValueByProperty(propertyID string) *ThingValueV1 {
+	for i := range e.Values {
+		if e.Values[i].PropertyID == propertyID {
+			return &e.Values[i]
+		}
+	}
+	return nil
+}
+
+// ShouldEmitProperty är konsumentregeln för kvalitet (K1.5): invalid
+// hoppar alltid över propertyn (ogiltig ersätter aldrig aktuellt),
+// ok/uncertain skrivs där uncertain flaggas vidare av konsumenten.
+// Okänd/tom kvalitet behandlas som invalid.
+func ShouldEmitProperty(quality string) bool {
+	return quality == "ok" || quality == "uncertain"
+}
+
+// ShouldEmitEntity avgör om en entitet får skrivas: alla required
+// egenskaper måste finnas med emitterbar kvalitet, annars hoppas hela
+// entiteten över (ingen icke-konform partiell entitet). Valfria
+// egenskaper utelämnas individuellt (when:present default).
+func (e ThingValuesEventV1) ShouldEmitEntity(required []string) bool {
+	for _, id := range required {
+		v := e.ValueByProperty(id)
+		if v == nil || !ShouldEmitProperty(v.Quality) {
+			return false
+		}
+	}
+	return true
 }
 
 // TopicName reports the publish topic (B20: isolated v1 topics).

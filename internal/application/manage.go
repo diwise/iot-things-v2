@@ -37,6 +37,8 @@ type ThingSummary struct {
 	ThingID         string                   `json:"thingId"`
 	Tenant          string                   `json:"tenant"`
 	Name            string                   `json:"name,omitempty"`
+	AlternativeName string                   `json:"alternativeName,omitempty"`
+	SubType         string                   `json:"subType,omitempty"`
 	Category        string                   `json:"category,omitempty"`
 	Location        *things.Location         `json:"location,omitempty"`
 	Metadata        map[string]string        `json:"metadata,omitempty"`
@@ -640,6 +642,8 @@ func summarize(tenant, thingID string, cfg *catalog.EffectiveConfig, st StoredTh
 		ThingID:         thingID,
 		Tenant:          tenant,
 		Name:            cfg.Name,
+		AlternativeName: cfg.AlternativeName,
+		SubType:         cfg.SubType,
 		Category:        cfg.Category,
 		Location:        cfg.Location,
 		Metadata:        cfg.Metadata,
@@ -691,6 +695,8 @@ func (m *Manager) reconstructSpec(tenant, thingID string) (catalog.ObjectSpec, e
 		ThingID:         thingID,
 		Tenant:          tenant,
 		Name:            cfg.Name,
+		AlternativeName: cfg.AlternativeName,
+		SubType:         cfg.SubType,
 		Category:        cfg.Category,
 		Location:        cfg.Location,
 		Metadata:        cfg.Metadata,

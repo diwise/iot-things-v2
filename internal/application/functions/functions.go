@@ -2,6 +2,34 @@ package functions
 
 import "errors"
 
+// K1.5 quality-tabell (producent). Direktfasen i flow.go normaliserar
+// först: okänd/tom kvalitet -> invalid, enhetsmismatch (strikt, båda
+// satta och olika) -> invalid, nil-värde -> invalid. Endast
+// ok/uncertain kan bli current (ShouldBecomeCurrent); invalid sparas i
+// historik utan current/event och utan late-flagg. Härledda recept
+// kräver alla inputs ok/uncertain med icke-nil värde, annars skip
+// (inget resultat/event/historik för output; gammalt current står kvar).
+//
+// Per operator:
+//
+//	mean/min/max        alla ok/uncertain (tom lista = config-fel);
+//	                    någon uncertain -> uncertain, annars ok
+//	subtract            båda ok/uncertain; ok endast om båda ok
+//	level/linear/
+//	passthrough         passthrough av ingångskvalitet
+//	fillRate            100*level/height utan clampning; <0/>100 behålls +
+//	                    uncertain; ingångs-uncertain smittar (OR)
+//	threshold           passthrough; invalid/saknad -> skip, gammal output
+//	                    bevaras tyst; >=high -> 1, <=low -> 0 (inkl gränser)
+//	activeTime/counter/
+//	delta/sum           ingångskvalitet; uncertain vid versionReset
+//	                    (nollställt tillstånd); sena observationer som ej blir
+//	                    current rör aldrig tillstånd; ingen tick
+//
+// Historisk not: percent/percentage-aliaset i flödet routas till FillRate,
+// inte till en separat procent-operator; fristående Percent/FlagOutOfRange-
+// primitiver är borttagna (K1) för att undvika parallella sanningar.
+
 // Quality values as plain strings to avoid an import cycle against things.
 // Valid values are "ok", "uncertain" and "invalid".
 const (
@@ -130,16 +158,6 @@ func Linear(value, factor, offset float64) float64 {
 	return value*factor + offset
 }
 
-// Percent relates value to a reference: 100 * value / ref.
-// ref == 0 -> error.
-func Percent(value, ref float64) (float64, error) {
-	if ref == 0 {
-		return 0, errors.New("functions: percent requires ref != 0")
-	}
-
-	return 100 * value / ref, nil
-}
-
 // ThresholdWithHysteresis maps value to a stable boolean state:
 // true if value >= high, false if value <= low, otherwise keep state.
 func ThresholdWithHysteresis(value, high, low float64, state bool) bool {
@@ -187,16 +205,6 @@ func Update(state ActiveTimeState, active bool, nowUnix int64) ActiveTimeState {
 	}
 
 	return state
-}
-
-// FlagOutOfRange returns "ok" when min <= value <= max,
-// otherwise "uncertain".
-func FlagOutOfRange(value, min, max float64) string {
-	if value < min || value > max {
-		return QualityUncertain
-	}
-
-	return QualityOk
 }
 
 // BoolToFloat maps a boolean observation onto the numeric pipeline:

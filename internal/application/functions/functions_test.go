@@ -178,19 +178,6 @@ func TestLinear(t *testing.T) {
 	}
 }
 
-func TestPercent(t *testing.T) {
-	got, err := Percent(30, 120)
-	if err != nil {
-		t.Fatalf("Percent returned error: %v", err)
-	}
-	if got != 25 {
-		t.Fatalf("Percent(30, 120) = %v, want 25", got)
-	}
-	if _, err := Percent(1, 0); err == nil {
-		t.Fatal("Percent with ref=0 expected error, got nil")
-	}
-}
-
 func TestThresholdWithHysteresis(t *testing.T) {
 	// Below low stays/turns false.
 	if got := ThresholdWithHysteresis(1, 10, 5, true); got != false {
@@ -255,24 +242,6 @@ func TestActiveTime(t *testing.T) {
 	}
 }
 
-func TestFlagOutOfRange(t *testing.T) {
-	if got := FlagOutOfRange(50, 0, 100); got != QualityOk {
-		t.Fatalf("in range = %q, want ok", got)
-	}
-	if got := FlagOutOfRange(0, 0, 100); got != QualityOk {
-		t.Fatalf("boundary min = %q, want ok", got)
-	}
-	if got := FlagOutOfRange(100, 0, 100); got != QualityOk {
-		t.Fatalf("boundary max = %q, want ok", got)
-	}
-	if got := FlagOutOfRange(-1, 0, 100); got != QualityUncertain {
-		t.Fatalf("below = %q, want uncertain", got)
-	}
-	if got := FlagOutOfRange(101, 0, 100); got != QualityUncertain {
-		t.Fatalf("above = %q, want uncertain", got)
-	}
-}
-
 // Regression: okänd/tom kvalitet ska nekas för alla aggregeringar
 // (strikt ok/uncertain, B12). Tidigare felprefix "operators:" ska vara "functions:".
 func TestMeanMinMaxRejectUnknownQuality(t *testing.T) {
@@ -303,9 +272,6 @@ func TestErrorPrefixIsFunctions(t *testing.T) {
 	}
 	if _, _, err := FillRate(1, 0); err == nil || !containsSub(err.Error(), "functions:") {
 		t.Fatalf("FillRate fel = %v, vill ha functions:-prefix", err)
-	}
-	if _, err := Percent(1, 0); err == nil || !containsSub(err.Error(), "functions:") {
-		t.Fatalf("Percent fel = %v, vill ha functions:-prefix", err)
 	}
 }
 

@@ -19,6 +19,19 @@
 - Fler-tenant-användare: läsningar fanar ut serverside över token-auktoriserade
   tenants (?tenant= filtrerar); enskild sak kräver entydig träff (0 -> 404,
   flera -> 400); skrivningar kräver exakt en tenant.
+- K1 (2026-09-22): exakt v1-schema + quality-tabell låst. Deskriptorn bär
+  additivt `alternativeName`/`subType` (NameOrID = alternativeName > name >
+  thingId; TypeName = subType > thingType; SafeURISegment/UUID i pkg/types).
+  Konsumenttid = `EventTimestamp()` (max observedAt). Field-vägar
+  `values.<property>.{value,observedAt,quality,unit,source}` ersätter gamla
+  field:-vägar. Producenttabell per operator i functions.go + flödestester
+  för min/max- och falling/both-flödestester; död kod (Percent/FlagOutOfRange)
+  borttagen. Konsumentregler: `ShouldEmitProperty/ShouldEmitEntity`
+  (invalid hoppar property, required saknad/invalid hoppar entitet); trace
+  endast headers/OTel. Exempel: `docs/CONSUMER-BINDING.md` (wastebin, room,
+  greenhouse). `match.device` för saker är död flagga.
+  Arkitekturgräns: tjänsten känner inte till sina konsumenter — inga
+  konsumentnamn i kod, tester eller docs.
 
 ## B – Beslut
 
@@ -51,13 +64,13 @@
 - [x] D1-D2, T1-T10 (inkl. versionsdiff före aktivering via upgrade/preview)
 - [x] S1-S4, R1-R6 (fixtures + recept; geometri-bredd återstår K2)
 - [x] H1-H10 (minneslager + API-filter; DB-constraint återstår)
-- [x] C1-C10 (operatorer + regler; quality-tabell per operator återstår K1)
+- [x] C1-C10 (operatorer + regler; quality-tabell per operator låst i K1: functions.go-tabell + min/max- och falling/both-flödestester)
 - [x] L1-L7 (regler + minnes-outbox + PostgreSQL-PgStore med samma protokolltester; dedupmarkering atomär i commit, omtag spelar upp vid samtidig slutförd batch; DLX/ack-verifiering i messaging-lib återstår), L8-L10 delvis
 - [x] P1-P9: katalog publish/list/get enstaka (immutable, ingen update/delete), sak-CRUD, sökning med filter (mall/version/variant/namn/category/metadata/bbox) + limit/offset + X-Total-Count, historik med egenskap + from/to-intervall + limit/offset, underträd med djupgräns, detach, OpenAPI för /api/v1
-- [x] P10-P13 delvis (kontrakt + health + thing/history/children/tree; livscykel created/updated/deleted + partOf set/removed publiceras beständigt med inline-drain; värdesevent bär sakdeskriptor; konsumentkartläggning mot FIWARE återstår E7)
+- [x] P10-P13 delvis (kontrakt + health + thing/history/children/tree; livscykel created/updated/deleted + partOf set/removed publiceras beständigt med inline-drain; värdesevent bär sakdeskriptor; konsumentkartläggning återstår E7)
 - [x] G1-G6, G8-G9 (kärna testbar utan broker/DB); G7 delvis (slog utan hemligheter, metrics/tracing återstår)
-- [x] E1-E6 (E6-resten: beständig katalog, plats/metadata/sök, träd/detach/total, OpenAPI); E7 påbörjad (isolerad drill + kontraktstester + v1-CSV-import; konsumentomställning återstår)
+- [x] E1-E6 (E6-resten: beständig katalog, plats/metadata/sök, träd/detach/total, OpenAPI); E7 steg 1–2 verifierade i drill 2026-09-21 (isolering, samexistens, paritet), steg 3 konsumentstöd implementerat+live-verifierat (hos konsumenten, flag-gatat), steg 4 kriterier dokumenterade i INTEGRATION.md §8 (observationsperiod återstår som driftaktivitet; relations/lifecycle-konsumtion ingår ej)
 - [x] A1/A3-A7 (struktur); A2/A8-A29 delvis via enhetstester (full E2E återstår)
-- [ ] K1-K6 kvarstår delvis: K4-backend + beständig katalog + startkatalog klara (retention + övervakning återstår); övriga se kod-TODO + THNGS_NEW.md kap 12
+- [ ] K1-K6 kvarstår delvis: K1 klart (se ovan); K4-backend + beständig katalog + startkatalog klara (retention + övervakning återstår); övriga se kod-TODO + THNGS_NEW.md kap 12
 
 Review 2026-09-16: 10 fynd fixade (bare-prefix, device-krav, ok/uncertain-strikthet, dedup-tenant, outbox-idempotens, historik-kvalitet, cykelskydd, relationsvalidering, kontrakt-tid/version, API-tester). `gofmt`/`vet`/`test` grönt.

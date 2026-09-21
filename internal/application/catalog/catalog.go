@@ -76,6 +76,8 @@ type ObjectSpec struct {
 	ThingID         string                     `json:"thingId"`
 	Tenant          string                     `json:"tenant,omitempty"`
 	Name            string                     `json:"name,omitempty"`
+	AlternativeName string                     `json:"alternativeName,omitempty"`
+	SubType         string                     `json:"subType,omitempty"`
 	Category        string                     `json:"category,omitempty"`
 	Location        *things.Location           `json:"location,omitempty"`
 	Metadata        map[string]string          `json:"metadata,omitempty"`
@@ -102,6 +104,8 @@ type ResolvedRelation struct {
 type EffectiveConfig struct {
 	ThingID         string                        `json:"thingId,omitempty"`
 	Name            string                        `json:"name,omitempty"`
+	AlternativeName string                        `json:"alternativeName,omitempty"`
+	SubType         string                        `json:"subType,omitempty"`
 	Category        string                        `json:"category,omitempty"`
 	Location        *things.Location              `json:"location,omitempty"`
 	Metadata        map[string]string             `json:"metadata,omitempty"`
@@ -562,6 +566,21 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 	if strings.TrimSpace(obj.Name) == "" {
 		return nil, fmt.Errorf("%w: object %q must have a name", things.ErrValidation, obj.ThingID)
 	}
+	// K1: alternativa namn och subtyper är valfria additiva fält.
+	// Explicit värde vinner; tomt värde främjas från metadata för
+	// bakåtkompatibilitet med CSV-importerade saker (subType/description
+	// i metadata). SubType får inte innehålla "/" (URN-segment).
+	alternativeName := strings.TrimSpace(obj.AlternativeName)
+	if alternativeName == "" && obj.Metadata != nil {
+		alternativeName = strings.TrimSpace(obj.Metadata["alternativeName"])
+	}
+	subType := strings.TrimSpace(obj.SubType)
+	if subType == "" && obj.Metadata != nil {
+		subType = strings.TrimSpace(obj.Metadata["subType"])
+	}
+	if strings.Contains(subType, "/") {
+		return nil, fmt.Errorf("%w: object %q subType %q must not contain %q", things.ErrValidation, obj.ThingID, subType, "/")
+	}
 
 	c.mu.RLock()
 	tmpl, ok := c.templates[versionKey(obj.TemplateID, obj.TemplateVersion)]
@@ -677,6 +696,8 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 	return &EffectiveConfig{
 		ThingID:         obj.ThingID,
 		Name:            obj.Name,
+		AlternativeName: alternativeName,
+		SubType:         subType,
 		Category:        category,
 		Location:        cloneLocation(obj.Location),
 		Metadata:        cloneStringMap(obj.Metadata),

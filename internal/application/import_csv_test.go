@@ -84,6 +84,10 @@ func TestImportCSV(t *testing.T) {
 	if sum.Metadata["tags"] != "160L" || sum.Metadata["subType"] != "WasteContainer" {
 		t.Fatalf("metadata=%+v, want tags+subType", sum.Metadata)
 	}
+	// K1 review: subType befordras även till förstklassigt fält.
+	if sum.SubType != "WasteContainer" {
+		t.Fatalf("subType=%q, want WasteContainer", sum.SubType)
+	}
 	// Sträng-args bevaras som metadata i stället för att neka raden.
 	poi, err := mgr.GetObject(ctx, "default", "poi-1")
 	if err != nil {
@@ -91,6 +95,10 @@ func TestImportCSV(t *testing.T) {
 	}
 	if poi.Metadata["alternativeName"] != "Alternativt namn" {
 		t.Fatalf("poi metadata=%+v, want alternativeName", poi.Metadata)
+	}
+	// K1 review: alternativeName befordras till förstklassigt fält.
+	if poi.AlternativeName != "Alternativt namn" {
+		t.Fatalf("alternativeName=%q, want Alternativt namn", poi.AlternativeName)
 	}
 	if sum.ParamSources["usableHeight"] != things.ParamSourceThing ||
 		sum.ParamSources["sensorToBottom"] != things.ParamSourceThing {

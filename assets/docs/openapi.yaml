@@ -19,6 +19,14 @@ info:
     Utgående topics (isoleraade v1-kontrakt): things.v1.values (mätvärden med
     sakdeskriptor), things.v1.lifecycle (created/updated/deleted),
     things.v1.relations (partOf set/removed).
+    K1-låst (2026-09-22): deskriptorn bär additivt alternativeName/subType
+    (NameOrID = alternativeName > name > thingId; TypeName = subType >
+    thingType); konsumenttid EventTimestamp = max(values[].observedAt);
+    field-vägar values.<property>.{value,observedAt,quality,unit,source};
+    kvalitet ok/uncertain emitteras, invalid hoppar property, required
+    saknad/invalid hoppar entitet; trace endast headers/OTel.
+    Exempel: docs/CONSUMER-BINDING.md. HTTP-scheman nedan är läsytan (/api/v1),
+    inte eventkontraktet (se pkg/types + docs/CONSUMER-BINDING.md).
 servers:
   - url: /api/v1
 security:
@@ -718,6 +726,12 @@ components:
       properties:
         thingId: { type: string }
         name: { type: string }
+        alternativeName:
+          type: string
+          description: "K1: valfritt alternativnamn. NameOrID = alternativeName > name > thingId."
+        subType:
+          type: string
+          description: "K1: valfri subtyp. TypeName = subType > thingType. Får inte innehålla /."
         category: { type: string }
         location:
           $ref: '#/components/schemas/Location'
@@ -783,6 +797,12 @@ components:
         thingId: { type: string }
         tenant: { type: string }
         name: { type: string }
+        alternativeName:
+          type: string
+          description: "K1: valfritt alternativnamn. NameOrID = alternativeName > name > thingId."
+        subType:
+          type: string
+          description: "K1: valfri subtyp. TypeName = subType > thingType."
         category: { type: string }
         location:
           $ref: '#/components/schemas/Location'

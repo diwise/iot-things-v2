@@ -236,8 +236,7 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 		}
 	}
 	// Livscykel- och relationshändelser köas beständigt (P10/P11):
-	// konsumenter utan API-åtkomst (t.ex. FIWARE-mappning mot
-	// Smart Data Models) hålls synkade inklusive borttag.
+	// konsumenter utan API-åtkomst hålls synkade inklusive borttag.
 	now := time.Now().UTC()
 	kind := pkgtypes.ThingCreated
 	if exists {
@@ -262,13 +261,25 @@ func sanitizeEventID(s string) string {
 
 // describeThing bygger sakdeskriptorn för events från effektiv config.
 func describeThing(cfg *catalog.EffectiveConfig) *pkgtypes.ThingDescriptorV1 {
+	// K1: explicit AlternativeName/SubType vinner; metadata är fallback
+	// för saker materialiserade före fälten infördes.
+	alt := cfg.AlternativeName
+	if alt == "" && cfg.Metadata != nil {
+		alt = cfg.Metadata["alternativeName"]
+	}
+	sub := cfg.SubType
+	if sub == "" && cfg.Metadata != nil {
+		sub = cfg.Metadata["subType"]
+	}
 	desc := &pkgtypes.ThingDescriptorV1{
-		ThingID:        cfg.ThingID,
-		Name:           cfg.Name,
-		Category:       cfg.Category,
-		Metadata:       cfg.Metadata,
-		VariantID:      cfg.VariantID,
-		VariantVersion: cfg.VariantVersion,
+		ThingID:         cfg.ThingID,
+		Name:            cfg.Name,
+		AlternativeName: alt,
+		SubType:         sub,
+		Category:        cfg.Category,
+		Metadata:        cfg.Metadata,
+		VariantID:       cfg.VariantID,
+		VariantVersion:  cfg.VariantVersion,
 	}
 	if cfg.Location != nil {
 		desc.Location = &pkgtypes.GeoLocationV1{
