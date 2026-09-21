@@ -242,6 +242,10 @@ paths:
     delete:
       tags: [Things]
       summary: Ta bort sak (blockeras med aktiva barn, ingen kaskad)
+      description: >-
+        Värdehistorik bevaras (B6); blob, aktuella värden, väntande outbox
+        samt dedup/sedda ID:n försvinner; utgående relationer tas bort.
+        Explicit GDPR-radering av historik: DELETE /things/{id}/history.
       responses:
         '204': { description: Sak borttagen }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -450,6 +454,19 @@ paths:
                   $ref: '#/components/schemas/HistoryWrite'
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Things]
+      summary: Radera sakens värdehistorik (K6 GDPR-radering)
+      description: >-
+        Tar bort värdehistorik, väntande outbox samt dedup/sedda ID:n för
+        saken. Fungerar för levande och borttagna saker; idempotent 204
+        utan blob-uppslagning (röjer aldrig existens).
+        Livscykel-/relationshändelser, sakblobb och katalog påverkas inte:
+        fullständig radering = DELETE sak + DELETE historik.
+      parameters:
+        - $ref: '#/components/parameters/ThingId'
+      responses:
+        '204': { description: Historik raderad (eller saknas) }
   /things/{id}/overview:
     get:
       tags: [Things]

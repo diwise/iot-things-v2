@@ -162,6 +162,32 @@ func (f *fakeStore) DeleteThingState(tenant, thingID string) {
 	defer f.mu.Unlock()
 	delete(f.things, fkey(tenant, thingID))
 	// Spegla adaptern: rensa föräldralös outbox + dedup, bevara historik.
+	f.forgetTransientLocked(tenant, thingID)
+}
+
+// PurgeThingHistory speglar lagringens K6-radering: historikrader,
+// väntande outbox samt dedup/sedda ID:n för saken tas bort.
+func (f *fakeStore) PurgeThingHistory(tenant, thingID string) int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	kept := f.hist[:0]
+	var n int64
+	for _, h := range f.hist {
+		if h.tenant == tenant && h.thingID == thingID {
+			n++
+			continue
+		}
+		kept = append(kept, h)
+	}
+	for i := len(kept); i < len(f.hist); i++ {
+		f.hist[i] = storedHistory{}
+	}
+	f.hist = kept
+	f.forgetTransientLocked(tenant, thingID)
+	return n
+}
+
+func (f *fakeStore) forgetTransientLocked(tenant, thingID string) {
 	key := fkey(tenant, thingID)
 	delete(f.pending, key)
 	suffix := "\x00" + thingID

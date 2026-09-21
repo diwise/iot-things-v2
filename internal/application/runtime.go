@@ -71,6 +71,10 @@ type RuntimeStore interface {
 	// sum/delta vid återleverans) eller dedup utan state (tappad omgång).
 	CommitBatch(tenant, thingID, messageID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool
 	DeleteThingState(tenant, thingID string)
+	// PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
+	// dedup/sedda ID:n (K6 GDPR-radering). Fungerar för levande och
+	// borttagna saker; idempotent. Returnerar antal raderade historikrader.
+	PurgeThingHistory(tenant, thingID string) int64
 	ListThingIDs(tenant string) []string
 	ListTenants() []string
 	AppendHistory(tenant, thingID string, h HistoryWrite) bool
@@ -212,6 +216,14 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 	if st.Current == nil {
 		st.Current = make(map[string]CurrentValue)
 	}
+	// K6: borttagna mätpunkter lämnar inga spöken i blobben: aktuella värden
+	// för egenskaper utanför nya configen samt processortillstånd för
+	// borttagna receptutgångar rensas vid omregistrering (historik bevaras).
+	// Återinförd egenskap börjar fräscht i stället för att återuppliva
+	// gammalt tillstånd.
+	if exists {
+		pruneRemovedState(cfg, &st)
+	}
 	if !exists {
 		if !rt.store.InsertThing(tenant, obj.ThingID, st) {
 			return nil, fmt.Errorf("%w: thing %q created concurrently",
@@ -252,6 +264,28 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 		}
 	}
 	return cfg, nil
+}
+
+// pruneRemovedState rensar aktuella värden och processortillstånd vars
+// egenskap/utgång inte längre finns i den kompilerade konfigurationen
+// (K6 livscykel för borttagna mätpunkter). Historik påverkas inte.
+func pruneRemovedState(cfg *catalog.EffectiveConfig, st *StoredThingState) {
+	for id := range st.Current {
+		if _, ok := cfg.Properties[id]; !ok {
+			delete(st.Current, id)
+		}
+	}
+	outputs := make(map[string]struct{}, len(cfg.Recipes))
+	for _, r := range cfg.Recipes {
+		for _, o := range r.Outputs {
+			outputs[o] = struct{}{}
+		}
+	}
+	for key := range st.ProcessorStates {
+		if _, ok := outputs[key]; !ok {
+			delete(st.ProcessorStates, key)
+		}
+	}
 }
 
 // sanitizeEventID gör ID-segment broker-säkra (samma regel som StableEventID).
@@ -535,6 +569,12 @@ func (rt *Runtime) DeleteThing(tenant, thingID string) error {
 	if children := rt.store.Children(tenant, thingID); len(children) > 0 {
 		return fmt.Errorf("%w: thing %q has %d active children", things.ErrConflict, thingID, len(children))
 	}
+	// K6 livscykel vid borttagning: blob + aktuella värden försvinner,
+	// värdehistorik bevaras (B6), väntande outbox samt dedup/sedda ID:n
+	// glöms, utgående relationer tas bort. Inkommande icke-partOf-referenser
+	// från andra saker behålls som historiska referenser (läsningar
+	// tolererar saknade mål); barn blockerar i stället för kaskad.
+	// Explicit GDPR-radering av historik: PurgeThingHistory.
 	parent, hasParent := rt.store.ParentOf(tenant, thingID)
 	cfg, err := decodeConfig(st.ConfigJSON)
 	if err != nil {

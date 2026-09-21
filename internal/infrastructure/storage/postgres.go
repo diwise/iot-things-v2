@@ -14,6 +14,7 @@ import (
 	"github.com/diwise/iot-things-v2/internal/application/catalog"
 	"github.com/diwise/iot-things-v2/internal/application/things"
 	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -156,8 +157,21 @@ func (s *PgStore) DeleteThingState(tenant, thingID string) {
 	// sedda ID:n glöms (samma semantik som minnets Forget: nyskapad sak med
 	// samma ID ska kunna behandla samma messageID på nytt); dedup för
 	// saken glöms av samma skäl.
-	if _, err := tx.Exec(ctx, `DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2`, tenant, thingID); err != nil {
+	if err := s.deleteThingTransient(ctx, tx, tenant, thingID); err != nil {
 		return
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM things_v2 WHERE tenant=$1 AND id=$2`, tenant, thingID); err != nil {
+		return
+	}
+	_ = tx.Commit(ctx)
+}
+
+// deleteThingTransient rensar väntande outbox samt sedda ID:n och dedup för
+// saken. Delad av DeleteThingState (historik bevaras, B6) och
+// PurgeThingHistory (historik raderas, K6 GDPR).
+func (s *PgStore) deleteThingTransient(ctx context.Context, tx pgx.Tx, tenant, thingID string) error {
+	if _, err := tx.Exec(ctx, `DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2`, tenant, thingID); err != nil {
+		return err
 	}
 	// Stabila outbox-ID:n har formen v1/<tenant>/<thing>/<msg>/<prop> med
 	// "/" -> "~" (se StableEventID): glöm levererade + väntande ID:n för saken.
@@ -177,15 +191,37 @@ func (s *PgStore) DeleteThingState(tenant, thingID string) {
 	}
 	prefix := "v1/" + sanitize(tenant) + "/" + sanitize(thingID) + "/"
 	if _, err := tx.Exec(ctx, `DELETE FROM outbox_seen_v2 WHERE starts_with(id, $1)`, prefix); err != nil {
-		return
+		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM dedup_v2 WHERE tenant=$1 AND thing_id=$2`, tenant, thingID); err != nil {
-		return
+		return err
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM things_v2 WHERE tenant=$1 AND id=$2`, tenant, thingID); err != nil {
-		return
+	return nil
+}
+
+// PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
+// sedda ID:n och dedup (K6 GDPR-radering). Fungerar för levande och
+// borttagna saker; idempotent. Returnerar antal raderade historikrader.
+// Livscykel-/relationshändelser, sakblobb och katalog påverkas inte.
+func (s *PgStore) PurgeThingHistory(tenant, thingID string) int64 {
+	ctx, cancel := s.ctx()
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0
 	}
-	_ = tx.Commit(ctx)
+	defer tx.Rollback(ctx)
+	if err := s.deleteThingTransient(ctx, tx, tenant, thingID); err != nil {
+		return 0
+	}
+	tag, err := tx.Exec(ctx, `DELETE FROM history_v2 WHERE tenant=$1 AND thing_id=$2`, tenant, thingID)
+	if err != nil {
+		return 0
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0
+	}
+	return tag.RowsAffected()
 }
 
 func (s *PgStore) ListThingIDs(tenant string) []string {

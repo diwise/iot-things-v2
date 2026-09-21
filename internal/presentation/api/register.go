@@ -62,6 +62,7 @@ type Manager interface {
 	PreviewUpgrade(ctx context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string) (catalog.Diff, []string, error)
 	UpgradeObject(ctx context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string, force bool, revision int64) (catalog.Diff, []string, error)
 	DeleteObject(ctx context.Context, tenant, thingID string) error
+	PurgeThingHistory(ctx context.Context, tenant, thingID string) int64
 	MoveObject(ctx context.Context, tenant, childID, newParentID string, revision int64) error
 	UnlinkObject(ctx context.Context, tenant, childID string, revision int64) error
 	History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) ([]application.HistoryWrite, error)
@@ -150,6 +151,7 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, poli
 			r.Use(authz.RequireAccess(DeleteThings))
 			r.Delete("{id}", h.deleteThing)
 			r.Delete("{id}/parent", h.unlinkThing)
+			r.Delete("{id}/history", h.purgeHistory)
 		})
 	})
 
@@ -567,6 +569,20 @@ func (h *handler) deleteThing(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, err)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// purgeHistory raderar sakens värdehistorik (K6 GDPR-radering).
+// Idempotent 204 utan blob-uppslagning: fungerar för levande och
+// borttagna saker och röjer aldrig existens via statuskod.
+// Livscykel-/relationshändelser och sakblobb påverkas inte.
+func (h *handler) purgeHistory(w http.ResponseWriter, r *http.Request) {
+	t, err := tenant(r, DeleteThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	_ = h.mgr.PurgeThingHistory(r.Context(), t, r.PathValue("id"))
 	w.WriteHeader(http.StatusNoContent)
 }
 

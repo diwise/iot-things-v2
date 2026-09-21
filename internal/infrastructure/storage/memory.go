@@ -566,6 +566,33 @@ func (o *MemOutbox) PeekFor(tenant, thingID string) []OutboxEvent {
 	return out
 }
 
+// PurgeThing tar bort alla historikrader för tenant+thing samt deras
+// sedda dedup-nycklar (K6 GDPR-radering). Returnerar antal borttagna rader.
+func (s *MemHistoryStore) PurgeThing(tenant, thingID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	prefix := tenant + "|" + thingID + "|"
+	kept := s.recs[:0]
+	removed := 0
+	for _, r := range s.recs {
+		if r.Tenant == tenant && r.ThingID == thingID {
+			removed++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	for i := len(kept); i < len(s.recs); i++ {
+		s.recs[i] = HistoryRecord{}
+	}
+	s.recs = kept
+	for key := range s.seen {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			delete(s.seen, key)
+		}
+	}
+	return removed
+}
+
 // ClearIDs tar bort väntande händelser med givna ID:n för tenant+thing.
 // Sedda ID:n behålls så att återleverans fortsatt dedupliceras. Används
 // efter lyckad publicering så att händelser som tillkommit under pågående

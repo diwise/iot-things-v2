@@ -1175,3 +1175,30 @@ func TestK2PublishRejectsAngle(t *testing.T) {
 		t.Fatalf("error should name the supported geometry, got %q", body)
 	}
 }
+
+// K6: DELETE history raderar värdehistorik idempotent (204) för levande,
+// okända och borttagna saker utan att röja existens; sakblobben består.
+func TestK6PurgeHistoryEndpoint(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+
+	if rr := doGET(h.purgeHistory, ctx, "unknown", ""); rr.Code != http.StatusNoContent {
+		t.Fatalf("purge unknown=%d, want 204", rr.Code)
+	}
+	if rr := doJSON(h.createThing, ctx, "", v0binObject(), ""); rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := doGET(h.purgeHistory, ctx, "bin-42", ""); rr.Code != http.StatusNoContent {
+		t.Fatalf("purge live=%d, want 204", rr.Code)
+	}
+	if rr := doGET(h.getThing, ctx, "bin-42", ""); rr.Code != http.StatusOK {
+		t.Fatalf("thing must survive history purge, get=%d", rr.Code)
+	}
+	if rr := doGET(h.deleteThing, ctx, "bin-42", ""); rr.Code != http.StatusNoContent {
+		t.Fatalf("delete=%d, want 204", rr.Code)
+	}
+	if rr := doGET(h.purgeHistory, ctx, "bin-42", ""); rr.Code != http.StatusNoContent {
+		t.Fatalf("purge after delete=%d, want 204", rr.Code)
+	}
+}

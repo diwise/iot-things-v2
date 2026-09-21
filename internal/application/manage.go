@@ -379,6 +379,16 @@ func (m *Manager) DeleteObject(ctx context.Context, tenant, thingID string) erro
 	return m.drain(ctx, tenant, thingID)
 }
 
+// PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
+// dedup/sedda ID:n (K6 GDPR-radering). Fungerar för levande och borttagna
+// saker (ingen blob-uppslagning); idempotent — okänd sak ger 0 utan fel.
+// Livscykel-/relationshändelser, sakblobb och katalog påverkas inte:
+// fullständig radering = DELETE sak + DELETE historik. Returnerar antal
+// raderade historikrader.
+func (m *Manager) PurgeThingHistory(_ context.Context, tenant, thingID string) int64 {
+	return m.store.PurgeThingHistory(tenant, thingID)
+}
+
 // MoveObject flyttar ett barns partOf-förälder atomärt med optimistisk
 // låsning (B19): revision måste matcha lagrad revision, annars 409.
 // Flytten går via omkompilering+RegisterThing (samma väg som Update) så att

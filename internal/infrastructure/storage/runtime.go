@@ -100,6 +100,16 @@ func (a *RuntimeAdapter) DeleteThingState(tenant, thingID string) {
 	a.S.Dedup.ForgetThing(tenant, thingID)
 }
 
+// PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
+// dedup/sedda ID:n (K6 GDPR-radering). Fungerar för levande och borttagna
+// saker; idempotent. Returnerar antal raderade historikrader.
+func (a *RuntimeAdapter) PurgeThingHistory(tenant, thingID string) int64 {
+	n := int64(a.S.History.PurgeThing(tenant, thingID))
+	a.S.Outbox.Forget(tenant, thingID)
+	a.S.Dedup.ForgetThing(tenant, thingID)
+	return n
+}
+
 func (a *RuntimeAdapter) ListThingIDs(tenant string) []string {
 	recs := a.S.Things.ListByTenant(tenant)
 	out := make([]string, 0, len(recs))
