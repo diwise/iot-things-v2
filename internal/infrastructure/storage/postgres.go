@@ -211,11 +211,15 @@ func (s *PgStore) deleteThingTransient(ctx context.Context, tx pgx.Tx, tenant, t
 	return nil
 }
 
-// PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
-// sedda ID:n och dedup (K6 GDPR-radering). Fungerar för levande och
-// borttagna saker; idempotent. Returnerar antal raderade historikrader,
-// fel åtskilt från 0 (TV-01).
-// Livscykel-/relationshändelser, sakblobb och katalog påverkas inte.
+// PurgeThingHistory raderar sakens värdehistorik och väntande
+// värdesevent (K6 GDPR-radering). Livscykel-/relationshändelser,
+// dedup-markörer och sedda ID:n lämnas orörda: levande saker behåller
+// sitt leveransskydd så att återleverans inte omberäknas (TV-02).
+// Fungerar för levande och borttagna saker; idempotent. Returnerar antal
+// raderade historikrader, fel åtskilt från 0 (TV-01).
+// Sakblobb och katalog påverkas inte: fullständig radering = DELETE sak
+// + DELETE historik. Punkt-i-tid: samtidiga batchar kan tillföra nyare
+// rader efter raderingen.
 func (s *PgStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
 	ctx, cancel := s.ctx()
 	defer cancel()
@@ -224,11 +228,15 @@ func (s *PgStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	if err := s.deleteThingTransient(ctx, tx, tenant, thingID); err != nil {
-		return 0, err
-	}
 	tag, err := tx.Exec(ctx, `DELETE FROM history_v2 WHERE tenant=$1 AND thing_id=$2`, tenant, thingID)
 	if err != nil {
+		return 0, err
+	}
+	// Endast värderader (inkl. legacy-rader utan topic, som
+	// värdesdräneringen också konsumerar); livscykel/relationer stannar
+	// så att konsumenter inte tappar registerhändelser.
+	if _, err := tx.Exec(ctx, `DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 AND (topic=$3 OR topic='')`,
+		tenant, thingID, pkgtypes.TopicThingValues); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {

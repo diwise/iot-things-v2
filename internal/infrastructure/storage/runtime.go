@@ -102,13 +102,14 @@ func (a *RuntimeAdapter) DeleteThingState(tenant, thingID string) error {
 	return nil
 }
 
-// PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
-// dedup/sedda ID:n (K6 GDPR-radering). Fungerar för levande och borttagna
-// saker; idempotent. Returnerar antal raderade historikrader.
+// PurgeThingHistory raderar sakens värdehistorik och väntande värdesevent
+// (K6 GDPR-radering). Livscykel-/relationshändelser, dedup-markörer och
+// sedda ID:n lämnas orörda: levande saker behåller sitt leveransskydd så
+// att återleverans inte omberäknas (TV-02). Fungerar för levande och
+// borttagna saker; idempotent. Returnerar antal raderade historikrader.
 func (a *RuntimeAdapter) PurgeThingHistory(tenant, thingID string) (int64, error) {
 	n := int64(a.S.History.PurgeThing(tenant, thingID))
-	a.S.Outbox.Forget(tenant, thingID)
-	a.S.Dedup.ForgetThing(tenant, thingID)
+	a.S.Outbox.ForgetValues(tenant, thingID)
 	return n, nil
 }
 

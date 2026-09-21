@@ -153,3 +153,42 @@ func TestManagePurgeFailureSurfaces(t *testing.T) {
 		t.Fatal("PurgeHistory must propagate store error")
 	}
 }
+
+// TV-02: återleverans efter purge tar dubblettvägen — ingen omberäkning,
+// inga nya historikrader (dedup + sedda ID:n bevaras för levande saker).
+func TestRuntimeDuplicateAfterPurgeWithoutRecompute(t *testing.T) {
+	fs := newFakeStore()
+	rt := NewRuntime(fs)
+	cat := rtBinCatalog(t)
+	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	first, err := rt.HandleBatch(context.Background(), "t", "m1", []things.Observation{rtDistObs("milesight:214", 0.30, base)}, base)
+	if err != nil {
+		t.Fatalf("batch: %v", err)
+	}
+	if len(first) != 1 || first[0].Duplicate || len(first[0].Outcome.Events) != 3 {
+		t.Fatalf("first=%+v", first)
+	}
+	mgr := NewManager(catalog.New(), rt, fs)
+	if n, err := mgr.PurgeThingHistory(context.Background(), "t", "bin-42"); err != nil || n != 3 {
+		t.Fatalf("purged=%d err=%v, want 3", n, err)
+	}
+	if n := fs.historyCount("t", "bin-42"); n != 0 {
+		t.Fatalf("history=%d after purge, want 0", n)
+	}
+	second, err := rt.HandleBatch(context.Background(), "t", "m1", []things.Observation{rtDistObs("milesight:214", 0.30, base)}, base)
+	if err != nil {
+		t.Fatalf("duplicate batch: %v", err)
+	}
+	if len(second) != 1 || !second[0].Duplicate {
+		t.Fatalf("duplicate after purge must be flagged: %+v", second)
+	}
+	if len(second[0].Outcome.Events) != 3 {
+		t.Fatalf("duplicate must return stored events for republication")
+	}
+	if n := fs.historyCount("t", "bin-42"); n != 0 {
+		t.Fatalf("history=%d after duplicate, want still 0 (no recompute)", n)
+	}
+}

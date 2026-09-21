@@ -484,11 +484,12 @@ paths:
       tags: [Things]
       summary: Radera sakens värdehistorik (K6 GDPR-radering)
       description: >-
-        Tar bort värdehistorik, väntande outbox samt dedup/sedda ID:n för
+        Tar bort värdehistorik och väntande värdesevent för
         saken. Fungerar för levande och borttagna saker; idempotent 204
         utan blob-uppslagning (röjer aldrig existens).
-        Livscykel-/relationshändelser, sakblobb och katalog påverkas inte:
-        fullständig radering = DELETE sak + DELETE historik.
+        Livscykel-/relationshändelser, dedup-markörer, sedda ID:n, sakblobb
+        och katalog påverkas inte: fullständig radering = DELETE sak +
+        DELETE historik.
       parameters:
         - $ref: '#/components/parameters/ThingId'
       responses:

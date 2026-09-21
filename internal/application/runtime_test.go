@@ -171,8 +171,9 @@ func (f *fakeStore) DeleteThingState(tenant, thingID string) error {
 	return nil
 }
 
-// PurgeThingHistory speglar lagringens K6-radering: historikrader,
-// väntande outbox samt dedup/sedda ID:n för saken tas bort.
+// PurgeThingHistory speglar lagringens K6-radering: historikrader och
+// väntande värdesevent tas bort; livscykel-/relationsrader, dedup och
+// sedda ID:n behålls (leveransskydd för levande saker, TV-02).
 func (f *fakeStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -192,7 +193,8 @@ func (f *fakeStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
 		f.hist[i] = storedHistory{}
 	}
 	f.hist = kept
-	f.forgetTransientLocked(tenant, thingID)
+	key := fkey(tenant, thingID)
+	delete(f.pending, key)
 	return n, nil
 }
 

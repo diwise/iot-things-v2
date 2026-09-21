@@ -379,12 +379,13 @@ func (m *Manager) DeleteObject(ctx context.Context, tenant, thingID string) erro
 	return m.drain(ctx, tenant, thingID)
 }
 
-// PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
-// dedup/sedda ID:n (K6 GDPR-radering). Fungerar för levande och borttagna
-// saker (ingen blob-uppslagning); idempotent — okänd sak ger 0 utan fel.
-// Livscykel-/relationshändelser, sakblobb och katalog påverkas inte:
-// fullständig radering = DELETE sak + DELETE historik. Returnerar antal
-// raderade historikrader; fel åtskilt från 0.
+// PurgeThingHistory raderar sakens värdehistorik och väntande värdesevent
+// (K6 GDPR-radering). Livscykel-/relationshändelser, dedup-markörer och
+// sedda ID:n lämnas orörda så att återleverans inte omberäknas (TV-02).
+// Fungerar för levande och borttagna saker (ingen blob-uppslagning);
+// idempotent — okänd sak ger 0 utan fel. Sakblobb och katalog påverkas
+// inte: fullständig radering = DELETE sak + DELETE historik. Returnerar
+// antal raderade historikrader; fel åtskilt från 0.
 func (m *Manager) PurgeThingHistory(_ context.Context, tenant, thingID string) (int64, error) {
 	return m.store.PurgeThingHistory(tenant, thingID)
 }

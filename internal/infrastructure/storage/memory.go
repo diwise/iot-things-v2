@@ -727,6 +727,33 @@ func (o *MemOutbox) Forget(tenant, thingID string) {
 	}
 }
 
+// ForgetValues tar bort väntande värdesevent för tenant+thing (inkl.
+// legacy-rader utan topic, som värdesdräneringen också konsumerar) men
+// behåller livscykel-/relationsrader samt sedda ID:n: levande saker
+// behåller sitt leveransskydd vid historik-purge (TV-02).
+// Returnerar antal borttagna rader.
+func (o *MemOutbox) ForgetValues(tenant, thingID string) int {
+	if tenant == "" || thingID == "" {
+		return 0
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	origLen := len(o.events)
+	kept := o.events[:0]
+	for _, ev := range o.events {
+		if ev.Tenant == tenant && ev.ThingID == thingID &&
+			(ev.Topic == "" || ev.Topic == pkgtypes.TopicThingValues) {
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	for i := len(kept); i < origLen; i++ {
+		o.events[i] = OutboxEvent{}
+	}
+	o.events = kept
+	return origLen - len(kept)
+}
+
 // MemDedup är ett enkelt idempotens-filter per (tenant, messageID, thingID).
 // Tenant ingår i nyckeln så att samma messageID/thingID i olika tenants
 // inte kolliderar (tenant-isolering).

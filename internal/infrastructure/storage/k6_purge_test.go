@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application"
+	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 )
 
 // K6: GDPR-radering i minnet tar historikrader + sedda nycklar för saken,
@@ -65,5 +66,94 @@ func TestPostgresPurgeThingHistory(t *testing.T) {
 	}
 	if n, err := s.PurgeThingHistory("t", "unknown"); err != nil || n != 0 {
 		t.Fatalf("unknown thing must purge 0, got %d err=%v", n, err)
+	}
+}
+
+// TV-02: purge tar historik + väntande värdesevent men bevarar
+// livscykel-/relationsrader, dedup och sedda ID:n: återleverans efter
+// purge omberäknas inte. Kräver testdatabas (se pgTestStore).
+func TestPostgresPurgeKeepsDeliveryProtection(t *testing.T) {
+	s := pgTestStore(t)
+	a := application.RuntimeStore(s)
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	v := 1.0
+	a.AppendHistory("t", "bin-42", application.HistoryWrite{
+		PropertyID: "distance", Value: &v, Quality: "ok",
+		ObservedAt: at, ReceivedAt: at, Source: "s", MessageID: "m1",
+	})
+	ev := application.FlowEvent{
+		PropertyID: "distance", Value: 0.3, Quality: "ok",
+		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
+	}
+	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
+	raw := application.RawOutboxEvent{
+		ID: "v1/t/bin-42/lifecycle/created/1", Topic: pkgtypes.TopicLifecycleChanges,
+		Payload: []byte(`{"kind":"created"}`), ObservedAt: at, Revision: 1,
+	}
+	a.StoreRawEvents("t", "bin-42", []application.RawOutboxEvent{raw})
+	a.DedupMark("t", "m1", "bin-42")
+
+	if n, err := s.PurgeThingHistory("t", "bin-42"); err != nil || n != 1 {
+		t.Fatalf("purged=%d err=%v, want 1", n, err)
+	}
+	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
+		t.Fatalf("history must be gone: %+v", got)
+	}
+	if got := a.PendingEvents("t", "bin-42"); len(got) != 0 {
+		t.Fatalf("pending values must be gone: %+v", got)
+	}
+	if got := a.PendingRawEvents("t", "bin-42"); len(got) != 1 {
+		t.Fatalf("lifecycle rows must survive purge: %+v", got)
+	}
+	if !a.DedupCheck("t", "m1", "bin-42") {
+		t.Fatal("dedup mark must survive purge")
+	}
+	// Återleverans av samma meddelande dedupliceras fortfarande.
+	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
+	if got := a.PendingEvents("t", "bin-42"); len(got) != 0 {
+		t.Fatalf("redelivery must stay deduped, pending=%+v", got)
+	}
+}
+
+// TV-02 i minnet: samma skydd som pg — värderader bort, livscykel,
+// dedup och sedda ID:n kvar, återleverans deduplicerad.
+func TestAdapterPurgeKeepsDeliveryProtection(t *testing.T) {
+	a := newAdapter(t)
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	v := 1.0
+	a.AppendHistory("t", "bin-42", application.HistoryWrite{
+		PropertyID: "distance", Value: &v, Quality: "ok",
+		ObservedAt: at, ReceivedAt: at, Source: "s", MessageID: "m1",
+	})
+	ev := application.FlowEvent{
+		PropertyID: "distance", Value: 0.3, Quality: "ok",
+		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
+	}
+	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
+	raw := application.RawOutboxEvent{
+		ID: "v1/t/bin-42/lifecycle/created/1", Topic: pkgtypes.TopicLifecycleChanges,
+		Payload: []byte(`{"kind":"created"}`), ObservedAt: at, Revision: 1,
+	}
+	a.StoreRawEvents("t", "bin-42", []application.RawOutboxEvent{raw})
+	a.DedupMark("t", "m1", "bin-42")
+
+	if n, err := a.PurgeThingHistory("t", "bin-42"); err != nil || n != 1 {
+		t.Fatalf("purged=%d err=%v, want 1", n, err)
+	}
+	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
+		t.Fatalf("history must be gone: %+v", got)
+	}
+	if got := a.PendingEvents("t", "bin-42"); len(got) != 0 {
+		t.Fatalf("pending values must be gone: %+v", got)
+	}
+	if got := a.PendingRawEvents("t", "bin-42"); len(got) != 1 {
+		t.Fatalf("lifecycle rows must survive purge: %+v", got)
+	}
+	if !a.DedupCheck("t", "m1", "bin-42") {
+		t.Fatal("dedup mark must survive purge")
+	}
+	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
+	if got := a.PendingEvents("t", "bin-42"); len(got) != 0 {
+		t.Fatalf("redelivery must stay deduped, pending=%+v", got)
 	}
 }

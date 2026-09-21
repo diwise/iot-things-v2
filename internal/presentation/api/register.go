@@ -574,10 +574,12 @@ func (h *handler) deleteThing(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// purgeHistory raderar sakens värdehistorik (K6 GDPR-radering).
+// purgeHistory raderar sakens värdehistorik och väntande värdesevent
+// (K6 GDPR-radering).
 // Idempotent 204 utan blob-uppslagning: fungerar för levande och
 // borttagna saker och röjer aldrig existens via statuskod.
-// Livscykel-/relationshändelser och sakblobb påverkas inte.
+// Livscykel-/relationshändelser, dedup och sedda ID:n påverkas inte,
+// liksom sakblobben.
 // Lagringsfel ger 500 (TV-01): tyst 204 vore falsk raderingsbekräftelse.
 func (h *handler) purgeHistory(w http.ResponseWriter, r *http.Request) {
 	t, err := tenant(r, DeleteThings)
