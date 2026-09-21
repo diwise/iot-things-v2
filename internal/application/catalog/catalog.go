@@ -398,6 +398,16 @@ func (c *Catalog) PutTemplate(spec TemplateSpec) error {
 			return fmt.Errorf("%w: template %s/%s property def %q: %w", things.ErrValidation, t.ID, t.Version, id, err)
 		}
 	}
+	// K5: ändliga tak (se konstanterna) nekas före persistens.
+	if n := len(t.Required) + len(t.Optional); n > maxPropertiesPerThing {
+		return fmt.Errorf("%w: template %s/%s has %d properties, max %d (K5)", things.ErrValidation, t.ID, t.Version, n, maxPropertiesPerThing)
+	}
+	if len(spec.Recipes) > maxRecipesPerTemplate {
+		return fmt.Errorf("%w: template %s/%s has %d recipes, max %d (K5)", things.ErrValidation, t.ID, t.Version, len(spec.Recipes), maxRecipesPerTemplate)
+	}
+	if len(spec.ParamDefaults) > maxParamsPerTemplate {
+		return fmt.Errorf("%w: template %s/%s has %d parameters, max %d (K5)", things.ErrValidation, t.ID, t.Version, len(spec.ParamDefaults), maxParamsPerTemplate)
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -661,6 +671,16 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 			return nil, fmt.Errorf("%w: object %q misses required property %q", things.ErrValidation, obj.ThingID, req)
 		}
 	}
+	// K5: ändliga tak per sak (täckar även saker mot pre-K5-mallar).
+	if len(obj.Properties) > maxPropertiesPerThing {
+		return nil, fmt.Errorf("%w: object %q has %d properties, max %d (K5)", things.ErrValidation, obj.ThingID, len(obj.Properties), maxPropertiesPerThing)
+	}
+	if len(obj.Bindings) > maxBindingsPerThing {
+		return nil, fmt.Errorf("%w: object %q has %d bindings, max %d (K5)", things.ErrValidation, obj.ThingID, len(obj.Bindings), maxBindingsPerThing)
+	}
+	if len(obj.Relations) > maxRelationsPerThing {
+		return nil, fmt.Errorf("%w: object %q has %d relations, max %d (K5)", things.ErrValidation, obj.ThingID, len(obj.Relations), maxRelationsPerThing)
+	}
 	if obj.Location != nil {
 		if err := t.ValidateGeometryKind(obj.Location.Type); err != nil {
 			return nil, fmt.Errorf("%w: object %q: %w", things.ErrValidation, obj.ThingID, err)
@@ -752,6 +772,20 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 		Relations:       relations,
 	}, nil
 }
+
+// K5 storleksgränser: ändliga tak som håller per-runda-arbete och blobbar
+// avgränsade utan att begränsa legitimt bruk (seed max: 8 egenskaper,
+// 3 recept, 2 parametrar). Överskridande nekas vid publicering (nya mallar)
+// och kompilering (saker mot redan publicerade mallar). Exakt
+// uppdateringsfördröjnings-SLO kräver lasttest och fastställs operativt;
+// taken håller värsta fallet avgränsat tills dess.
+const (
+	maxPropertiesPerThing = 64
+	maxRecipesPerTemplate = 32
+	maxParamsPerTemplate  = 64
+	maxBindingsPerThing   = 64
+	maxRelationsPerThing  = 16
+)
 
 // Metadata caps keep free-form annotations bounded without schema
 // bureaucracy: descriptive only, never structural.
