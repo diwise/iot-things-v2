@@ -27,6 +27,7 @@ import (
 	"github.com/diwise/service-chassis/pkg/infrastructure/servicerunner"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -335,16 +336,26 @@ const retentionInterval = 24 * time.Hour
 
 // runRetentionPurge raderar historik äldre än cutoff via managern och
 // loggar utfallet (K4-övervakning: antal + gräns per körning).
-func runRetentionPurge(ctx context.Context, mgr *application.Manager, days int) {
+// Fel ger Error-status i span + fellogg, aldrig ett normalt
+// "0 raderade"-resultat (TV-01).
+func runRetentionPurge(ctx context.Context, mgr *application.Manager, days int) error {
 	ctx, span := retentionTracer.Start(ctx, "retention-purge", trace.WithAttributes(
 		attribute.Int("retention_days", days),
 	))
 	defer span.End()
 	cutoff := time.Now().UTC().AddDate(0, 0, -days)
-	n := mgr.PurgeHistory(ctx, cutoff)
+	n, err := mgr.PurgeHistory(ctx, cutoff)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		logging.GetFromContext(ctx).Error("history retention purge failed",
+			"err", err.Error(), "older_than", cutoff.Format(time.RFC3339), "retention_days", days)
+		return err
+	}
 	span.SetAttributes(attribute.Int64("deleted", n))
 	logging.GetFromContext(ctx).Info("history retention purge",
 		"deleted", n, "older_than", cutoff.Format(time.RFC3339), "retention_days", days)
+	return nil
 }
 
 // startRetentionPurge kör en inledande radering och schemalägger därefter
@@ -355,7 +366,9 @@ func startRetentionPurge(ctx context.Context, mgr *application.Manager, days int
 	}
 	logging.GetFromContext(ctx).Info("history retention enabled", "retention_days", days)
 	go func() {
-		runRetentionPurge(ctx, mgr, days)
+		if err := runRetentionPurge(ctx, mgr, days); err != nil {
+			logging.GetFromContext(ctx).Error("initial retention purge failed", "err", err.Error())
+		}
 		ticker := time.NewTicker(retentionInterval)
 		defer ticker.Stop()
 		for {
@@ -363,7 +376,9 @@ func startRetentionPurge(ctx context.Context, mgr *application.Manager, days int
 			case <-stop:
 				return
 			case <-ticker.C:
-				runRetentionPurge(ctx, mgr, days)
+				if err := runRetentionPurge(ctx, mgr, days); err != nil {
+					logging.GetFromContext(ctx).Error("scheduled retention purge failed", "err", err.Error())
+				}
 			}
 		}
 	}()

@@ -91,30 +91,32 @@ func (a *RuntimeAdapter) CommitBatch(tenant, thingID, messageID string, expected
 	return true
 }
 
-func (a *RuntimeAdapter) DeleteThingState(tenant, thingID string) {
+func (a *RuntimeAdapter) DeleteThingState(tenant, thingID string) error {
 	a.S.Things.Delete(tenant, thingID)
 	// Värdehistorik bevaras (B6/H8), men föräldralös outbox och dedup för
 	// saken rensas så att dränering inte missar (ListTenants utgår från
 	// Things) och nyskapad sak med samma ID inte blockeras av gammal livscykel.
+	// Minnesoperationer felar inte; nil bevarar gränssnittets felkontrakt.
 	a.S.Outbox.Forget(tenant, thingID)
 	a.S.Dedup.ForgetThing(tenant, thingID)
+	return nil
 }
 
 // PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
 // dedup/sedda ID:n (K6 GDPR-radering). Fungerar för levande och borttagna
 // saker; idempotent. Returnerar antal raderade historikrader.
-func (a *RuntimeAdapter) PurgeThingHistory(tenant, thingID string) int64 {
+func (a *RuntimeAdapter) PurgeThingHistory(tenant, thingID string) (int64, error) {
 	n := int64(a.S.History.PurgeThing(tenant, thingID))
 	a.S.Outbox.Forget(tenant, thingID)
 	a.S.Dedup.ForgetThing(tenant, thingID)
-	return n
+	return n, nil
 }
 
 // PurgeHistoryOlderThan raderar historikrader äldre än cutoff i alla tenants
 // (K4 retention). Väntande outbox, dedup/sedda ID:n, blobbar, katalog och
 // livscykel-/relationshändelser påverkas inte. Returnerar antal raderade rader.
-func (a *RuntimeAdapter) PurgeHistoryOlderThan(cutoff time.Time) int64 {
-	return int64(a.S.History.PurgeOlderThan(cutoff))
+func (a *RuntimeAdapter) PurgeHistoryOlderThan(cutoff time.Time) (int64, error) {
+	return int64(a.S.History.PurgeOlderThan(cutoff)), nil
 }
 
 func (a *RuntimeAdapter) ListThingIDs(tenant string) []string {

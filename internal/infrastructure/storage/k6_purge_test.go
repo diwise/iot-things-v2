@@ -54,8 +54,8 @@ func TestPostgresPurgeThingHistory(t *testing.T) {
 	a.AppendHistory("t", "bin-42", mk("b", at.Add(time.Minute)))
 	a.AppendHistory("t", "bin-43", mk("a", at))
 
-	if n := s.PurgeThingHistory("t", "bin-42"); n != 2 {
-		t.Fatalf("purged=%d, want 2", n)
+	if n, err := s.PurgeThingHistory("t", "bin-42"); err != nil || n != 2 {
+		t.Fatalf("purged=%d err=%v, want 2", n, err)
 	}
 	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("bin-42 history must be gone: %+v", got)
@@ -63,7 +63,7 @@ func TestPostgresPurgeThingHistory(t *testing.T) {
 	if got := a.History("t", "bin-43", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("bin-43 history must survive: %+v", got)
 	}
-	if n := s.PurgeThingHistory("t", "unknown"); n != 0 {
-		t.Fatalf("unknown thing must purge 0, got %d", n)
+	if n, err := s.PurgeThingHistory("t", "unknown"); err != nil || n != 0 {
+		t.Fatalf("unknown thing must purge 0, got %d err=%v", n, err)
 	}
 }

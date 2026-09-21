@@ -384,14 +384,14 @@ func (m *Manager) DeleteObject(ctx context.Context, tenant, thingID string) erro
 // saker (ingen blob-uppslagning); idempotent — okänd sak ger 0 utan fel.
 // Livscykel-/relationshändelser, sakblobb och katalog påverkas inte:
 // fullständig radering = DELETE sak + DELETE historik. Returnerar antal
-// raderade historikrader.
-func (m *Manager) PurgeThingHistory(_ context.Context, tenant, thingID string) int64 {
+// raderade historikrader; fel åtskilt från 0.
+func (m *Manager) PurgeThingHistory(_ context.Context, tenant, thingID string) (int64, error) {
 	return m.store.PurgeThingHistory(tenant, thingID)
 }
 
 // PurgeHistory raderar historikrader äldre än cutoff i alla tenants
-// (K4 retention). Returnerar antal raderade rader.
-func (m *Manager) PurgeHistory(_ context.Context, olderThan time.Time) int64 {
+// (K4 retention). Returnerar antal raderade rader; fel åtskilt från 0.
+func (m *Manager) PurgeHistory(_ context.Context, olderThan time.Time) (int64, error) {
 	return m.store.PurgeHistoryOlderThan(olderThan)
 }
 

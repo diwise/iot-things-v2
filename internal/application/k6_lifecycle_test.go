@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -124,8 +125,8 @@ func TestManagePurgeThingHistory(t *testing.T) {
 	fs.AppendHistory("t", "bin-1", mkHist("b", at.Add(time.Minute)))
 	fs.AppendHistory("t", "bin-2", mkHist("a", at))
 
-	if n := mgr.PurgeThingHistory(ctx, "t", "bin-1"); n != 2 {
-		t.Fatalf("purged=%d, want 2", n)
+	if n, err := mgr.PurgeThingHistory(ctx, "t", "bin-1"); err != nil || n != 2 {
+		t.Fatalf("purged=%d err=%v, want 2", n, err)
 	}
 	if got := fs.History("t", "bin-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("bin-1 history must be gone: %+v", got)
@@ -133,7 +134,22 @@ func TestManagePurgeThingHistory(t *testing.T) {
 	if got := fs.History("t", "bin-2", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("bin-2 history must survive: %+v", got)
 	}
-	if n := mgr.PurgeThingHistory(ctx, "t", "unknown"); n != 0 {
-		t.Fatalf("unknown thing must purge 0, got %d", n)
+	if n, err := mgr.PurgeThingHistory(ctx, "t", "unknown"); err != nil || n != 0 {
+		t.Fatalf("unknown thing must purge 0, got %d err=%v", n, err)
+	}
+}
+
+// TV-01: lagringsfel i raderingsvägarna propagerar genom managern i
+// stället för att rapporteras som lyckade 0-raders raderingar.
+func TestManagePurgeFailureSurfaces(t *testing.T) {
+	fs := newFakeStore()
+	fs.failErr = errors.New("database unavailable")
+	mgr := NewManager(catalog.New(), NewRuntime(fs), fs)
+	ctx := context.Background()
+	if _, err := mgr.PurgeThingHistory(ctx, "t", "bin-1"); err == nil {
+		t.Fatal("PurgeThingHistory must propagate store error")
+	}
+	if _, err := mgr.PurgeHistory(ctx, time.Now().UTC()); err == nil {
+		t.Fatal("PurgeHistory must propagate store error")
 	}
 }

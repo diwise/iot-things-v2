@@ -493,6 +493,7 @@ paths:
         - $ref: '#/components/parameters/ThingId'
       responses:
         '204': { description: Historik raderad (eller saknas) }
+        '500': { $ref: '#/components/responses/InternalError' }
   /things/{id}/overview:
     get:
       tags: [Things]
@@ -586,6 +587,12 @@ components:
             $ref: '#/components/schemas/Error'
     Conflict:
       description: Versionskonflikt (stale revision) eller oföränderlighetsbrott
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    InternalError:
+      description: Lagringsfel (aldrig tyst framgång vid radering)
       content:
         application/json:
           schema:

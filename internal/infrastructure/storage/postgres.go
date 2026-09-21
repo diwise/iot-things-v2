@@ -145,12 +145,12 @@ func (s *PgStore) SaveThingCAS(tenant, thingID string, expected int64, st applic
 	return err == nil && tag.RowsAffected() == 1
 }
 
-func (s *PgStore) DeleteThingState(tenant, thingID string) {
+func (s *PgStore) DeleteThingState(tenant, thingID string) error {
 	ctx, cancel := s.ctx()
 	defer cancel()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return
+		return err
 	}
 	defer tx.Rollback(ctx)
 	// Värdehistorik bevaras (B6/H8). Väntande outbox förkastas och deras
@@ -158,12 +158,12 @@ func (s *PgStore) DeleteThingState(tenant, thingID string) {
 	// samma ID ska kunna behandla samma messageID på nytt); dedup för
 	// saken glöms av samma skäl.
 	if err := s.deleteThingTransient(ctx, tx, tenant, thingID); err != nil {
-		return
+		return err
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM things_v2 WHERE tenant=$1 AND id=$2`, tenant, thingID); err != nil {
-		return
+		return err
 	}
-	_ = tx.Commit(ctx)
+	return tx.Commit(ctx)
 }
 
 // seenKey versionerar outbox_seen-nycklar så att tvetydiga legacy-rader
@@ -213,27 +213,28 @@ func (s *PgStore) deleteThingTransient(ctx context.Context, tx pgx.Tx, tenant, t
 
 // PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
 // sedda ID:n och dedup (K6 GDPR-radering). Fungerar för levande och
-// borttagna saker; idempotent. Returnerar antal raderade historikrader.
+// borttagna saker; idempotent. Returnerar antal raderade historikrader,
+// fel åtskilt från 0 (TV-01).
 // Livscykel-/relationshändelser, sakblobb och katalog påverkas inte.
-func (s *PgStore) PurgeThingHistory(tenant, thingID string) int64 {
+func (s *PgStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
 	ctx, cancel := s.ctx()
 	defer cancel()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	defer tx.Rollback(ctx)
 	if err := s.deleteThingTransient(ctx, tx, tenant, thingID); err != nil {
-		return 0
+		return 0, err
 	}
 	tag, err := tx.Exec(ctx, `DELETE FROM history_v2 WHERE tenant=$1 AND thing_id=$2`, tenant, thingID)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return 0
+		return 0, err
 	}
-	return tag.RowsAffected()
+	return tag.RowsAffected(), nil
 }
 
 // PurgeHistoryOlderThan raderar historikrader äldre än cutoff i alla tenants
@@ -241,14 +242,14 @@ func (s *PgStore) PurgeThingHistory(tenant, thingID string) int64 {
 // livscykel-/relationshändelser påverkas inte. På Timescale-hypertabell
 // gäller chunk-exkludering; på vanliga tabeller används indexet från
 // migration 006. Returnerar antal raderade rader.
-func (s *PgStore) PurgeHistoryOlderThan(cutoff time.Time) int64 {
+func (s *PgStore) PurgeHistoryOlderThan(cutoff time.Time) (int64, error) {
 	ctx, cancel := s.ctx()
 	defer cancel()
 	tag, err := s.pool.Exec(ctx, `DELETE FROM history_v2 WHERE observed_at < $1`, cutoff)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return tag.RowsAffected()
+	return tag.RowsAffected(), nil
 }
 
 func (s *PgStore) ListThingIDs(tenant string) []string {

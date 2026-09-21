@@ -982,3 +982,19 @@ func TestPostgresRawOutbox(t *testing.T) {
 		t.Fatal("targets must be empty after clear")
 	}
 }
+
+// TV-01: stängd pool ger fel (inte tyst 0/nil) från alla raderingsvägar,
+// så anropare aldrig får falsk raderingsbekräftelse.
+func TestPostgresDeleteFailureSurfaces(t *testing.T) {
+	s := pgTestStore(t)
+	s.pool.Close()
+	if err := s.DeleteThingState("t", "x"); err == nil {
+		t.Fatal("closed pool DeleteThingState must fail")
+	}
+	if n, err := s.PurgeThingHistory("t", "x"); err == nil || n != 0 {
+		t.Fatalf("closed pool PurgeThingHistory=%d err=%v, want error", n, err)
+	}
+	if n, err := s.PurgeHistoryOlderThan(time.Now().UTC()); err == nil || n != 0 {
+		t.Fatalf("closed pool PurgeHistoryOlderThan=%d err=%v, want error", n, err)
+	}
+}

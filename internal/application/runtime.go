@@ -80,14 +80,16 @@ type RuntimeStore interface {
 	// en krasch lämnar aldrig state utan dedup (dubbeltillämpning av
 	// sum/delta vid återleverans) eller dedup utan state (tappad omgång).
 	CommitBatch(tenant, thingID, messageID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool
-	DeleteThingState(tenant, thingID string)
+	DeleteThingState(tenant, thingID string) error
 	// PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
 	// dedup/sedda ID:n (K6 GDPR-radering). Fungerar för levande och
 	// borttagna saker; idempotent. Returnerar antal raderade historikrader.
-	PurgeThingHistory(tenant, thingID string) int64
+	// Fel propageras åtskilt från "0 rader" (TV-01).
+	PurgeThingHistory(tenant, thingID string) (int64, error)
 	// PurgeHistoryOlderThan raderar historikrader äldre än cutoff i alla
-	// tenants (K4 retention). Returnerar antal raderade rader.
-	PurgeHistoryOlderThan(cutoff time.Time) int64
+	// tenants (K4 retention). Returnerar antal raderade rader; fel
+	// propageras åtskilt från "0 rader" (TV-01).
+	PurgeHistoryOlderThan(cutoff time.Time) (int64, error)
 	ListThingIDs(tenant string) []string
 	ListTenants() []string
 	AppendHistory(tenant, thingID string, h HistoryWrite) bool
@@ -635,7 +637,9 @@ func (rt *Runtime) DeleteThing(tenant, thingID string) error {
 	}
 	now := time.Now().UTC()
 	rt.store.DetachChild(tenant, thingID)
-	rt.store.DeleteThingState(tenant, thingID)
+	if err := rt.store.DeleteThingState(tenant, thingID); err != nil {
+		return err
+	}
 	rt.emitLifecycleLocked(tenant, cfg, pkgtypes.ThingDeleted, st.Revision, now)
 	if hasParent {
 		rt.emitRelationLocked(tenant, thingID, parent, true, st.Revision, now)

@@ -33,6 +33,8 @@ type fakeStore struct {
 	dedup    map[string]struct{}
 	parents  map[string]string          // tenant\x00barn -> förälder
 	children map[string]map[string]bool // tenant\x00förälder -> barn
+	// failErr injicerar lagringsfel i raderingsvägarna (TV-01-tester).
+	failErr error
 }
 
 type storedHistory struct {
@@ -157,19 +159,26 @@ func (f *fakeStore) CommitBatch(tenant, thingID, messageID string, expected int6
 	return true
 }
 
-func (f *fakeStore) DeleteThingState(tenant, thingID string) {
+func (f *fakeStore) DeleteThingState(tenant, thingID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failErr != nil {
+		return f.failErr
+	}
 	delete(f.things, fkey(tenant, thingID))
 	// Spegla adaptern: rensa föräldralös outbox + dedup, bevara historik.
 	f.forgetTransientLocked(tenant, thingID)
+	return nil
 }
 
 // PurgeThingHistory speglar lagringens K6-radering: historikrader,
 // väntande outbox samt dedup/sedda ID:n för saken tas bort.
-func (f *fakeStore) PurgeThingHistory(tenant, thingID string) int64 {
+func (f *fakeStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failErr != nil {
+		return 0, f.failErr
+	}
 	kept := f.hist[:0]
 	var n int64
 	for _, h := range f.hist {
@@ -184,14 +193,17 @@ func (f *fakeStore) PurgeThingHistory(tenant, thingID string) int64 {
 	}
 	f.hist = kept
 	f.forgetTransientLocked(tenant, thingID)
-	return n
+	return n, nil
 }
 
 // PurgeHistoryOlderThan speglar lagringens K4-retention: historikrader
 // äldre än cutoff tas bort i alla tenants.
-func (f *fakeStore) PurgeHistoryOlderThan(cutoff time.Time) int64 {
+func (f *fakeStore) PurgeHistoryOlderThan(cutoff time.Time) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failErr != nil {
+		return 0, f.failErr
+	}
 	kept := f.hist[:0]
 	var n int64
 	for _, h := range f.hist {
@@ -205,7 +217,7 @@ func (f *fakeStore) PurgeHistoryOlderThan(cutoff time.Time) int64 {
 		f.hist[i] = storedHistory{}
 	}
 	f.hist = kept
-	return n
+	return n, nil
 }
 
 func (f *fakeStore) forgetTransientLocked(tenant, thingID string) {

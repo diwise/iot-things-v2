@@ -25,8 +25,8 @@ func TestManagePurgeHistory(t *testing.T) {
 	fs.AppendHistory("t", "bin-1", mkHist("new", cutoff.Add(time.Hour)))
 	fs.AppendHistory("o", "bin-9", mkHist("old", cutoff.Add(-time.Hour)))
 
-	if n := mgr.PurgeHistory(context.Background(), cutoff); n != 2 {
-		t.Fatalf("purged=%d, want 2", n)
+	if n, err := mgr.PurgeHistory(context.Background(), cutoff); err != nil || n != 2 {
+		t.Fatalf("purged=%d err=%v, want 2", n, err)
 	}
 	if got := fs.History("t", "bin-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
 		t.Fatalf("bin-1 survivors=%d, want 2", len(got))

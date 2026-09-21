@@ -62,7 +62,7 @@ type Manager interface {
 	PreviewUpgrade(ctx context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string) (catalog.Diff, []string, error)
 	UpgradeObject(ctx context.Context, tenant, thingID, newTemplateID, newTemplateVersion, newVariantID, newVariantVersion string, force bool, revision int64) (catalog.Diff, []string, error)
 	DeleteObject(ctx context.Context, tenant, thingID string) error
-	PurgeThingHistory(ctx context.Context, tenant, thingID string) int64
+	PurgeThingHistory(ctx context.Context, tenant, thingID string) (int64, error)
 	MoveObject(ctx context.Context, tenant, childID, newParentID string, revision int64) error
 	UnlinkObject(ctx context.Context, tenant, childID string, revision int64) error
 	History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) ([]application.HistoryWrite, error)
@@ -578,13 +578,17 @@ func (h *handler) deleteThing(w http.ResponseWriter, r *http.Request) {
 // Idempotent 204 utan blob-uppslagning: fungerar för levande och
 // borttagna saker och röjer aldrig existens via statuskod.
 // Livscykel-/relationshändelser och sakblobb påverkas inte.
+// Lagringsfel ger 500 (TV-01): tyst 204 vore falsk raderingsbekräftelse.
 func (h *handler) purgeHistory(w http.ResponseWriter, r *http.Request) {
 	t, err := tenant(r, DeleteThings)
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
-	_ = h.mgr.PurgeThingHistory(r.Context(), t, r.PathValue("id"))
+	if _, err := h.mgr.PurgeThingHistory(r.Context(), t, r.PathValue("id")); err != nil {
+		writeAPIError(w, err)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

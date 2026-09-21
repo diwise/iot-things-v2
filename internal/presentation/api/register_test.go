@@ -1203,6 +1203,35 @@ func TestK6PurgeHistoryEndpoint(t *testing.T) {
 	}
 }
 
+// TV-01: lagringsfel i purge ger 500, aldrig tyst 204. Managern byggs
+// över en stängd pg-pool (kräver nåbar DB för konstruktion, skippar annars).
+func TestPurgeHistoryStorageFailure(t *testing.T) {
+	get := func(key, def string) string {
+		if v := os.Getenv(key); v != "" {
+			return v
+		}
+		return def
+	}
+	store, err := storage.NewPostgres(context.Background(), storage.NewConfig(
+		get("PG_TEST_HOST", "localhost"),
+		get("PG_TEST_USER", "postgres"),
+		get("PG_TEST_PASSWORD", "password"),
+		get("PG_TEST_PORT", "5434"),
+		get("PG_TEST_DBNAME", "diwise"),
+		get("PG_TEST_SSLMODE", "disable"),
+	))
+	if err != nil {
+		t.Skipf("no test database: %v", err)
+	}
+	store.Close()
+	rt := application.NewRuntime(store)
+	mgr := application.NewManager(catalog.New(), rt, store)
+	h := &handler{mgr: mgr}
+	if rr := doGET(h.purgeHistory, v0ctx("t"), "bin-42", ""); rr.Code != http.StatusInternalServerError {
+		t.Fatalf("purge on broken storage=%d, want 500", rr.Code)
+	}
+}
+
 // Tenantisolering skrivvägar: främmande tenant läcker aldrig existens
 // (404, inte 401/403); tvetydig multi-tenant-skrivning utan väljare ger
 // 400; väljare utanför behörighet ger 401.
