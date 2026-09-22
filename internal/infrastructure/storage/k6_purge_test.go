@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -51,20 +52,20 @@ func TestPostgresPurgeThingHistory(t *testing.T) {
 		return application.HistoryWrite{PropertyID: prop, Value: &v, Quality: "ok",
 			ObservedAt: at, ReceivedAt: at, Source: "s", MessageID: "m-" + prop}
 	}
-	a.AppendHistory("t", "bin-42", mk("a", at))
-	a.AppendHistory("t", "bin-42", mk("b", at.Add(time.Minute)))
-	a.AppendHistory("t", "bin-43", mk("a", at))
+	a.AppendHistory(context.Background(), "t", "bin-42", mk("a", at))
+	a.AppendHistory(context.Background(), "t", "bin-42", mk("b", at.Add(time.Minute)))
+	a.AppendHistory(context.Background(), "t", "bin-43", mk("a", at))
 
-	if n, err := s.PurgeThingHistory("t", "bin-42"); err != nil || n != 2 {
+	if n, err := s.PurgeThingHistory(context.Background(), "t", "bin-42"); err != nil || n != 2 {
 		t.Fatalf("purged=%d err=%v, want 2", n, err)
 	}
-	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
+	if got := a.History(context.Background(), "t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("bin-42 history must be gone: %+v", got)
 	}
-	if got := a.History("t", "bin-43", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
+	if got := a.History(context.Background(), "t", "bin-43", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("bin-43 history must survive: %+v", got)
 	}
-	if n, err := s.PurgeThingHistory("t", "unknown"); err != nil || n != 0 {
+	if n, err := s.PurgeThingHistory(context.Background(), "t", "unknown"); err != nil || n != 0 {
 		t.Fatalf("unknown thing must purge 0, got %d err=%v", n, err)
 	}
 }
@@ -77,7 +78,7 @@ func TestPostgresPurgeKeepsDeliveryProtection(t *testing.T) {
 	a := application.RuntimeStore(s)
 	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	v := 1.0
-	a.AppendHistory("t", "bin-42", application.HistoryWrite{
+	a.AppendHistory(context.Background(), "t", "bin-42", application.HistoryWrite{
 		PropertyID: "distance", Value: &v, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, Source: "s", MessageID: "m1",
 	})
@@ -85,32 +86,32 @@ func TestPostgresPurgeKeepsDeliveryProtection(t *testing.T) {
 		PropertyID: "distance", Value: 0.3, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
 	}
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
 	raw := application.RawOutboxEvent{
 		ID: "v1/t/bin-42/lifecycle/created/1", Topic: pkgtypes.TopicLifecycleChanges,
 		Payload: []byte(`{"kind":"created"}`), ObservedAt: at, Revision: 1,
 	}
-	a.StoreRawEvents("t", "bin-42", []application.RawOutboxEvent{raw})
-	a.DedupMark("t", "m1", "bin-42")
+	a.StoreRawEvents(context.Background(), "t", "bin-42", []application.RawOutboxEvent{raw})
+	a.DedupMark(context.Background(), "t", "m1", "bin-42")
 
-	if n, err := s.PurgeThingHistory("t", "bin-42"); err != nil || n != 1 {
+	if n, err := s.PurgeThingHistory(context.Background(), "t", "bin-42"); err != nil || n != 1 {
 		t.Fatalf("purged=%d err=%v, want 1", n, err)
 	}
-	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
+	if got := a.History(context.Background(), "t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("history must be gone: %+v", got)
 	}
-	if got := a.PendingEvents("t", "bin-42"); len(got) != 0 {
+	if got := a.PendingEvents(context.Background(), "t", "bin-42"); len(got) != 0 {
 		t.Fatalf("pending values must be gone: %+v", got)
 	}
-	if got := a.PendingRawEvents("t", "bin-42"); len(got) != 1 {
+	if got := a.PendingRawEvents(context.Background(), "t", "bin-42"); len(got) != 1 {
 		t.Fatalf("lifecycle rows must survive purge: %+v", got)
 	}
-	if !a.DedupCheck("t", "m1", "bin-42") {
+	if !a.DedupCheck(context.Background(), "t", "m1", "bin-42") {
 		t.Fatal("dedup mark must survive purge")
 	}
 	// Återleverans av samma meddelande dedupliceras fortfarande.
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
-	if got := a.PendingEvents("t", "bin-42"); len(got) != 0 {
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
+	if got := a.PendingEvents(context.Background(), "t", "bin-42"); len(got) != 0 {
 		t.Fatalf("redelivery must stay deduped, pending=%+v", got)
 	}
 }
@@ -121,7 +122,7 @@ func TestAdapterPurgeKeepsDeliveryProtection(t *testing.T) {
 	a := newAdapter(t)
 	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	v := 1.0
-	a.AppendHistory("t", "bin-42", application.HistoryWrite{
+	a.AppendHistory(context.Background(), "t", "bin-42", application.HistoryWrite{
 		PropertyID: "distance", Value: &v, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, Source: "s", MessageID: "m1",
 	})
@@ -129,31 +130,31 @@ func TestAdapterPurgeKeepsDeliveryProtection(t *testing.T) {
 		PropertyID: "distance", Value: 0.3, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
 	}
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
 	raw := application.RawOutboxEvent{
 		ID: "v1/t/bin-42/lifecycle/created/1", Topic: pkgtypes.TopicLifecycleChanges,
 		Payload: []byte(`{"kind":"created"}`), ObservedAt: at, Revision: 1,
 	}
-	a.StoreRawEvents("t", "bin-42", []application.RawOutboxEvent{raw})
-	a.DedupMark("t", "m1", "bin-42")
+	a.StoreRawEvents(context.Background(), "t", "bin-42", []application.RawOutboxEvent{raw})
+	a.DedupMark(context.Background(), "t", "m1", "bin-42")
 
-	if n, err := a.PurgeThingHistory("t", "bin-42"); err != nil || n != 1 {
+	if n, err := a.PurgeThingHistory(context.Background(), "t", "bin-42"); err != nil || n != 1 {
 		t.Fatalf("purged=%d err=%v, want 1", n, err)
 	}
-	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
+	if got := a.History(context.Background(), "t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("history must be gone: %+v", got)
 	}
-	if got := a.PendingEvents("t", "bin-42"); len(got) != 0 {
+	if got := a.PendingEvents(context.Background(), "t", "bin-42"); len(got) != 0 {
 		t.Fatalf("pending values must be gone: %+v", got)
 	}
-	if got := a.PendingRawEvents("t", "bin-42"); len(got) != 1 {
+	if got := a.PendingRawEvents(context.Background(), "t", "bin-42"); len(got) != 1 {
 		t.Fatalf("lifecycle rows must survive purge: %+v", got)
 	}
-	if !a.DedupCheck("t", "m1", "bin-42") {
+	if !a.DedupCheck(context.Background(), "t", "m1", "bin-42") {
 		t.Fatal("dedup mark must survive purge")
 	}
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
-	if got := a.PendingEvents("t", "bin-42"); len(got) != 0 {
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
+	if got := a.PendingEvents(context.Background(), "t", "bin-42"); len(got) != 0 {
 		t.Fatalf("redelivery must stay deduped, pending=%+v", got)
 	}
 }

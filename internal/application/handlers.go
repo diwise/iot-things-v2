@@ -46,7 +46,7 @@ func NewMeasurementsHandler(c context.Context, app ThingsApp) messaging.TopicMes
 
 		logger = logger.With("topic_name", topicMessage.TopicName())
 
-		ctx, span := tracer.Start(ctx, "receive-measurements")
+		ctx, span := runtimeTracer.Start(ctx, "receive-measurements")
 		defer func() { tracing.RecordAnyErrorAndEndSpan(err, span) }()
 		_, ctx, log := o11y.AddTraceIDToLoggerAndStoreInContext(span, logger, ctx)
 
@@ -102,7 +102,9 @@ func NewMeasurementsHandler(c context.Context, app ThingsApp) messaging.TopicMes
 
 		ctx = logging.NewContextWithLogger(ctx, logger)
 
-		if err := app.HandleMeasurements(ctx, tenant, topicMessage.MessageID(), observations); err != nil {
+		// Tilldela yttre err (inte skugga med :=) så att deferred
+		// span-avslut ser felet och sätter Error-status (TV-07).
+		if err = app.HandleMeasurements(ctx, tenant, topicMessage.MessageID(), observations); err != nil {
 			log.Error("could not handle measurements", "err", err.Error())
 			return err
 		}

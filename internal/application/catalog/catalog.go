@@ -640,6 +640,31 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 	if err := checkLevelGeometry(tmpl); err != nil {
 		return nil, err
 	}
+	// K5: samma kostnadstak vid kompilering som vid publicering (TV-08).
+	// Redan lagrade mallar över taken (pre-K5) nekas vid användning så att
+	// de inte kringgår taken via direktlagring.
+	if n := len(t.Required) + len(t.Optional); n > maxPropertiesPerThing {
+		return nil, fmt.Errorf("%w: template %s/%s has %d properties, max %d (K5)", things.ErrValidation, t.ID, t.Version, n, maxPropertiesPerThing)
+	}
+	if len(tmpl.Recipes) > maxRecipesPerTemplate {
+		return nil, fmt.Errorf("%w: template %s/%s has %d recipes, max %d (K5)", things.ErrValidation, t.ID, t.Version, len(tmpl.Recipes), maxRecipesPerTemplate)
+	}
+	if len(tmpl.ParamDefaults) > maxParamsPerTemplate {
+		return nil, fmt.Errorf("%w: template %s/%s has %d parameters, max %d (K5)", things.ErrValidation, t.ID, t.Version, len(tmpl.ParamDefaults), maxParamsPerTemplate)
+	}
+	// Sträng- och geometritak per sak (TV-08): namn och plats hålls ändliga.
+	if len(obj.Name) > maxNameLen {
+		return nil, fmt.Errorf("%w: object %q name has %d bytes, max %d (K5)", things.ErrValidation, obj.ThingID, len(obj.Name), maxNameLen)
+	}
+	if len(alternativeName) > maxNameLen {
+		return nil, fmt.Errorf("%w: object %q alternativeName has %d bytes, max %d (K5)", things.ErrValidation, obj.ThingID, len(alternativeName), maxNameLen)
+	}
+	if len(subType) > maxNameLen {
+		return nil, fmt.Errorf("%w: object %q subType has %d bytes, max %d (K5)", things.ErrValidation, obj.ThingID, len(subType), maxNameLen)
+	}
+	if obj.Location != nil && len(obj.Location.Coordinates) > maxLocationSize {
+		return nil, fmt.Errorf("%w: object %q location has %d bytes, max %d (K5)", things.ErrValidation, obj.ThingID, len(obj.Location.Coordinates), maxLocationSize)
+	}
 
 	var variant things.Variant
 	var variantID, variantVersion string
@@ -776,7 +801,8 @@ func (c *Catalog) Compile(obj ObjectSpec) (*EffectiveConfig, error) {
 // K5 storleksgränser: ändliga tak som håller per-runda-arbete och blobbar
 // avgränsade utan att begränsa legitimt bruk (seed max: 8 egenskaper,
 // 3 recept, 2 parametrar). Överskridande nekas vid publicering (nya mallar)
-// och kompilering (saker mot redan publicerade mallar). Exakt
+// och kompilering (saker mot redan publicerade mallar — även legacy-mallar
+// över taken nekas vid användning, TV-08). Exakt
 // uppdateringsfördröjnings-SLO kräver lasttest och fastställs operativt;
 // taken håller värsta fallet avgränsat tills dess.
 const (
@@ -785,6 +811,14 @@ const (
 	maxParamsPerTemplate  = 64
 	maxBindingsPerThing   = 64
 	maxRelationsPerThing  = 16
+)
+
+// Sträng- och geometritak (TV-08): antal räcker inte — stora geometrier
+// och strängar måste också avgränsas för att hålla blobbar ändliga.
+// Delas med API-lagrets body-tak (samma storleksordning, se register.go).
+const (
+	maxNameLen      = 256
+	maxLocationSize = 64 * 1024
 )
 
 // Metadata caps keep free-form annotations bounded without schema

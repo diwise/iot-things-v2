@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go.opentelemetry.io/otel/codes"
 	"io"
 	"log/slog"
 	"testing"
@@ -171,5 +172,38 @@ func TestHandlerMissingMessageIDIsPermanent(t *testing.T) {
 	}
 	if fake.calls != 0 {
 		t.Fatal("message without ID must not reach app")
+	}
+}
+
+// TV-07: receive-measurements ska sätta Error-status vid hanteringsfel.
+// Tidigare skuggade `if err :=` det yttre err som deferred span-avslut läser.
+func TestHandlerSpanErrorOnAppFailure(t *testing.T) {
+	rec, restore := withSpanRecorder(t)
+	defer restore()
+
+	pack := `[
+		{"bn":"dev1/3303/","bt":1720000000,"n":"0","vs":"urn:oma:lwm2m:ext:3303"},
+		{"n":"5700","u":"Cel","v":21.5},
+		{"bn":"dev1/","n":"tenant","vs":"acme"}
+	]`
+	var rawPack senml.Pack
+	if err := json.Unmarshal([]byte(pack), &rawPack); err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	env, _ := json.Marshal(map[string]any{
+		"pack":      rawPack,
+		"timestamp": time.Now().UTC(),
+	})
+	fake := &fakeThingsApp{handleErr: errors.New("store unavailable")}
+	h := NewMeasurementsHandler(context.Background(), fake)
+	if err := h(context.Background(), incomingMessage(env, "m-span-err"), slog.Default()); err == nil {
+		t.Fatal("handling error must propagate")
+	}
+	span := spanByName(rec.Ended(), "receive-measurements")
+	if span == nil {
+		t.Fatalf("no receive-measurements span, got %v", spanNames(rec.Ended()))
+	}
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status=%v, want Error on handling failure", span.Status().Code)
 	}
 }

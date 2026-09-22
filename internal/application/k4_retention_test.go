@@ -20,18 +20,18 @@ func TestManagePurgeHistory(t *testing.T) {
 		return HistoryWrite{PropertyID: prop, Value: &v, Quality: "ok",
 			ObservedAt: at, ReceivedAt: at, Source: "s", MessageID: "m-" + prop}
 	}
-	fs.AppendHistory("t", "bin-1", mkHist("old", cutoff.Add(-time.Hour)))
-	fs.AppendHistory("t", "bin-1", mkHist("edge", cutoff))
-	fs.AppendHistory("t", "bin-1", mkHist("new", cutoff.Add(time.Hour)))
-	fs.AppendHistory("o", "bin-9", mkHist("old", cutoff.Add(-time.Hour)))
+	fs.AppendHistory(context.Background(), "t", "bin-1", mkHist("old", cutoff.Add(-time.Hour)))
+	fs.AppendHistory(context.Background(), "t", "bin-1", mkHist("edge", cutoff))
+	fs.AppendHistory(context.Background(), "t", "bin-1", mkHist("new", cutoff.Add(time.Hour)))
+	fs.AppendHistory(context.Background(), "o", "bin-9", mkHist("old", cutoff.Add(-time.Hour)))
 
 	if n, err := mgr.PurgeHistory(context.Background(), cutoff); err != nil || n != 2 {
 		t.Fatalf("purged=%d err=%v, want 2", n, err)
 	}
-	if got := fs.History("t", "bin-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
+	if got := fs.History(context.Background(), "t", "bin-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
 		t.Fatalf("bin-1 survivors=%d, want 2", len(got))
 	}
-	if got := fs.History("o", "bin-9", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
+	if got := fs.History(context.Background(), "o", "bin-9", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("bin-9 must be fully purged: %+v", got)
 	}
 }

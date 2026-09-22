@@ -64,6 +64,9 @@ type FlowEvent struct {
 	OperatorVersion string    `json:"operatorVersion,omitempty"`
 	ConfigRevision  int64     `json:"configRevision,omitempty"`
 	MessageID       string    `json:"messageId,omitempty"`
+	// TraceContext bär transportens W3C trace-context separat från
+	// domänpayloaden (TV-07, json:"-" → aldrig i broker-payload).
+	TraceContext map[string]string `json:"-"`
 }
 
 // StoredProcessor är versionerat beständigt tillstånd för en tillstånds-

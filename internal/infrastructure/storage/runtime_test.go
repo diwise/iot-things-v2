@@ -37,10 +37,10 @@ func TestAdapterThingRoundTrip(t *testing.T) {
 			MessageID:  "m1",
 		}},
 	}
-	if !a.InsertThing("t", "room-a", st) {
+	if !a.InsertThing(context.Background(), "t", "room-a", st) {
 		t.Fatal("insert must store new thing")
 	}
-	got, ok := a.LoadThing("t", "room-a")
+	got, ok := a.LoadThing(context.Background(), "t", "room-a")
 	if !ok {
 		t.Fatal("stored thing missing")
 	}
@@ -53,11 +53,11 @@ func TestAdapterThingRoundTrip(t *testing.T) {
 	if got.LastMessageID != "m1" || len(got.LastEvents) != 1 {
 		t.Fatalf("markers=%+v", got)
 	}
-	if _, ok := a.LoadThing("other", "room-a"); ok {
+	if _, ok := a.LoadThing(context.Background(), "other", "room-a"); ok {
 		t.Fatal("cross-tenant leak")
 	}
-	a.DeleteThingState("t", "room-a")
-	if _, ok := a.LoadThing("t", "room-a"); ok {
+	a.DeleteThingState(context.Background(), "t", "room-a")
+	if _, ok := a.LoadThing(context.Background(), "t", "room-a"); ok {
 		t.Fatal("delete must remove state")
 	}
 }
@@ -70,23 +70,23 @@ func TestAdapterHistoryPendingDedup(t *testing.T) {
 		PropertyID: "temperature.window", Value: &v, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, Source: "s1/3303/5700", MessageID: "m1",
 	}
-	if !a.AppendHistory("t", "room-a", hw) {
+	if !a.AppendHistory(context.Background(), "t", "room-a", hw) {
 		t.Fatal("first append must store")
 	}
-	if a.AppendHistory("t", "room-a", hw) {
+	if a.AppendHistory(context.Background(), "t", "room-a", hw) {
 		t.Fatal("identical append must dedup")
 	}
 	ev := application.FlowEvent{
 		PropertyID: "temperature.window", Value: 21.5, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
 	}
-	a.StorePending("t", "room-a", []application.FlowEvent{ev})
-	a.StorePending("t", "room-a", []application.FlowEvent{ev})
-	if pending := a.PendingEvents("t", "room-a"); len(pending) != 1 {
+	a.StorePending(context.Background(), "t", "room-a", []application.FlowEvent{ev})
+	a.StorePending(context.Background(), "t", "room-a", []application.FlowEvent{ev})
+	if pending := a.PendingEvents(context.Background(), "t", "room-a"); len(pending) != 1 {
 		t.Fatalf("pending=%d, want deduped 1", len(pending))
 	}
-	a.ClearPendingIDs("t", "room-a", []string{application.StableEventID("t", "room-a", "m1", "temperature.window")})
-	if pending := a.PendingEvents("t", "room-a"); len(pending) != 0 {
+	a.ClearPendingIDs(context.Background(), "t", "room-a", []string{application.StableEventID("t", "room-a", "m1", "temperature.window")})
+	if pending := a.PendingEvents(context.Background(), "t", "room-a"); len(pending) != 0 {
 		t.Fatalf("pending=%d after clear, want 0", len(pending))
 	}
 	if a.DedupHit("t", "m1", "room-a") {
@@ -110,85 +110,85 @@ func TestAdapterOutboxTenantIsolation(t *testing.T) {
 		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
 	}
 	// Samma meddelande för kolliderande tenants lagras i båda.
-	a.StorePending("a/b", "c", []application.FlowEvent{ev})
-	a.StorePending("a~b", "c", []application.FlowEvent{ev})
-	if n := len(a.PendingEvents("a/b", "c")); n != 1 {
+	a.StorePending(context.Background(), "a/b", "c", []application.FlowEvent{ev})
+	a.StorePending(context.Background(), "a~b", "c", []application.FlowEvent{ev})
+	if n := len(a.PendingEvents(context.Background(), "a/b", "c")); n != 1 {
 		t.Fatalf("pending a/b=%d, want 1", n)
 	}
-	if n := len(a.PendingEvents("a~b", "c")); n != 1 {
+	if n := len(a.PendingEvents(context.Background(), "a~b", "c")); n != 1 {
 		t.Fatalf("pending a~b=%d, want 1 (no cross-tenant false dedup)", n)
 	}
 	// Glömska för ena tenanten lämnar den andra intakt (pending + seen).
-	a.DeleteThingState("a/b", "c")
-	if n := len(a.PendingEvents("a~b", "c")); n != 1 {
+	a.DeleteThingState(context.Background(), "a/b", "c")
+	if n := len(a.PendingEvents(context.Background(), "a~b", "c")); n != 1 {
 		t.Fatalf("pending a~b after forget=%d, want 1", n)
 	}
-	a.StorePending("a~b", "c", []application.FlowEvent{ev})
-	if n := len(a.PendingEvents("a~b", "c")); n != 1 {
+	a.StorePending(context.Background(), "a~b", "c", []application.FlowEvent{ev})
+	if n := len(a.PendingEvents(context.Background(), "a~b", "c")); n != 1 {
 		t.Fatalf("redelivery for survivor must stay deduped, pending=%d", n)
 	}
 	// Glömd tenant tar emot nya skrivningar igen.
-	a.StorePending("a/b", "c", []application.FlowEvent{ev})
-	if n := len(a.PendingEvents("a/b", "c")); n != 1 {
+	a.StorePending(context.Background(), "a/b", "c", []application.FlowEvent{ev})
+	if n := len(a.PendingEvents(context.Background(), "a/b", "c")); n != 1 {
 		t.Fatalf("pending a/b after forget=%d, want 1", n)
 	}
 	// Sak-ID:n med "/" vs "~" isoleras likadant.
-	a.StorePending("t", "x/y", []application.FlowEvent{ev})
-	a.StorePending("t", "x~y", []application.FlowEvent{ev})
-	if n := len(a.PendingEvents("t", "x/y")); n != 1 {
+	a.StorePending(context.Background(), "t", "x/y", []application.FlowEvent{ev})
+	a.StorePending(context.Background(), "t", "x~y", []application.FlowEvent{ev})
+	if n := len(a.PendingEvents(context.Background(), "t", "x/y")); n != 1 {
 		t.Fatalf("pending x/y=%d, want 1", n)
 	}
-	if n := len(a.PendingEvents("t", "x~y")); n != 1 {
+	if n := len(a.PendingEvents(context.Background(), "t", "x~y")); n != 1 {
 		t.Fatalf("pending x~y=%d, want 1 (no cross-thing false dedup)", n)
 	}
-	a.DeleteThingState("t", "x/y")
-	if n := len(a.PendingEvents("t", "x~y")); n != 1 {
+	a.DeleteThingState(context.Background(), "t", "x/y")
+	if n := len(a.PendingEvents(context.Background(), "t", "x~y")); n != 1 {
 		t.Fatalf("pending x~y after forget=%d, want 1", n)
 	}
 }
 
 func TestAdapterRelations(t *testing.T) {
 	a := newAdapter(t)
-	if err := a.AttachChild("t", "room-a", "building-a"); err != nil {
+	if err := a.AttachChild(context.Background(), "t", "room-a", "building-a"); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if err := a.AttachChild("t", "room-a", "building-a"); err != nil {
+	if err := a.AttachChild(context.Background(), "t", "room-a", "building-a"); err != nil {
 		t.Fatalf("re-attach same edge must be idempotent: %v", err)
 	}
-	if children := a.Children("t", "building-a"); len(children) != 1 || children[0] != "room-a" {
+	if children := a.Children(context.Background(), "t", "building-a"); len(children) != 1 || children[0] != "room-a" {
 		t.Fatalf("children=%v", children)
 	}
-	if parent, ok := a.ParentOf("t", "room-a"); !ok || parent != "building-a" {
+	if parent, ok := a.ParentOf(context.Background(), "t", "room-a"); !ok || parent != "building-a" {
 		t.Fatalf("parent=%q", parent)
 	}
-	if err := a.MoveChild("t", "room-a", "building-b"); err != nil {
+	if err := a.MoveChild(context.Background(), "t", "room-a", "building-b"); err != nil {
 		t.Fatalf("move: %v", err)
 	}
-	if parent, _ := a.ParentOf("t", "room-a"); parent != "building-b" {
+	if parent, _ := a.ParentOf(context.Background(), "t", "room-a"); parent != "building-b" {
 		t.Fatalf("parent=%q after move", parent)
 	}
-	a.DetachChild("t", "room-a")
-	if _, ok := a.ParentOf("t", "room-a"); ok {
+	a.DetachChild(context.Background(), "t", "room-a")
+	if _, ok := a.ParentOf(context.Background(), "t", "room-a"); ok {
 		t.Fatal("detach must remove parent link")
 	}
-	if children := a.Children("t", "building-a"); len(children) != 0 {
+	if children := a.Children(context.Background(), "t", "building-a"); len(children) != 0 {
 		t.Fatalf("children=%v after detach", children)
 	}
 }
 
 func TestAdapterTenants(t *testing.T) {
 	a := newAdapter(t)
-	if !a.InsertThing("b", "x", application.StoredThingState{Revision: 1}) {
+	if !a.InsertThing(context.Background(), "b", "x", application.StoredThingState{Revision: 1}) {
 		t.Fatal("insert b/x")
 	}
-	if !a.InsertThing("a", "y", application.StoredThingState{Revision: 1}) {
+	if !a.InsertThing(context.Background(), "a", "y", application.StoredThingState{Revision: 1}) {
 		t.Fatal("insert a/y")
 	}
-	tenants := a.ListTenants()
+	tenants := a.ListTenants(context.Background())
 	if len(tenants) != 2 || tenants[0] != "a" || tenants[1] != "b" {
 		t.Fatalf("tenants=%v", tenants)
 	}
-	if ids := a.ListThingIDs("a"); len(ids) != 1 || ids[0] != "y" {
+	if ids := a.ListThingIDs(context.Background(), "a"); len(ids) != 1 || ids[0] != "y" {
 		t.Fatalf("ids=%v", ids)
 	}
 }
@@ -212,10 +212,10 @@ func TestAdapterFullRoundTripAndDeleteForgets(t *testing.T) {
 			ConfigRevision: 7, MessageID: "m1",
 		}},
 	}
-	if !a.InsertThing("t", "room-a", st) {
+	if !a.InsertThing(context.Background(), "t", "room-a", st) {
 		t.Fatal("insert must store new thing")
 	}
-	got, ok := a.LoadThing("t", "room-a")
+	got, ok := a.LoadThing(context.Background(), "t", "room-a")
 	if !ok {
 		t.Fatal("missing")
 	}
@@ -230,34 +230,34 @@ func TestAdapterFullRoundTripAndDeleteForgets(t *testing.T) {
 	}
 	// Historik + pending + dedup.
 	hw := application.HistoryWrite{PropertyID: "temperature.window", Value: &v, Quality: "ok", ObservedAt: at, ReceivedAt: at, Source: "s1/3303/5700", MessageID: "m1"}
-	if !a.AppendHistory("t", "room-a", hw) {
+	if !a.AppendHistory(context.Background(), "t", "room-a", hw) {
 		t.Fatal("history append")
 	}
 	ev := application.FlowEvent{PropertyID: "temperature.window", Value: 21.5, Quality: "ok", ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 7}
-	a.StorePending("t", "room-a", []application.FlowEvent{ev})
-	if pending := a.PendingEvents("t", "room-a"); len(pending) != 1 || pending[0].PropertyID != "temperature.window" {
+	a.StorePending(context.Background(), "t", "room-a", []application.FlowEvent{ev})
+	if pending := a.PendingEvents(context.Background(), "t", "room-a"); len(pending) != 1 || pending[0].PropertyID != "temperature.window" {
 		t.Fatalf("pending=%+v", pending)
 	}
-	if a.DedupCheck("t", "m1", "room-a") {
+	if a.DedupCheck(context.Background(), "t", "m1", "room-a") {
 		t.Fatal("DedupCheck före mark ska vara false")
 	}
-	a.DedupMark("t", "m1", "room-a")
-	if !a.DedupCheck("t", "m1", "room-a") {
+	a.DedupMark(context.Background(), "t", "m1", "room-a")
+	if !a.DedupCheck(context.Background(), "t", "m1", "room-a") {
 		t.Fatal("DedupCheck efter mark ska vara true")
 	}
 	// Delete: state borta, historik kvar (verifieras via List? här via re-append dedup),
 	// outbox+dedup glömda.
-	a.DeleteThingState("t", "room-a")
-	if _, ok := a.LoadThing("t", "room-a"); ok {
+	a.DeleteThingState(context.Background(), "t", "room-a")
+	if _, ok := a.LoadThing(context.Background(), "t", "room-a"); ok {
 		t.Fatal("state ska vara borta")
 	}
-	if pending := a.PendingEvents("t", "room-a"); len(pending) != 0 {
+	if pending := a.PendingEvents(context.Background(), "t", "room-a"); len(pending) != 0 {
 		t.Fatalf("pending=%d efter delete, want 0", len(pending))
 	}
-	if a.DedupCheck("t", "m1", "room-a") {
+	if a.DedupCheck(context.Background(), "t", "m1", "room-a") {
 		t.Fatal("dedup ska vara glömd efter delete")
 	}
-	if a.AppendHistory("t", "room-a", hw) {
+	if a.AppendHistory(context.Background(), "t", "room-a", hw) {
 		t.Fatal("historik ska vara bevarad (dubblett ska dedupliceras även efter delete)")
 	}
 }
@@ -278,13 +278,13 @@ func TestAdapterHistoryLateAndEmptyProp(t *testing.T) {
 		ObservedAt: at, ReceivedAt: at, Source: "recipe:wastebin-level",
 		MessageID: "m1",
 	}
-	if !a.AppendHistory("t", "bin-42", late) {
+	if !a.AppendHistory(context.Background(), "t", "bin-42", late) {
 		t.Fatal("late append must store")
 	}
-	if !a.AppendHistory("t", "bin-42", cur) {
+	if !a.AppendHistory(context.Background(), "t", "bin-42", cur) {
 		t.Fatal("current append must store")
 	}
-	all := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0)
+	all := a.History(context.Background(), "t", "bin-42", "", time.Time{}, time.Time{}, 0, 0)
 	if len(all) != 2 {
 		t.Fatalf("empty prop must return all, got %d", len(all))
 	}

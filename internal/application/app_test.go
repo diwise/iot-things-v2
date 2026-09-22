@@ -16,7 +16,7 @@ func TestAppHandleMeasurementsPublishes(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	pub := &fakePublisher{}
@@ -28,7 +28,7 @@ func TestAppHandleMeasurementsPublishes(t *testing.T) {
 	if pub.count() != 1 {
 		t.Fatalf("published=%d, want 1 batch event", pub.count())
 	}
-	if pending := fs.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	if pending := fs.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("pending=%d after publish, want 0", len(pending))
 	}
 	// Dubblett: ingen omberäkning och ingen dubbelleverans (första
@@ -51,7 +51,7 @@ func TestAppFailureThenRedeliveryDelivers(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	pub := &fakePublisher{err: errors.New("broker down")}
@@ -78,7 +78,7 @@ func TestAppDrainPending(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -136,7 +136,7 @@ func TestAppRejectsEmptyMessageID(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	a := New(nil, nil, nil, rt, &fakePublisher{})
@@ -170,10 +170,10 @@ func TestAppSamePublishedAtAcrossThings(t *testing.T) {
 			},
 		}
 	}
-	if _, err := rt.RegisterThing("t", c, mk("g1"), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mk("g1"), 1); err != nil {
 		t.Fatalf("register g1: %v", err)
 	}
-	if _, err := rt.RegisterThing("t", c, mk("g2"), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mk("g2"), 1); err != nil {
 		t.Fatalf("register g2: %v", err)
 	}
 	pub := &fakePublisher{}

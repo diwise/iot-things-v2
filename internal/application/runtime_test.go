@@ -59,19 +59,27 @@ func newFakeStore() *fakeStore {
 
 func fkey(tenant, id string) string { return tenant + "\x00" + id }
 
-func (f *fakeStore) LoadThing(tenant, thingID string) (StoredThingState, bool) {
+func (f *fakeStore) LoadThing(ctx context.Context, tenant, thingID string) (StoredThingState, bool) {
+	st, err := f.LoadThingErr(ctx, tenant, thingID)
+	if err != nil {
+		return StoredThingState{}, false
+	}
+	return st, true
+}
+
+func (f *fakeStore) LoadThingErr(ctx context.Context, tenant, thingID string) (StoredThingState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	st, ok := f.things[fkey(tenant, thingID)]
 	if !ok {
-		return StoredThingState{}, false
+		return StoredThingState{}, fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
 	}
 	cp := st
 	cp.Current = copyCurrent(st.Current)
 	cp.ProcessorStates = copyProcessors(st.ProcessorStates)
 	cp.ConfigJSON = append([]byte(nil), st.ConfigJSON...)
 	cp.LastEvents = append([]FlowEvent(nil), st.LastEvents...)
-	return cp, true
+	return cp, nil
 }
 
 func copyCurrent(m map[string]CurrentValue) map[string]CurrentValue {
@@ -101,7 +109,7 @@ func copyProcessors(m map[string]StoredProcessor) map[string]StoredProcessor {
 	return out
 }
 
-func (f *fakeStore) InsertThing(tenant, thingID string, st StoredThingState) bool {
+func (f *fakeStore) InsertThing(ctx context.Context, tenant, thingID string, st StoredThingState) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := fkey(tenant, thingID)
@@ -116,7 +124,7 @@ func (f *fakeStore) InsertThing(tenant, thingID string, st StoredThingState) boo
 	return true
 }
 
-func (f *fakeStore) SaveThingCAS(tenant, thingID string, expected int64, st StoredThingState) bool {
+func (f *fakeStore) SaveThingCAS(ctx context.Context, tenant, thingID string, expected int64, st StoredThingState) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cur, ok := f.things[fkey(tenant, thingID)]
@@ -138,7 +146,7 @@ func (f *fakeStore) storeLocked(tenant, thingID string, st StoredThingState) {
 // CommitBatch persisterar blob-CAS + historik + pending + dedupmarkering
 // atomärt under ett lås: vid staketkonflikt blir inget synligt och inget
 // markerat.
-func (f *fakeStore) CommitBatch(tenant, thingID, messageID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool {
+func (f *fakeStore) CommitBatch(ctx context.Context, tenant, thingID, messageID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	cur, ok := f.things[fkey(tenant, thingID)]
@@ -159,7 +167,7 @@ func (f *fakeStore) CommitBatch(tenant, thingID, messageID string, expected int6
 	return true
 }
 
-func (f *fakeStore) DeleteThingState(tenant, thingID string) error {
+func (f *fakeStore) DeleteThingState(ctx context.Context, tenant, thingID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failErr != nil {
@@ -174,7 +182,7 @@ func (f *fakeStore) DeleteThingState(tenant, thingID string) error {
 // PurgeThingHistory speglar lagringens K6-radering: historikrader och
 // väntande värdesevent tas bort; livscykel-/relationsrader, dedup och
 // sedda ID:n behålls (leveransskydd för levande saker, TV-02).
-func (f *fakeStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
+func (f *fakeStore) PurgeThingHistory(ctx context.Context, tenant, thingID string) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failErr != nil {
@@ -200,7 +208,7 @@ func (f *fakeStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
 
 // PurgeHistoryOlderThan speglar lagringens K4-retention: historikrader
 // äldre än cutoff tas bort i alla tenants.
-func (f *fakeStore) PurgeHistoryOlderThan(cutoff time.Time) (int64, error) {
+func (f *fakeStore) PurgeHistoryOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failErr != nil {
@@ -251,7 +259,7 @@ func (f *fakeStore) forgetTransientLocked(tenant, thingID string) {
 	}
 }
 
-func (f *fakeStore) ListThingIDs(tenant string) []string {
+func (f *fakeStore) ListThingIDs(ctx context.Context, tenant string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []string
@@ -274,7 +282,7 @@ func splitKey(key string) [2]string {
 	return [2]string{key, ""}
 }
 
-func (f *fakeStore) ListTenants() []string {
+func (f *fakeStore) ListTenants(ctx context.Context) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	seen := map[string]bool{}
@@ -289,7 +297,7 @@ func (f *fakeStore) ListTenants() []string {
 	return out
 }
 
-func (f *fakeStore) AppendHistory(tenant, thingID string, h HistoryWrite) bool {
+func (f *fakeStore) AppendHistory(ctx context.Context, tenant, thingID string, h HistoryWrite) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.appendHistoryLocked(tenant, thingID, h)
@@ -336,7 +344,7 @@ func (f *fakeStore) historyCount(tenant, thingID string) int {
 	return n
 }
 
-func (f *fakeStore) History(tenant, thingID, prop string, from, to time.Time, limit, offset int) []HistoryWrite {
+func (f *fakeStore) History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) []HistoryWrite {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []HistoryWrite
@@ -376,7 +384,7 @@ func (f *fakeStore) History(tenant, thingID, prop string, from, to time.Time, li
 	return out
 }
 
-func (f *fakeStore) PendingEvents(tenant, thingID string) []FlowEvent {
+func (f *fakeStore) PendingEvents(ctx context.Context, tenant, thingID string) []FlowEvent {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := append([]FlowEvent(nil), f.pending[fkey(tenant, thingID)]...)
@@ -393,7 +401,7 @@ func (f *fakeStore) PendingEvents(tenant, thingID string) []FlowEvent {
 	return out
 }
 
-func (f *fakeStore) StorePending(tenant, thingID string, events []FlowEvent) {
+func (f *fakeStore) StorePending(ctx context.Context, tenant, thingID string, events []FlowEvent) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.storePendingLocked(tenant, thingID, events)
@@ -411,7 +419,7 @@ func (f *fakeStore) storePendingLocked(tenant, thingID string, events []FlowEven
 	}
 }
 
-func (f *fakeStore) ClearPendingIDs(tenant, thingID string, ids []string) {
+func (f *fakeStore) ClearPendingIDs(ctx context.Context, tenant, thingID string, ids []string) {
 	if len(ids) == 0 {
 		return
 	}
@@ -436,7 +444,7 @@ func (f *fakeStore) ClearPendingIDs(tenant, thingID string, ids []string) {
 	}
 }
 
-func (f *fakeStore) StoreRawEvents(tenant, thingID string, events []RawOutboxEvent) {
+func (f *fakeStore) StoreRawEvents(ctx context.Context, tenant, thingID string, events []RawOutboxEvent) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := fkey(tenant, thingID)
@@ -454,7 +462,7 @@ func (f *fakeStore) StoreRawEvents(tenant, thingID string, events []RawOutboxEve
 	}
 }
 
-func (f *fakeStore) PendingRawEvents(tenant, thingID string) []RawOutboxEvent {
+func (f *fakeStore) PendingRawEvents(ctx context.Context, tenant, thingID string) []RawOutboxEvent {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := append([]RawOutboxEvent(nil), f.raw[fkey(tenant, thingID)]...)
@@ -467,7 +475,7 @@ func (f *fakeStore) PendingRawEvents(tenant, thingID string) []RawOutboxEvent {
 	return out
 }
 
-func (f *fakeStore) ClearRawIDs(tenant, thingID string, ids []string) {
+func (f *fakeStore) ClearRawIDs(ctx context.Context, tenant, thingID string, ids []string) {
 	if len(ids) == 0 {
 		return
 	}
@@ -492,7 +500,7 @@ func (f *fakeStore) ClearRawIDs(tenant, thingID string, ids []string) {
 	}
 }
 
-func (f *fakeStore) ListRawTargets() []RawTarget {
+func (f *fakeStore) ListRawTargets(ctx context.Context) []RawTarget {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []RawTarget
@@ -529,7 +537,7 @@ func (f *fakeStore) DedupHit(tenant, messageID, thingID string) bool {
 	return false
 }
 
-func (f *fakeStore) DedupCheck(tenant, messageID, thingID string) bool {
+func (f *fakeStore) DedupCheck(ctx context.Context, tenant, messageID, thingID string) bool {
 	if messageID == "" {
 		return false
 	}
@@ -539,7 +547,7 @@ func (f *fakeStore) DedupCheck(tenant, messageID, thingID string) bool {
 	return ok
 }
 
-func (f *fakeStore) DedupMark(tenant, messageID, thingID string) {
+func (f *fakeStore) DedupMark(ctx context.Context, tenant, messageID, thingID string) {
 	if messageID == "" {
 		return
 	}
@@ -551,7 +559,7 @@ func (f *fakeStore) DedupMark(tenant, messageID, thingID string) {
 	f.dedup[tenant+"\x00"+messageID+"\x00"+thingID] = struct{}{}
 }
 
-func (f *fakeStore) Children(tenant, parentID string) []string {
+func (f *fakeStore) Children(ctx context.Context, tenant, parentID string) []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []string
@@ -562,14 +570,14 @@ func (f *fakeStore) Children(tenant, parentID string) []string {
 	return out
 }
 
-func (f *fakeStore) ParentOf(tenant, childID string) (string, bool) {
+func (f *fakeStore) ParentOf(ctx context.Context, tenant, childID string) (string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, ok := f.parents[fkey(tenant, childID)]
 	return p, ok
 }
 
-func (f *fakeStore) AttachChild(tenant, childID, parentID string) error {
+func (f *fakeStore) AttachChild(ctx context.Context, tenant, childID, parentID string) error {
 	if childID == parentID {
 		return fmt.Errorf("self-reference denied")
 	}
@@ -602,7 +610,7 @@ func (f *fakeStore) AttachChild(tenant, childID, parentID string) error {
 	return nil
 }
 
-func (f *fakeStore) MoveChild(tenant, childID, newParentID string) error {
+func (f *fakeStore) MoveChild(ctx context.Context, tenant, childID, newParentID string) error {
 	if childID == newParentID {
 		return fmt.Errorf("self-reference denied")
 	}
@@ -636,7 +644,7 @@ func (f *fakeStore) MoveChild(tenant, childID, newParentID string) error {
 	return nil
 }
 
-func (f *fakeStore) DetachChild(tenant, childID string) {
+func (f *fakeStore) DetachChild(ctx context.Context, tenant, childID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	ck := fkey(tenant, childID)
@@ -644,6 +652,174 @@ func (f *fakeStore) DetachChild(tenant, childID string) {
 		delete(f.children[fkey(tenant, parent)], childID)
 		delete(f.parents, ck)
 	}
+}
+
+// saveThingWithRelationsLocked är den atomära sparvägen (TV-03) delad av
+// fakeStore-metoderna. Anroparen håller f.mu.
+func (f *fakeStore) saveThingWithRelationsLocked(tenant, thingID string, create bool, expected int64, st StoredThingState, relOps []RelationOp, raw []RawOutboxEvent) error {
+	key := fkey(tenant, thingID)
+	// Fence först (read-only): under anroparens lås kan inget ändras
+	// emellan, så efterföljande skrivningar kan inte fela.
+	if create {
+		if _, exists := f.things[key]; exists {
+			return things.ErrConflict
+		}
+	} else {
+		cur, ok := f.things[key]
+		if !ok || cur.DataRevision != expected {
+			return things.ErrConflict
+		}
+	}
+	// Snapshot för rollback vid partiellt relationsfel (flera ops).
+	parentsSnap := make(map[string]string, len(f.parents))
+	for k, v := range f.parents {
+		parentsSnap[k] = v
+	}
+	childrenSnap := make(map[string]map[string]bool, len(f.children))
+	for k, vs := range f.children {
+		cp := make(map[string]bool, len(vs))
+		for ck, cv := range vs {
+			cp[ck] = cv
+		}
+		childrenSnap[k] = cp
+	}
+	for _, op := range relOps {
+		var err error
+		switch op.Op {
+		case "attach":
+			err = f.attachChildLocked(tenant, thingID, op.Target)
+		case "move":
+			err = f.moveChildLocked(tenant, thingID, op.Target)
+		case "detach":
+			f.detachChildLocked(tenant, thingID)
+		default:
+			err = fmt.Errorf("relation: unknown op %q", op.Op)
+		}
+		if err != nil {
+			f.parents = parentsSnap
+			f.children = childrenSnap
+			return err
+		}
+	}
+	// Ingen epok-rensning: delete bevarar livscykel för dränering och nya
+	// ID:n kolliderar aldrig (kind i ID:t). Rensning skulle tappa delete.
+	f.storeLocked(tenant, thingID, st)
+	for _, e := range raw {
+		if e.ID == "" {
+			continue
+		}
+		if _, ok := f.rawSeen[e.ID]; ok {
+			continue
+		}
+		f.rawSeen[e.ID] = struct{}{}
+		f.raw[fkey(tenant, thingID)] = append(f.raw[fkey(tenant, thingID)], e)
+	}
+	return nil
+}
+
+// attachChildLocked speglar AttachChild (samma regler och meddelanden).
+// Anroparen håller f.mu.
+func (f *fakeStore) attachChildLocked(tenant, childID, parentID string) error {
+	if _, ok := f.things[fkey(tenant, parentID)]; !ok {
+		return fmt.Errorf("%w: relation target %q", things.ErrNotFound, parentID)
+	}
+	ck := fkey(tenant, childID)
+	if cur, ok := f.parents[ck]; ok {
+		if cur == parentID {
+			return nil
+		}
+		return fmt.Errorf("child already has parent")
+	}
+	for cur := parentID; ; {
+		if cur == childID {
+			return fmt.Errorf("cycle denied")
+		}
+		next, ok := f.parents[fkey(tenant, cur)]
+		if !ok {
+			break
+		}
+		cur = next
+	}
+	f.parents[ck] = parentID
+	pk := fkey(tenant, parentID)
+	if f.children[pk] == nil {
+		f.children[pk] = make(map[string]bool)
+	}
+	f.children[pk][childID] = true
+	return nil
+}
+
+// moveChildLocked speglar MoveChild. Anroparen håller f.mu.
+func (f *fakeStore) moveChildLocked(tenant, childID, newParentID string) error {
+	if _, ok := f.things[fkey(tenant, newParentID)]; !ok {
+		return fmt.Errorf("%w: relation target %q", things.ErrNotFound, newParentID)
+	}
+	ck := fkey(tenant, childID)
+	old, ok := f.parents[ck]
+	if !ok {
+		return fmt.Errorf("no parent for child")
+	}
+	if old == newParentID {
+		return nil
+	}
+	for cur := newParentID; ; {
+		if cur == childID {
+			return fmt.Errorf("cycle denied")
+		}
+		next, ok := f.parents[fkey(tenant, cur)]
+		if !ok {
+			break
+		}
+		cur = next
+	}
+	delete(f.children[fkey(tenant, old)], childID)
+	f.parents[ck] = newParentID
+	pk := fkey(tenant, newParentID)
+	if f.children[pk] == nil {
+		f.children[pk] = make(map[string]bool)
+	}
+	f.children[pk][childID] = true
+	return nil
+}
+
+func (f *fakeStore) detachChildLocked(tenant, childID string) {
+	ck := fkey(tenant, childID)
+	if parent, ok := f.parents[ck]; ok {
+		delete(f.children[fkey(tenant, parent)], childID)
+		delete(f.parents, ck)
+	}
+}
+
+func (f *fakeStore) SaveThingWithRelations(ctx context.Context, tenant, thingID string, create bool, expected int64, st StoredThingState, relOps []RelationOp, raw []RawOutboxEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.saveThingWithRelationsLocked(tenant, thingID, create, expected, st, relOps, raw)
+}
+
+func (f *fakeStore) DeleteThingWithRelations(ctx context.Context, tenant, thingID string, raw []RawOutboxEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := fkey(tenant, thingID)
+	if _, ok := f.things[key]; !ok {
+		return fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
+	}
+	if n := len(f.children[key]); n > 0 {
+		return fmt.Errorf("%w: thing %q has %d active children", things.ErrConflict, thingID, n)
+	}
+	f.detachChildLocked(tenant, thingID)
+	delete(f.things, key)
+	f.forgetTransientLocked(tenant, thingID)
+	for _, e := range raw {
+		if e.ID == "" {
+			continue
+		}
+		if _, ok := f.rawSeen[e.ID]; ok {
+			continue
+		}
+		f.rawSeen[e.ID] = struct{}{}
+		f.raw[key] = append(f.raw[key], e)
+	}
+	return nil
 }
 
 // --- Hjälpare: soptunnekatalog och rumskatalog. ---
@@ -789,7 +965,7 @@ func TestRuntimeDuplicateRepublishesWithoutRecompute(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -823,15 +999,15 @@ func TestRuntimeRevisionConflict(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 7); !errors.Is(err, things.ErrConflict) {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 7); !errors.Is(err, things.ErrConflict) {
 		t.Fatalf("stale revision must conflict, got %v", err)
 	}
 	obj := rtBinObject()
 	obj.ParamOverrides = map[string]float64{"sensorToBottom": 1.50}
-	if _, err := rt.RegisterThing("t", cat, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 1); err != nil {
 		t.Fatalf("update with current revision: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -850,7 +1026,7 @@ func TestRuntimeRestartDrainsWithoutRecompute(t *testing.T) {
 	fs := newFakeStore()
 	rt1 := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt1.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt1.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -890,7 +1066,7 @@ func TestRuntimeRestartDrainsWithoutRecompute(t *testing.T) {
 	if n := fs.historyCount("t", "bin-42"); n != 3 {
 		t.Fatalf("history=%d, want 3 (no double count)", n)
 	}
-	if pending := fs.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	if pending := fs.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("pending=%d after drain, want 0", len(pending))
 	}
 }
@@ -900,7 +1076,7 @@ func TestRuntimePublishFailureKeepsPending(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -911,7 +1087,7 @@ func TestRuntimePublishFailureKeepsPending(t *testing.T) {
 	if _, err := rt.DrainAndPublish(context.Background(), pub, "t", "bin-42", base); err == nil {
 		t.Fatal("publish failure must propagate")
 	}
-	if pending := fs.PendingEvents("t", "bin-42"); len(pending) != 3 {
+	if pending := fs.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 3 {
 		t.Fatalf("pending=%d after failure, want 3 kept", len(pending))
 	}
 	pub.err = nil
@@ -921,7 +1097,7 @@ func TestRuntimePublishFailureKeepsPending(t *testing.T) {
 	if pub.count() != 1 || len(pub.events[0].Values) != 3 {
 		t.Fatalf("published=%+v", pub.events)
 	}
-	if pending := fs.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	if pending := fs.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("pending=%d after success, want 0", len(pending))
 	}
 }
@@ -945,7 +1121,7 @@ func TestRuntimeConcurrentBatches(t *testing.T) {
 			{DeviceID: "d", Object: rtDistURN, Resource: "5700", Input: "distance"},
 		},
 	}
-	if _, err := rt.RegisterThing("t", c, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -967,7 +1143,7 @@ func TestRuntimeConcurrentBatches(t *testing.T) {
 			t.Fatalf("batch %d: %v", i, err)
 		}
 	}
-	st, ok := fs.LoadThing("t", "gauge-1")
+	st, ok := fs.LoadThing(context.Background(), "t", "gauge-1")
 	if !ok {
 		t.Fatal("thing missing")
 	}
@@ -991,7 +1167,7 @@ func TestCommitBatchAtomicOnConflict(t *testing.T) {
 			"distance": {Value: &v, Quality: "ok", ObservedAt: base},
 		},
 	}
-	if !fs.InsertThing("t", "gauge-1", st) {
+	if !fs.InsertThing(context.Background(), "t", "gauge-1", st) {
 		t.Fatal("insert")
 	}
 	hist := []HistoryWrite{{
@@ -1003,32 +1179,32 @@ func TestCommitBatchAtomicOnConflict(t *testing.T) {
 		ObservedAt: base, ReceivedAt: base, MessageID: "stale", ConfigRevision: 1,
 	}}
 	st.DataRevision = 8
-	if fs.CommitBatch("t", "gauge-1", "stale", 6, st, hist, pending) {
+	if fs.CommitBatch(context.Background(), "t", "gauge-1", "stale", 6, st, hist, pending) {
 		t.Fatal("conflicting fence must fail")
 	}
 	if n := fs.historyCount("t", "gauge-1"); n != 0 {
 		t.Fatalf("history=%d after failed commit, want 0", n)
 	}
-	if pending := fs.PendingEvents("t", "gauge-1"); len(pending) != 0 {
+	if pending := fs.PendingEvents(context.Background(), "t", "gauge-1"); len(pending) != 0 {
 		t.Fatalf("pending=%d after failed commit, want 0", len(pending))
 	}
-	if fs.DedupCheck("t", "stale", "gauge-1") {
+	if fs.DedupCheck(context.Background(), "t", "stale", "gauge-1") {
 		t.Fatal("failed commit must not mark dedup")
 	}
-	got, _ := fs.LoadThing("t", "gauge-1")
+	got, _ := fs.LoadThing(context.Background(), "t", "gauge-1")
 	if got.DataRevision != 7 {
 		t.Fatalf("dataRev=%d after failed commit, want 7", got.DataRevision)
 	}
-	if !fs.CommitBatch("t", "gauge-1", "stale", 7, st, hist, pending) {
+	if !fs.CommitBatch(context.Background(), "t", "gauge-1", "stale", 7, st, hist, pending) {
 		t.Fatal("matching fence must commit")
 	}
-	if !fs.DedupCheck("t", "stale", "gauge-1") {
+	if !fs.DedupCheck(context.Background(), "t", "stale", "gauge-1") {
 		t.Fatal("successful commit must mark dedup atomically")
 	}
 	if n := fs.historyCount("t", "gauge-1"); n != 1 {
 		t.Fatalf("history=%d after commit, want 1", n)
 	}
-	if pending := fs.PendingEvents("t", "gauge-1"); len(pending) != 1 {
+	if pending := fs.PendingEvents(context.Background(), "t", "gauge-1"); len(pending) != 1 {
 		t.Fatalf("pending=%d after commit, want 1", len(pending))
 	}
 }
@@ -1053,7 +1229,7 @@ func TestRuntimeCrossInstanceConcurrency(t *testing.T) {
 		},
 	}
 	rtA := NewRuntime(fs)
-	if _, err := rtA.RegisterThing("t", c, obj, 1); err != nil {
+	if _, err := rtA.RegisterThing(context.Background(), "t", c, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	rtB := NewRuntime(fs)
@@ -1080,7 +1256,7 @@ func TestRuntimeCrossInstanceConcurrency(t *testing.T) {
 			t.Fatalf("batch %d: %v", i, err)
 		}
 	}
-	st, ok := fs.LoadThing("t", "gauge-1")
+	st, ok := fs.LoadThing(context.Background(), "t", "gauge-1")
 	if !ok {
 		t.Fatal("thing missing")
 	}
@@ -1123,11 +1299,11 @@ func TestRuntimeRetryReplaysFinishedBatch(t *testing.T) {
 		},
 	}
 	rtA := NewRuntime(fs)
-	if _, err := rtA.RegisterThing("t", c, obj, 1); err != nil {
+	if _, err := rtA.RegisterThing(context.Background(), "t", c, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	// Fånga underskrivet tillstånd före batchen.
-	stale, ok := fs.LoadThing("t", "passage-1")
+	stale, ok := fs.LoadThing(context.Background(), "t", "passage-1")
 	if !ok {
 		t.Fatal("thing missing")
 	}
@@ -1142,7 +1318,7 @@ func TestRuntimeRetryReplaysFinishedBatch(t *testing.T) {
 	if _, err := rtA.HandleBatch(context.Background(), "t", "m1", door, base); err != nil {
 		t.Fatalf("winner batch: %v", err)
 	}
-	winner, _ := fs.LoadThing("t", "passage-1")
+	winner, _ := fs.LoadThing(context.Background(), "t", "passage-1")
 
 	// Förloraren med underskrivet staket: replay, ingen omskrivning.
 	rtB := NewRuntime(fs)
@@ -1159,7 +1335,7 @@ func TestRuntimeRetryReplaysFinishedBatch(t *testing.T) {
 	if !found {
 		t.Fatalf("replay events=%+v, want winner's passages=1", out.Events)
 	}
-	after, _ := fs.LoadThing("t", "passage-1")
+	after, _ := fs.LoadThing(context.Background(), "t", "passage-1")
 	if after.DataRevision != winner.DataRevision {
 		t.Fatalf("dataRev=%d, want %d (replay must not rewrite state)", after.DataRevision, winner.DataRevision)
 	}
@@ -1215,13 +1391,13 @@ func TestRuntimeRelationsMoveDelete(t *testing.T) {
 			Properties: map[string]things.Property{},
 		}
 	}
-	if _, err := rt.RegisterThing("t", c, mkBuilding("building-a"), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkBuilding("building-a"), 1); err != nil {
 		t.Fatalf("register building-a: %v", err)
 	}
-	if _, err := rt.RegisterThing("t", c, mkBuilding("building-b"), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkBuilding("building-b"), 1); err != nil {
 		t.Fatalf("register building-b: %v", err)
 	}
-	if _, err := rt.RegisterThing("t", c, mkRoom("room-a", "building-a"), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkRoom("room-a", "building-a"), 1); err != nil {
 		t.Fatalf("register room-a: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -1233,32 +1409,32 @@ func TestRuntimeRelationsMoveDelete(t *testing.T) {
 	if _, err := rt.HandleBatch(context.Background(), "t", "m1", []things.Observation{obs}, base); err != nil {
 		t.Fatalf("batch: %v", err)
 	}
-	if err := rt.MoveThing("t", "room-a", "building-b"); err != nil {
+	if err := rt.MoveThing(context.Background(), "t", "room-a", "building-b"); err != nil {
 		t.Fatalf("move: %v", err)
 	}
-	if parent, _ := fs.ParentOf("t", "room-a"); parent != "building-b" {
+	if parent, _ := fs.ParentOf(context.Background(), "t", "room-a"); parent != "building-b" {
 		t.Fatalf("parent=%q, want building-b", parent)
 	}
-	st, _ := fs.LoadThing("t", "room-a")
+	st, _ := fs.LoadThing(context.Background(), "t", "room-a")
 	if got := *st.Current["temperature.window"].Value; got != 21 {
 		t.Fatalf("move must preserve state, current=%v", got)
 	}
 	if n := fs.historyCount("t", "room-a"); n != 1 {
 		t.Fatalf("move must preserve history, history=%d", n)
 	}
-	if err := rt.DeleteThing("t", "building-b"); !errors.Is(err, things.ErrConflict) {
+	if err := rt.DeleteThing(context.Background(), "t", "building-b"); !errors.Is(err, things.ErrConflict) {
 		t.Fatalf("delete with children must conflict, got %v", err)
 	}
-	if err := rt.DeleteThing("t", "room-a"); err != nil {
+	if err := rt.DeleteThing(context.Background(), "t", "room-a"); err != nil {
 		t.Fatalf("delete leaf: %v", err)
 	}
-	if _, ok := fs.LoadThing("t", "room-a"); ok {
+	if _, ok := fs.LoadThing(context.Background(), "t", "room-a"); ok {
 		t.Fatal("thing state must be gone after delete")
 	}
 	if n := fs.historyCount("t", "room-a"); n != 1 {
 		t.Fatalf("history must survive delete, history=%d", n)
 	}
-	if err := rt.DeleteThing("t", "building-b"); err != nil {
+	if err := rt.DeleteThing(context.Background(), "t", "building-b"); err != nil {
 		t.Fatalf("delete after detach: %v", err)
 	}
 }
@@ -1272,10 +1448,10 @@ func TestRuntimeTenantIsolation(t *testing.T) {
 	objA.Tenant = "a"
 	objB := rtBinObject()
 	objB.Tenant = "b"
-	if _, err := rt.RegisterThing("a", cat, objA, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "a", cat, objA, 1); err != nil {
 		t.Fatalf("register a: %v", err)
 	}
-	if _, err := rt.RegisterThing("b", cat, objB, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "b", cat, objB, 1); err != nil {
 		t.Fatalf("register b: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -1347,7 +1523,7 @@ func TestRuntimeDrainPopulatesThingType(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -1392,7 +1568,7 @@ func TestRuntimeDedupNotMarkedOnEvaluateError(t *testing.T) {
 			{DeviceID: "d", Object: rtDistURN, Resource: "5700", Input: "distance"},
 		},
 	}
-	if _, err := rt.RegisterThing("t", c2, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c2, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -1400,7 +1576,7 @@ func TestRuntimeDedupNotMarkedOnEvaluateError(t *testing.T) {
 	if err == nil {
 		t.Fatal("bogus operator must fail")
 	}
-	if fs.DedupCheck("t", "m-err", "g1") {
+	if fs.DedupCheck(context.Background(), "t", "m-err", "g1") {
 		t.Fatal("dedup must not be marked after evaluate failure (atomicity)")
 	}
 	if n := fs.historyCount("t", "g1"); n != 0 {
@@ -1413,7 +1589,7 @@ func TestRuntimeRejectsEmptyMessageID(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -1425,7 +1601,7 @@ func TestRuntimeRejectsEmptyMessageID(t *testing.T) {
 	if n := fs.historyCount("t", "bin-42"); n != 0 {
 		t.Fatalf("history=%d after rejected batch, want 0", n)
 	}
-	if pending := fs.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	if pending := fs.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("pending=%d after rejected batch, want 0", len(pending))
 	}
 }
@@ -1435,33 +1611,33 @@ func TestRuntimeRevisionIncrements(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	st, _ := fs.LoadThing("t", "bin-42")
+	st, _ := fs.LoadThing(context.Background(), "t", "bin-42")
 	if st.Revision != 1 {
 		t.Fatalf("rev=%d, want 1", st.Revision)
 	}
 	obj := rtBinObject()
 	obj.ParamOverrides = map[string]float64{"sensorToBottom": 1.50}
-	if _, err := rt.RegisterThing("t", cat, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 1); err != nil {
 		t.Fatalf("update with current rev: %v", err)
 	}
-	st, _ = fs.LoadThing("t", "bin-42")
+	st, _ = fs.LoadThing(context.Background(), "t", "bin-42")
 	if st.Revision != 2 {
 		t.Fatalf("rev=%d after update, want 2 (increment)", st.Revision)
 	}
-	if _, err := rt.RegisterThing("t", cat, obj, 1); !errors.Is(err, things.ErrConflict) {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 1); !errors.Is(err, things.ErrConflict) {
 		t.Fatalf("stale rev 1 must conflict after increment, got %v", err)
 	}
-	if _, err := rt.RegisterThing("t", cat, obj, 2); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 2); err != nil {
 		t.Fatalf("update with rev 2: %v", err)
 	}
-	st, _ = fs.LoadThing("t", "bin-42")
+	st, _ = fs.LoadThing(context.Background(), "t", "bin-42")
 	if st.Revision != 3 {
 		t.Fatalf("rev=%d, want 3", st.Revision)
 	}
-	if _, err := rt.RegisterThing("t", cat, obj, 0); !errors.Is(err, things.ErrValidation) {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 0); !errors.Is(err, things.ErrValidation) {
 		t.Fatalf("rev 0 must be validation error, got %v", err)
 	}
 }
@@ -1500,29 +1676,29 @@ func TestRuntimeRegisterThingParentValidation(t *testing.T) {
 		return catalog.ObjectSpec{ThingID: id, Tenant: "t", Name: id, Location: rtLoc(), Metadata: rtMeta(), TemplateID: "building", TemplateVersion: "v1", Properties: map[string]things.Property{}}
 	}
 	// Dangling parent ska nekas.
-	if _, err := rt.RegisterThing("t", c, mkRoom("missing"), 1); err == nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkRoom("missing"), 1); err == nil {
 		t.Fatal("dangling parent must be denied")
 	} else if !errors.Is(err, things.ErrNotFound) {
 		t.Fatalf("want not found, got %v", err)
 	}
-	if _, err := rt.RegisterThing("t", c, mkBuilding("b-a"), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkBuilding("b-a"), 1); err != nil {
 		t.Fatalf("register b-a: %v", err)
 	}
-	if _, err := rt.RegisterThing("t", c, mkBuilding("b-b"), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkBuilding("b-b"), 1); err != nil {
 		t.Fatalf("register b-b: %v", err)
 	}
-	if _, err := rt.RegisterThing("t", c, mkRoom("b-a"), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkRoom("b-a"), 1); err != nil {
 		t.Fatalf("register room->b-a: %v", err)
 	}
-	if parent, _ := fs.ParentOf("t", "room-x"); parent != "b-a" {
+	if parent, _ := fs.ParentOf(context.Background(), "t", "room-x"); parent != "b-a" {
 		t.Fatalf("parent=%q, want b-a", parent)
 	}
 	// Borttagen partOf ska koppla loss (lämna ej kvar gammal länk).
-	st, _ := fs.LoadThing("t", "room-x")
-	if _, err := rt.RegisterThing("t", c, mkRoom(""), st.Revision); err != nil {
+	st, _ := fs.LoadThing(context.Background(), "t", "room-x")
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkRoom(""), st.Revision); err != nil {
 		t.Fatalf("remove parent: %v", err)
 	}
-	if _, ok := fs.ParentOf("t", "room-x"); ok {
+	if _, ok := fs.ParentOf(context.Background(), "t", "room-x"); ok {
 		t.Fatal("removed partOf must detach (no stale parent)")
 	}
 }
@@ -1532,7 +1708,7 @@ func TestRuntimeDrainUsesBatchRevision(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -1542,7 +1718,7 @@ func TestRuntimeDrainUsesBatchRevision(t *testing.T) {
 	// Uppdatera config (rev 1 -> 2) före drain.
 	obj := rtBinObject()
 	obj.ParamOverrides = map[string]float64{"sensorToBottom": 1.50}
-	if _, err := rt.RegisterThing("t", cat, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 1); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	pub := &fakePublisher{}
@@ -1630,7 +1806,7 @@ func TestRuntimePartialDrainClearsIncrementally(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -1640,7 +1816,7 @@ func TestRuntimePartialDrainClearsIncrementally(t *testing.T) {
 	if _, err := rt.HandleBatch(context.Background(), "t", "m2", []things.Observation{rtDistObs("milesight:214", 0.40, base.Add(time.Minute))}, base.Add(time.Minute)); err != nil {
 		t.Fatalf("batch m2: %v", err)
 	}
-	if pending := fs.PendingEvents("t", "bin-42"); len(pending) != 6 {
+	if pending := fs.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 6 {
 		t.Fatalf("pending=%d, want 6 (2 batches x 3)", len(pending))
 	}
 	calls := 0
@@ -1650,7 +1826,7 @@ func TestRuntimePartialDrainClearsIncrementally(t *testing.T) {
 		t.Fatal("third group failure must propagate")
 	}
 	// Livscykel + första gruppen (m1) ska vara rensade trots att andra fallerade.
-	remaining := fs.PendingEvents("t", "bin-42")
+	remaining := fs.PendingEvents(context.Background(), "t", "bin-42")
 	if len(remaining) != 3 {
 		t.Fatalf("remaining=%d, want 3 (m2 only, lifecycle+m1 cleared incrementally)", len(remaining))
 	}
@@ -1666,27 +1842,27 @@ func TestRuntimeDeleteClearsOutboxDedup(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	if _, err := rt.HandleBatch(context.Background(), "t", "m1", []things.Observation{rtDistObs("milesight:214", 0.30, base)}, base); err != nil {
 		t.Fatalf("batch: %v", err)
 	}
-	if err := rt.DeleteThing("t", "bin-42"); err != nil {
+	if err := rt.DeleteThing(context.Background(), "t", "bin-42"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if pending := fs.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	if pending := fs.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("pending=%d after delete, want 0 (no orphan)", len(pending))
 	}
-	if fs.DedupCheck("t", "m1", "bin-42") {
+	if fs.DedupCheck(context.Background(), "t", "m1", "bin-42") {
 		t.Fatal("dedup must be forgotten after delete")
 	}
 	if n := fs.historyCount("t", "bin-42"); n != 3 {
 		t.Fatalf("history=%d, want preserved 3", n)
 	}
 	// Nyskapad sak med samma ID ska kunna behandla samma messageID på nytt.
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("recreate: %v", err)
 	}
 	out, err := rt.HandleBatch(context.Background(), "t", "m1", []things.Observation{rtDistObs("milesight:214", 0.30, base)}, base)
@@ -1739,19 +1915,19 @@ func TestRuntimeRegisterCycleDenied(t *testing.T) {
 		}
 		return catalog.ObjectSpec{ThingID: id, Tenant: "t", Name: id, Location: rtLoc(), Metadata: rtMeta(), TemplateID: "node", TemplateVersion: "v1", Properties: map[string]things.Property{}, Relations: rels}
 	}
-	if _, err := rt.RegisterThing("t", c, mk("a", ""), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mk("a", ""), 1); err != nil {
 		t.Fatalf("register a: %v", err)
 	}
-	if _, err := rt.RegisterThing("t", c, mk("b", "a"), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mk("b", "a"), 1); err != nil {
 		t.Fatalf("register b->a: %v", err)
 	}
 	// a->b skulle sluta cykeln a->b->a.
-	st, _ := fs.LoadThing("t", "a")
-	if _, err := rt.RegisterThing("t", c, mk("a", "b"), st.Revision); err == nil {
+	st, _ := fs.LoadThing(context.Background(), "t", "a")
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mk("a", "b"), st.Revision); err == nil {
 		t.Fatal("cycle a->b->a via RegisterThing must be denied")
 	}
 	// Självreferens nekas redan i Compile, men verifiera via MoveThing också.
-	if err := rt.MoveThing("t", "b", "b"); err == nil {
+	if err := rt.MoveThing(context.Background(), "t", "b", "b"); err == nil {
 		t.Fatal("self-move must be denied")
 	}
 }
@@ -1788,7 +1964,7 @@ func TestRuntimeConcurrentRegisterSameThing(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			rt := NewRuntime(fs)
-			_, errs[i] = rt.RegisterThing("t", c, obj, 1)
+			_, errs[i] = rt.RegisterThing(context.Background(), "t", c, obj, 1)
 		}(i)
 	}
 	wg.Wait()
@@ -1805,7 +1981,7 @@ func TestRuntimeConcurrentRegisterSameThing(t *testing.T) {
 	if wins < 1 || wins > 2 {
 		t.Fatalf("wins=%d, want 1 (all raced past Load) or 2 (second became update)", wins)
 	}
-	st, ok := fs.LoadThing("t", "gauge-1")
+	st, ok := fs.LoadThing(context.Background(), "t", "gauge-1")
 	if !ok {
 		t.Fatal("thing missing after concurrent register")
 	}
@@ -1821,13 +1997,13 @@ func TestRuntimeRestartDrainsDeletedLifecycle(t *testing.T) {
 	fs := newFakeStore()
 	cat := rtBinCatalog(t)
 	rtA := NewRuntime(fs)
-	if _, err := rtA.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rtA.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := rtA.DeleteThing("t", "bin-42"); err != nil {
+	if err := rtA.DeleteThing(context.Background(), "t", "bin-42"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	if _, ok := fs.LoadThing("t", "bin-42"); ok {
+	if _, ok := fs.LoadThing(context.Background(), "t", "bin-42"); ok {
 		t.Fatal("thing must be gone")
 	}
 
@@ -1855,5 +2031,197 @@ func TestRuntimeRestartDrainsDeletedLifecycle(t *testing.T) {
 	}
 	if len(pub2.rawByTopic(pkgtypes.TopicLifecycleChanges)) != 0 {
 		t.Fatal("redrain must deliver nothing")
+	}
+}
+
+// TV-03: cykel nekas atomärt — blob, revision, länkar och outbox orörda
+// trots att felet upptäcks först i lagringssteget (efter planering).
+func TestRuntimeCycleDeniedAtomically(t *testing.T) {
+	fs := newFakeStore()
+	rt := NewRuntime(fs)
+	c := catalog.New()
+	tmpl := catalog.TemplateSpec{Template: things.Template{
+		ID: "node", Version: "v1", Category: "node",
+		Relations: []things.RelationSpec{
+			{Name: "partOf", AllowedTargets: []string{"node"}, Min: 0, Max: 1},
+		},
+	}}
+	if err := c.PutTemplate(tmpl); err != nil {
+		t.Fatalf("put node: %v", err)
+	}
+	mkNode := func(id, parent string) catalog.ObjectSpec {
+		obj := catalog.ObjectSpec{
+			ThingID: id, Tenant: "t", Name: id,
+			Location: rtLoc(), Metadata: rtMeta(),
+			TemplateID: "node", TemplateVersion: "v1",
+			Properties: map[string]things.Property{},
+		}
+		if parent != "" {
+			obj.Relations = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "node"}}
+		}
+		return obj
+	}
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkNode("node-a", ""), 1); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkNode("node-b", "node-a"), 1); err != nil {
+		t.Fatalf("register b: %v", err)
+	}
+	rawBefore := len(fs.PendingRawEvents(context.Background(), "t", "node-a")) + len(fs.PendingRawEvents(context.Background(), "t", "node-b"))
+
+	// node-a under node-b skulle sluta cykeln a->b->a.
+	if err := func() error {
+		_, err := rt.RegisterThing(context.Background(), "t", c, mkNode("node-a", "node-b"), 1)
+		return err
+	}(); err == nil {
+		t.Fatal("cycle must be denied")
+	}
+	st, ok := fs.LoadThing(context.Background(), "t", "node-a")
+	if !ok {
+		t.Fatal("blob must survive denied cycle")
+	}
+	if st.Revision != 1 {
+		t.Fatalf("revision=%d, want unchanged 1", st.Revision)
+	}
+	cfg, err := decodeConfig(st.ConfigJSON)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(cfg.Relations) != 0 {
+		t.Fatalf("config must not contain partOf after denied cycle: %+v", cfg.Relations)
+	}
+	if _, ok := fs.ParentOf(context.Background(), "t", "node-a"); ok {
+		t.Fatal("no parent link may exist after denied cycle")
+	}
+	if parent, _ := fs.ParentOf(context.Background(), "t", "node-b"); parent != "node-a" {
+		t.Fatalf("existing hierarchy must stand, parent=%q", parent)
+	}
+	rawAfter := len(fs.PendingRawEvents(context.Background(), "t", "node-a")) + len(fs.PendingRawEvents(context.Background(), "t", "node-b"))
+	if rawAfter != rawBefore {
+		t.Fatalf("denied cycle must queue no events, before=%d after=%d", rawBefore, rawAfter)
+	}
+}
+
+// TV-03: blockerad delete (barn finns) lämnar blob, länkar och events
+// orörda — inklusive frånvaron av deleted-händelse.
+func TestRuntimeDeleteBlockedLeavesEverything(t *testing.T) {
+	fs := newFakeStore()
+	rt := NewRuntime(fs)
+	c := catalog.New()
+	tmpl := catalog.TemplateSpec{Template: things.Template{
+		ID: "node", Version: "v1", Category: "node",
+		Relations: []things.RelationSpec{
+			{Name: "partOf", AllowedTargets: []string{"node"}, Min: 0, Max: 1},
+		},
+	}}
+	if err := c.PutTemplate(tmpl); err != nil {
+		t.Fatalf("put node: %v", err)
+	}
+	mkNode := func(id, parent string) catalog.ObjectSpec {
+		obj := catalog.ObjectSpec{
+			ThingID: id, Tenant: "t", Name: id,
+			Location: rtLoc(), Metadata: rtMeta(),
+			TemplateID: "node", TemplateVersion: "v1",
+			Properties: map[string]things.Property{},
+		}
+		if parent != "" {
+			obj.Relations = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "node"}}
+		}
+		return obj
+	}
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkNode("node-a", ""), 1); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	if _, err := rt.RegisterThing(context.Background(), "t", c, mkNode("node-b", "node-a"), 1); err != nil {
+		t.Fatalf("register b: %v", err)
+	}
+	rawBefore := len(fs.PendingRawEvents(context.Background(), "t", "node-a"))
+
+	if err := rt.DeleteThing(context.Background(), "t", "node-a"); !errors.Is(err, things.ErrConflict) {
+		t.Fatalf("delete with children must conflict, got %v", err)
+	}
+	if _, ok := fs.LoadThing(context.Background(), "t", "node-a"); !ok {
+		t.Fatal("blob must survive blocked delete")
+	}
+	if parent, _ := fs.ParentOf(context.Background(), "t", "node-b"); parent != "node-a" {
+		t.Fatalf("child link must survive blocked delete, parent=%q", parent)
+	}
+	if got := len(fs.PendingRawEvents(context.Background(), "t", "node-a")); got != rawBefore {
+		t.Fatalf("blocked delete must queue no events, before=%d after=%d", rawBefore, got)
+	}
+}
+
+// TV-03: två instanser mot samma lager — exakt en vinner vid samtidig
+// konfliktande skrivning; sluttilståndet är konsistent (blobrevision,
+// config och länkar hör ihop).
+func TestRuntimeConcurrentConflictingWrites(t *testing.T) {
+	fs := newFakeStore()
+	rtA := NewRuntime(fs)
+	rtB := NewRuntime(fs)
+	c := catalog.New()
+	tmpl := catalog.TemplateSpec{Template: things.Template{
+		ID: "node", Version: "v1", Category: "node",
+		Relations: []things.RelationSpec{
+			{Name: "partOf", AllowedTargets: []string{"node"}, Min: 0, Max: 1},
+		},
+	}}
+	if err := c.PutTemplate(tmpl); err != nil {
+		t.Fatalf("put node: %v", err)
+	}
+	mkNode := func(id, parent string) catalog.ObjectSpec {
+		obj := catalog.ObjectSpec{
+			ThingID: id, Tenant: "t", Name: id,
+			Location: rtLoc(), Metadata: rtMeta(),
+			TemplateID: "node", TemplateVersion: "v1",
+			Properties: map[string]things.Property{},
+		}
+		if parent != "" {
+			obj.Relations = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "node"}}
+		}
+		return obj
+	}
+	if _, err := rtA.RegisterThing(context.Background(), "t", c, mkNode("node-a", ""), 1); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+	if _, err := rtA.RegisterThing(context.Background(), "t", c, mkNode("node-b", ""), 1); err != nil {
+		t.Fatalf("register b: %v", err)
+	}
+	// Båda uppdaterar node-b med olika namn vid samma revision — exakt en
+	// vinner, den andra får ErrConflict.
+	mkUpdate := func(name string) catalog.ObjectSpec {
+		obj := mkNode("node-b", "")
+		obj.Name = name
+		return obj
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i, rt := range []*Runtime{rtA, rtB} {
+		wg.Add(1)
+		go func(i int, rt *Runtime) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = rt.RegisterThing(context.Background(), "t", c, mkUpdate([]string{"ett", "tva"}[i]), 1)
+		}(i, rt)
+	}
+	close(start)
+	wg.Wait()
+	wins := 0
+	for _, err := range errs {
+		if err == nil {
+			wins++
+		} else if !errors.Is(err, things.ErrConflict) {
+			t.Fatalf("loser must conflict, got %v", err)
+		}
+	}
+	if wins != 1 {
+		t.Fatalf("exactly one writer must win, errs=%v", errs)
+	}
+	st, ok := fs.LoadThing(context.Background(), "t", "node-b")
+	if !ok {
+		t.Fatal("blob must exist after race")
+	}
+	if st.Revision != 2 {
+		t.Fatalf("revision=%d, want 2 (single winner)", st.Revision)
 	}
 }

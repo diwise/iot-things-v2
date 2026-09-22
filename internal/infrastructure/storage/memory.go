@@ -482,17 +482,18 @@ func (s *MemRelationStore) RemoveOutgoing(tenant, fromID string) int {
 // OutboxEvent är en minimal utbox-händelse. Payload bär den fullständiga
 // händelsen (t.ex. serialiserad FlowEvent) så att omstart kan återpublicera
 // utan omberäkning; ID är det stabila deduplicerings-ID:t.
+// TraceContext bär transportens W3C trace-context separat från
+// domänpayloaden (TV-07) så att omstart kan återställa/länka kedjan.
 type OutboxEvent struct {
-	ID         string
-	Tenant     string
-	ThingID    string
-	PropertyID string
-	ObservedAt time.Time
-	Revision   int64
-	Payload    []byte
-	// Topic routes non-values entries (lifecycle, relations); empty
-	// means property values (pre-topic rows).
-	Topic string
+	ID           string
+	Tenant       string
+	ThingID      string
+	PropertyID   string
+	ObservedAt   time.Time
+	Revision     int64
+	Payload      []byte
+	Topic        string
+	TraceContext map[string]string
 }
 
 // MemOutbox är ett minnesbaserat utbox-lager med idempotent append på ID.
@@ -512,7 +513,8 @@ func NewMemOutbox() *MemOutbox {
 }
 
 // Append lägger till en händelse. Returnerar false vid dubblett-ID
-// (hoppas över) och true när händelsen lagrades. Payload kopieras.
+// (hoppas över) och true när händelsen lagrades. Payload och
+// TraceContext kopieras (TV-07).
 func (o *MemOutbox) Append(ev OutboxEvent) bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -526,6 +528,13 @@ func (o *MemOutbox) Append(ev OutboxEvent) bool {
 		o.seen[ev.ID] = struct{}{}
 	}
 	ev.Payload = append([]byte(nil), ev.Payload...)
+	if ev.TraceContext != nil {
+		cp := make(map[string]string, len(ev.TraceContext))
+		for k, v := range ev.TraceContext {
+			cp[k] = v
+		}
+		ev.TraceContext = cp
+	}
 	o.events = append(o.events, ev)
 	return true
 }
@@ -554,6 +563,13 @@ func (o *MemOutbox) PeekFor(tenant, thingID string) []OutboxEvent {
 		}
 		cp := ev
 		cp.Payload = append([]byte(nil), ev.Payload...)
+		if ev.TraceContext != nil {
+			tc := make(map[string]string, len(ev.TraceContext))
+			for k, v := range ev.TraceContext {
+				tc[k] = v
+			}
+			cp.TraceContext = tc
+		}
 		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -687,9 +703,11 @@ func (o *MemOutbox) Len() int {
 	return len(o.events)
 }
 
-// Forget tar bort alla väntande händelser för tenant+thing samt deras sedda
-// ID:n (för borttagning av sak: historik bevaras annorstädes, men föräldralös
-// outbox får inte bli kvar och blockera nyskapad sak med samma ID).
+// Forget tar bort väntande värdesevent för tenant+thing samt deras sedda
+// ID:n (för borttagning av sak: historik bevaras annorstädes, och
+// värderader utan blob skulle aldrig dräneras). Livscykel- och
+// relationsrader behålls så att konsumenter ser full livscykel även efter
+// omstart (TV-03; samma semantik som postgres deleteThingTransient).
 func (o *MemOutbox) Forget(tenant, thingID string) {
 	if tenant == "" || thingID == "" {
 		return
@@ -700,7 +718,8 @@ func (o *MemOutbox) Forget(tenant, thingID string) {
 	dropped := make(map[string]struct{})
 	kept := o.events[:0]
 	for _, ev := range o.events {
-		if ev.Tenant == tenant && ev.ThingID == thingID {
+		if ev.Tenant == tenant && ev.ThingID == thingID &&
+			(ev.Topic == "" || ev.Topic == pkgtypes.TopicThingValues) {
 			if ev.ID != "" {
 				dropped[ev.ID] = struct{}{}
 			}

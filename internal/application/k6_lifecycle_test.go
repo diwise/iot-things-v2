@@ -75,7 +75,7 @@ func TestRegisterPrunesRemovedPropertyCurrent(t *testing.T) {
 			{DeviceID: "dev2", Object: rtDistURN, Resource: "5700", Input: "extra"},
 		},
 	}
-	if _, err := rt.RegisterThing("t", cat, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -84,7 +84,7 @@ func TestRegisterPrunesRemovedPropertyCurrent(t *testing.T) {
 	}, base); err != nil {
 		t.Fatalf("batch: %v", err)
 	}
-	st, ok := fs.LoadThing("t", "prune-1")
+	st, ok := fs.LoadThing(context.Background(), "t", "prune-1")
 	if !ok {
 		t.Fatal("thing missing")
 	}
@@ -94,10 +94,10 @@ func TestRegisterPrunesRemovedPropertyCurrent(t *testing.T) {
 
 	obj.Properties = map[string]things.Property{"distance": {}, "level": {}}
 	obj.Bindings = obj.Bindings[:1]
-	if _, err := rt.RegisterThing("t", cat, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 1); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	st, _ = fs.LoadThing("t", "prune-1")
+	st, _ = fs.LoadThing(context.Background(), "t", "prune-1")
 	if _, ok := st.Current["extra"]; ok {
 		t.Fatalf("current for removed property must be pruned: %+v", st.Current)
 	}
@@ -121,17 +121,17 @@ func TestManagePurgeThingHistory(t *testing.T) {
 		return HistoryWrite{PropertyID: prop, Value: &v, Quality: "ok",
 			ObservedAt: at, ReceivedAt: at, Source: "s", MessageID: "m-" + prop}
 	}
-	fs.AppendHistory("t", "bin-1", mkHist("a", at))
-	fs.AppendHistory("t", "bin-1", mkHist("b", at.Add(time.Minute)))
-	fs.AppendHistory("t", "bin-2", mkHist("a", at))
+	fs.AppendHistory(context.Background(), "t", "bin-1", mkHist("a", at))
+	fs.AppendHistory(context.Background(), "t", "bin-1", mkHist("b", at.Add(time.Minute)))
+	fs.AppendHistory(context.Background(), "t", "bin-2", mkHist("a", at))
 
 	if n, err := mgr.PurgeThingHistory(ctx, "t", "bin-1"); err != nil || n != 2 {
 		t.Fatalf("purged=%d err=%v, want 2", n, err)
 	}
-	if got := fs.History("t", "bin-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
+	if got := fs.History(context.Background(), "t", "bin-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("bin-1 history must be gone: %+v", got)
 	}
-	if got := fs.History("t", "bin-2", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
+	if got := fs.History(context.Background(), "t", "bin-2", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("bin-2 history must survive: %+v", got)
 	}
 	if n, err := mgr.PurgeThingHistory(ctx, "t", "unknown"); err != nil || n != 0 {
@@ -160,7 +160,7 @@ func TestRuntimeDuplicateAfterPurgeWithoutRecompute(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)

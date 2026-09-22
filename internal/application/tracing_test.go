@@ -9,7 +9,9 @@ import (
 	"github.com/diwise/iot-things-v2/internal/application/things"
 	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 	"github.com/diwise/messaging-golang/pkg/messaging"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -57,7 +59,7 @@ func TestTracingBatchChain(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -112,7 +114,7 @@ func TestTracingDrainError(t *testing.T) {
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
 	cat := rtBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, rtBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -138,4 +140,65 @@ func spanNames(spans []sdktrace.ReadOnlySpan) []string {
 		out = append(out, s.Name())
 	}
 	return out
+}
+
+// TV-07: outbox bevarar trace-context över omstart — dränering efter omstart
+// länkar till ursprungsobservationen, inte bara uppstartscontexten.
+func TestTracingOutboxRestartLinks(t *testing.T) {
+	rec, restore := withSpanRecorder(t)
+	defer restore()
+
+	// W3C-propagator för Inject/Extract i test (produktion sätter den via chassis).
+	prevProp := otel.GetTextMapPropagator()
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+	defer otel.SetTextMapPropagator(prevProp)
+
+	fs := newFakeStore()
+	rtA := NewRuntime(fs)
+	cat := rtBinCatalog(t)
+	if _, err := rtA.RegisterThing(context.Background(), "t", cat, rtBinObject(), 1); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// Ursprungs-span med eget trace-ID.
+	origCtx, origSpan := runtimeTracer.Start(context.Background(), "origin")
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	if _, err := rtA.HandleBatch(origCtx, "t", "m-restart-trace", []things.Observation{rtDistObs("milesight:214", 0.30, base)}, base); err != nil {
+		origSpan.End()
+		t.Fatalf("batch: %v", err)
+	}
+	origSC := origSpan.SpanContext()
+	origSpan.End()
+	if !origSC.IsValid() {
+		t.Fatal("origin span context invalid")
+	}
+
+	// Omstart: nytt Runtime över samma store, ny context (uppstart).
+	rtB := NewRuntime(fs)
+	pub := &fakePublisher{}
+	drainCtx, drainSpan := runtimeTracer.Start(context.Background(), "restart")
+	_, err := rtB.DrainAll(drainCtx, pub, base)
+	drainSpan.End()
+	if err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	if pub.count() == 0 {
+		t.Fatal("drain must publish values after restart")
+	}
+
+	// publish-values-spans ska länka till ursprunget, inte bara drain-contexten.
+	found := false
+	for _, s := range rec.Ended() {
+		if s.Name() != "publish-values" {
+			continue
+		}
+		for _, l := range s.Links() {
+			if l.SpanContext.TraceID() == origSC.TraceID() {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no publish-values link to origin trace %s (spans=%v)", origSC.TraceID(), spanNames(rec.Ended()))
+	}
 }

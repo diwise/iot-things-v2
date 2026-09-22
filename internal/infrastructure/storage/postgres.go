@@ -5,6 +5,7 @@ import (
 	"embed"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -102,31 +103,55 @@ func (s *PgStore) migrate(ctx context.Context) error {
 }
 
 func (s *PgStore) ctx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), queryTimeout)
+	return s.ctxWith(context.Background())
 }
 
-func (s *PgStore) LoadThing(tenant, thingID string) (application.StoredThingState, bool) {
-	ctx, cancel := s.ctx()
+// ctxWith härleder query-timeout från anroparens context (TV-07): tracing
+// och cancellation propagerar genom lagringsgränssnitten i stället för att
+// kapas av context.Background().
+func (s *PgStore) ctxWith(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, queryTimeout)
+}
+
+func (s *PgStore) LoadThing(ctx context.Context, tenant, thingID string) (application.StoredThingState, bool) {
+	st, err := s.LoadThingErr(ctx, tenant, thingID)
+	if err != nil {
+		return application.StoredThingState{}, false
+	}
+	return st, true
+}
+
+// LoadThingErr är felklassificerande variant av LoadThing (TV-05): saknad
+// rad ger things.ErrNotFound, SQL-fel och korrupt blob ger andra fel så att
+// anroparen kan skilja saknat mål (target:null) från trasig lagring.
+func (s *PgStore) LoadThingErr(ctx context.Context, tenant, thingID string) (application.StoredThingState, error) {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	var dataRev int64
 	var raw []byte
 	err := s.pool.QueryRow(ctx,
 		`SELECT revision, data FROM things_v2 WHERE tenant=$1 AND id=$2`, tenant, thingID).Scan(&dataRev, &raw)
 	if err != nil {
-		return application.StoredThingState{}, false
+		if errors.Is(err, pgx.ErrNoRows) {
+			return application.StoredThingState{}, fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
+		}
+		return application.StoredThingState{}, err
 	}
 	var st application.StoredThingState
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return application.StoredThingState{}, false
+		return application.StoredThingState{}, fmt.Errorf("thing %q has undecodable data: %w", thingID, err)
 	}
 	// Kolumnen är skrivstaketet (auktoritativ); konfigurationsrevisionen
 	// kommer ur JSON-blobben (config_revision-kolumnen är en frågebar kopia).
 	st.DataRevision = dataRev
-	return st, true
+	return st, nil
 }
 
-func (s *PgStore) InsertThing(tenant, thingID string, st application.StoredThingState) bool {
-	ctx, cancel := s.ctx()
+func (s *PgStore) InsertThing(ctx context.Context, tenant, thingID string, st application.StoredThingState) bool {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	raw, _ := json.Marshal(st)
 	tag, err := s.pool.Exec(ctx,
@@ -135,8 +160,8 @@ func (s *PgStore) InsertThing(tenant, thingID string, st application.StoredThing
 	return err == nil && tag.RowsAffected() == 1
 }
 
-func (s *PgStore) SaveThingCAS(tenant, thingID string, expected int64, st application.StoredThingState) bool {
-	ctx, cancel := s.ctx()
+func (s *PgStore) SaveThingCAS(ctx context.Context, tenant, thingID string, expected int64, st application.StoredThingState) bool {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	raw, _ := json.Marshal(st)
 	tag, err := s.pool.Exec(ctx,
@@ -145,8 +170,8 @@ func (s *PgStore) SaveThingCAS(tenant, thingID string, expected int64, st applic
 	return err == nil && tag.RowsAffected() == 1
 }
 
-func (s *PgStore) DeleteThingState(tenant, thingID string) error {
-	ctx, cancel := s.ctx()
+func (s *PgStore) DeleteThingState(ctx context.Context, tenant, thingID string) error {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -175,11 +200,42 @@ func seenKey(id string) string {
 	return "s2:" + id
 }
 
+// encodeTrace serialiserar W3C trace-carrier för outbox (TV-07, separat
+// från domänpayload). Tom map ger ” (NULL-tolerant kolumn med default ”).
+func encodeTrace(tc map[string]string) string {
+	if len(tc) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(tc)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// decodeTrace återställer lagrad trace-carrier. Tom/ogiltig ger nil
+// (spårlös händelse, ingen länk).
+func decodeTrace(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	var tc map[string]string
+	if err := json.Unmarshal([]byte(s), &tc); err != nil || len(tc) == 0 {
+		return nil
+	}
+	return tc
+}
+
 // deleteThingTransient rensar väntande outbox samt sedda ID:n och dedup för
 // saken. Delad av DeleteThingState (historik bevaras, B6) och
 // PurgeThingHistory (historik raderas, K6 GDPR).
 func (s *PgStore) deleteThingTransient(ctx context.Context, tx pgx.Tx, tenant, thingID string) error {
-	if _, err := tx.Exec(ctx, `DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2`, tenant, thingID); err != nil {
+	// Endast värderader (inkl. legacy-rader utan topic): livscykel- och
+	// relationsrader måste överleva delete så att konsumenter ser full
+	// livscykel även efter omstart (TV-03; samma semantik som fakeStore
+	// och Minnes-ForgetValues).
+	if _, err := tx.Exec(ctx, `DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 AND (topic=$3 OR topic='')`,
+		tenant, thingID, pkgtypes.TopicThingValues); err != nil {
 		return err
 	}
 	// Stabila outbox-ID:n har formen v1/<tenant>/<thing>/<msg>/<prop> (se
@@ -220,8 +276,8 @@ func (s *PgStore) deleteThingTransient(ctx context.Context, tx pgx.Tx, tenant, t
 // Sakblobb och katalog påverkas inte: fullständig radering = DELETE sak
 // + DELETE historik. Punkt-i-tid: samtidiga batchar kan tillföra nyare
 // rader efter raderingen.
-func (s *PgStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
-	ctx, cancel := s.ctx()
+func (s *PgStore) PurgeThingHistory(ctx context.Context, tenant, thingID string) (int64, error) {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -250,8 +306,8 @@ func (s *PgStore) PurgeThingHistory(tenant, thingID string) (int64, error) {
 // livscykel-/relationshändelser påverkas inte. På Timescale-hypertabell
 // gäller chunk-exkludering; på vanliga tabeller används indexet från
 // migration 006. Returnerar antal raderade rader.
-func (s *PgStore) PurgeHistoryOlderThan(cutoff time.Time) (int64, error) {
-	ctx, cancel := s.ctx()
+func (s *PgStore) PurgeHistoryOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	tag, err := s.pool.Exec(ctx, `DELETE FROM history_v2 WHERE observed_at < $1`, cutoff)
 	if err != nil {
@@ -260,8 +316,8 @@ func (s *PgStore) PurgeHistoryOlderThan(cutoff time.Time) (int64, error) {
 	return tag.RowsAffected(), nil
 }
 
-func (s *PgStore) ListThingIDs(tenant string) []string {
-	ctx, cancel := s.ctx()
+func (s *PgStore) ListThingIDs(ctx context.Context, tenant string) []string {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx, `SELECT id FROM things_v2 WHERE tenant=$1 ORDER BY id`, tenant)
 	if err != nil {
@@ -279,8 +335,8 @@ func (s *PgStore) ListThingIDs(tenant string) []string {
 	return out
 }
 
-func (s *PgStore) ListTenants() []string {
-	ctx, cancel := s.ctx()
+func (s *PgStore) ListTenants(ctx context.Context) []string {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx, `SELECT DISTINCT tenant FROM things_v2 ORDER BY tenant`)
 	if err != nil {
@@ -298,8 +354,8 @@ func (s *PgStore) ListTenants() []string {
 	return out
 }
 
-func (s *PgStore) AppendHistory(tenant, thingID string, h application.HistoryWrite) bool {
-	ctx, cancel := s.ctx()
+func (s *PgStore) AppendHistory(ctx context.Context, tenant, thingID string, h application.HistoryWrite) bool {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	// Normalisera till mikrosekund (samma som minnet) så att dedupnyckeln
 	// blir identisk mellan backendarna; databasen avrundar ändå.
@@ -312,8 +368,8 @@ func (s *PgStore) AppendHistory(tenant, thingID string, h application.HistoryWri
 	return err == nil && tag.RowsAffected() == 1
 }
 
-func (s *PgStore) History(tenant, thingID, prop string, from, to time.Time, limit, offset int) []application.HistoryWrite {
-	ctx, cancel := s.ctx()
+func (s *PgStore) History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) []application.HistoryWrite {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	query := `SELECT property_id, observed_at, received_at, value, quality, source, message_id, late
 		FROM history_v2 WHERE tenant=$1 AND thing_id=$2`
@@ -355,11 +411,11 @@ func (s *PgStore) History(tenant, thingID, prop string, from, to time.Time, limi
 	return out
 }
 
-func (s *PgStore) PendingEvents(tenant, thingID string) []application.FlowEvent {
-	ctx, cancel := s.ctx()
+func (s *PgStore) PendingEvents(ctx context.Context, tenant, thingID string) []application.FlowEvent {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		`SELECT payload FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 AND topic=$3 ORDER BY observed_at, property_id, id`,
+		`SELECT payload, trace_context FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 AND topic=$3 ORDER BY observed_at, property_id, id`,
 		tenant, thingID, pkgtypes.TopicThingValues)
 	if err != nil {
 		return nil
@@ -368,20 +424,22 @@ func (s *PgStore) PendingEvents(tenant, thingID string) []application.FlowEvent 
 	var out []application.FlowEvent
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var tcStr string
+		if err := rows.Scan(&raw, &tcStr); err != nil {
 			return out
 		}
 		var fe application.FlowEvent
 		if err := json.Unmarshal(raw, &fe); err != nil {
 			continue
 		}
+		fe.TraceContext = decodeTrace(tcStr)
 		out = append(out, fe)
 	}
 	return out
 }
 
-func (s *PgStore) StorePending(tenant, thingID string, events []application.FlowEvent) {
-	ctx, cancel := s.ctx()
+func (s *PgStore) StorePending(ctx context.Context, tenant, thingID string, events []application.FlowEvent) {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	for _, e := range events {
 		raw, _ := json.Marshal(e)
@@ -395,17 +453,17 @@ func (s *PgStore) StorePending(tenant, thingID string, events []application.Flow
 			WITH s AS (
 				INSERT INTO outbox_seen_v2(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id
 			)
-			INSERT INTO outbox_v2(id, tenant, thing_id, property_id, observed_at, revision, payload, topic)
-			SELECT $2,$3,$4,$5,$6,$7,$8,$9 WHERE EXISTS (SELECT 1 FROM s)`,
-			seenKey(id), id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, raw, pkgtypes.TopicThingValues)
+			INSERT INTO outbox_v2(id, tenant, thing_id, property_id, observed_at, revision, payload, topic, trace_context)
+			SELECT $2,$3,$4,$5,$6,$7,$8,$9,$10 WHERE EXISTS (SELECT 1 FROM s)`,
+			seenKey(id), id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, raw, pkgtypes.TopicThingValues, encodeTrace(e.TraceContext))
 	}
 }
 
-func (s *PgStore) ClearPendingIDs(tenant, thingID string, ids []string) {
+func (s *PgStore) ClearPendingIDs(ctx context.Context, tenant, thingID string, ids []string) {
 	if len(ids) == 0 {
 		return
 	}
-	ctx, cancel := s.ctx()
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	_, _ = s.pool.Exec(ctx,
 		`DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 AND id = ANY($3)`,
@@ -414,8 +472,8 @@ func (s *PgStore) ClearPendingIDs(tenant, thingID string, ids []string) {
 
 // StoreRawEvents persists lifecycle/relation events with ID dedup (same
 // seen-table as values; IDs are namespaced per topic).
-func (s *PgStore) StoreRawEvents(tenant, thingID string, events []application.RawOutboxEvent) {
-	ctx, cancel := s.ctx()
+func (s *PgStore) StoreRawEvents(ctx context.Context, tenant, thingID string, events []application.RawOutboxEvent) {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	for _, e := range events {
 		if e.ID == "" {
@@ -425,18 +483,18 @@ func (s *PgStore) StoreRawEvents(tenant, thingID string, events []application.Ra
 			WITH s AS (
 				INSERT INTO outbox_seen_v2(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id
 			)
-			INSERT INTO outbox_v2(id, tenant, thing_id, observed_at, revision, payload, topic)
-			SELECT $2,$3,$4,$5,$6,$7,$8 WHERE EXISTS (SELECT 1 FROM s)`,
-			seenKey(e.ID), e.ID, tenant, thingID, e.ObservedAt, e.Revision, e.Payload, e.Topic)
+			INSERT INTO outbox_v2(id, tenant, thing_id, observed_at, revision, payload, topic, trace_context)
+			SELECT $2,$3,$4,$5,$6,$7,$8,$9 WHERE EXISTS (SELECT 1 FROM s)`,
+			seenKey(e.ID), e.ID, tenant, thingID, e.ObservedAt, e.Revision, e.Payload, e.Topic, encodeTrace(e.TraceContext))
 	}
 }
 
 // PendingRawEvents returns pending non-values outbox entries with topics.
-func (s *PgStore) PendingRawEvents(tenant, thingID string) []application.RawOutboxEvent {
-	ctx, cancel := s.ctx()
+func (s *PgStore) PendingRawEvents(ctx context.Context, tenant, thingID string) []application.RawOutboxEvent {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, topic, payload, observed_at, revision FROM outbox_v2
+		`SELECT id, topic, payload, observed_at, revision, trace_context FROM outbox_v2
 		 WHERE tenant=$1 AND thing_id=$2 AND topic <> $3 ORDER BY observed_at, id`,
 		tenant, thingID, pkgtypes.TopicThingValues)
 	if err != nil {
@@ -446,20 +504,22 @@ func (s *PgStore) PendingRawEvents(tenant, thingID string) []application.RawOutb
 	var out []application.RawOutboxEvent
 	for rows.Next() {
 		var e application.RawOutboxEvent
-		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.ObservedAt, &e.Revision); err != nil {
+		var tcStr string
+		if err := rows.Scan(&e.ID, &e.Topic, &e.Payload, &e.ObservedAt, &e.Revision, &tcStr); err != nil {
 			return out
 		}
+		e.TraceContext = decodeTrace(tcStr)
 		out = append(out, e)
 	}
 	return out
 }
 
 // ClearRawIDs removes delivered raw entries by ID.
-func (s *PgStore) ClearRawIDs(tenant, thingID string, ids []string) {
+func (s *PgStore) ClearRawIDs(ctx context.Context, tenant, thingID string, ids []string) {
 	if len(ids) == 0 {
 		return
 	}
-	ctx, cancel := s.ctx()
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	_, _ = s.pool.Exec(ctx,
 		`DELETE FROM outbox_v2 WHERE tenant=$1 AND thing_id=$2 AND id = ANY($3)`,
@@ -469,8 +529,8 @@ func (s *PgStore) ClearRawIDs(tenant, thingID string, ids []string) {
 // ListRawTargets lists tenant/things with pending non-values entries,
 // including deleted things (their values are gone, lifecycle events
 // still have to drain).
-func (s *PgStore) ListRawTargets() []application.RawTarget {
-	ctx, cancel := s.ctx()
+func (s *PgStore) ListRawTargets(ctx context.Context) []application.RawTarget {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
 		`SELECT DISTINCT tenant, thing_id FROM outbox_v2 WHERE topic <> $1 ORDER BY tenant, thing_id`,
@@ -494,8 +554,8 @@ func (s *PgStore) ListRawTargets() []application.RawTarget {
 // vid staketkonflikt (0 rader) rollbackas allt och false returneras.
 // Historik/outbox-skrivningar är själva idempotenta, så omtag efter
 // konflikt konvergerar.
-func (s *PgStore) CommitBatch(tenant, thingID, messageID string, expected int64, st application.StoredThingState, hist []application.HistoryWrite, pending []application.FlowEvent) bool {
-	ctx, cancel := s.ctx()
+func (s *PgStore) CommitBatch(ctx context.Context, tenant, thingID, messageID string, expected int64, st application.StoredThingState, hist []application.HistoryWrite, pending []application.FlowEvent) bool {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	raw, _ := json.Marshal(st)
 	tx, err := s.pool.Begin(ctx)
@@ -526,9 +586,9 @@ func (s *PgStore) CommitBatch(tenant, thingID, messageID string, expected int64,
 			WITH s AS (
 				INSERT INTO outbox_seen_v2(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id
 			)
-			INSERT INTO outbox_v2(id, tenant, thing_id, property_id, observed_at, revision, payload)
-			SELECT $2,$3,$4,$5,$6,$7,$8 WHERE EXISTS (SELECT 1 FROM s)`,
-			seenKey(id), id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, payload); err != nil {
+			INSERT INTO outbox_v2(id, tenant, thing_id, property_id, observed_at, revision, payload, trace_context)
+			SELECT $2,$3,$4,$5,$6,$7,$8,$9 WHERE EXISTS (SELECT 1 FROM s)`,
+			seenKey(id), id, tenant, thingID, e.PropertyID, e.ObservedAt, e.ConfigRevision, payload, encodeTrace(e.TraceContext)); err != nil {
 			return false
 		}
 	}
@@ -542,11 +602,11 @@ func (s *PgStore) CommitBatch(tenant, thingID, messageID string, expected int64,
 	return tx.Commit(ctx) == nil
 }
 
-func (s *PgStore) DedupCheck(tenant, messageID, thingID string) bool {
+func (s *PgStore) DedupCheck(ctx context.Context, tenant, messageID, thingID string) bool {
 	if messageID == "" {
 		return false
 	}
-	ctx, cancel := s.ctx()
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	var one int
 	err := s.pool.QueryRow(ctx,
@@ -555,19 +615,19 @@ func (s *PgStore) DedupCheck(tenant, messageID, thingID string) bool {
 	return err == nil
 }
 
-func (s *PgStore) DedupMark(tenant, messageID, thingID string) {
+func (s *PgStore) DedupMark(ctx context.Context, tenant, messageID, thingID string) {
 	if messageID == "" {
 		return
 	}
-	ctx, cancel := s.ctx()
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	_, _ = s.pool.Exec(ctx,
 		`INSERT INTO dedup_v2(tenant, message_id, thing_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING`,
 		tenant, messageID, thingID)
 }
 
-func (s *PgStore) Children(tenant, parentID string) []string {
-	ctx, cancel := s.ctx()
+func (s *PgStore) Children(ctx context.Context, tenant, parentID string) []string {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
 		`SELECT from_id FROM relations_v2 WHERE tenant=$1 AND to_id=$2 ORDER BY from_id`,
@@ -587,8 +647,8 @@ func (s *PgStore) Children(tenant, parentID string) []string {
 	return out
 }
 
-func (s *PgStore) ParentOf(tenant, childID string) (string, bool) {
-	ctx, cancel := s.ctx()
+func (s *PgStore) ParentOf(ctx context.Context, tenant, childID string) (string, bool) {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	var parent string
 	err := s.pool.QueryRow(ctx,
@@ -597,13 +657,13 @@ func (s *PgStore) ParentOf(tenant, childID string) (string, bool) {
 	return parent, err == nil
 }
 
-func (s *PgStore) AttachChild(tenant, childID, parentID string) error {
+func (s *PgStore) AttachChild(ctx context.Context, tenant, childID, parentID string) error {
 	if childID == parentID {
 		return fmt.Errorf("relation: self-reference denied (%q)", childID)
 	}
-	ctx, cancel := s.ctx()
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
-	if cur, ok := s.ParentOf(tenant, childID); ok {
+	if cur, ok := s.ParentOf(ctx, tenant, childID); ok {
 		if cur == parentID {
 			return nil
 		}
@@ -623,7 +683,7 @@ func (s *PgStore) AttachChild(tenant, childID, parentID string) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		if cur, ok := s.ParentOf(tenant, childID); ok {
+		if cur, ok := s.ParentOf(ctx, tenant, childID); ok {
 			if cur == parentID {
 				return nil
 			}
@@ -640,14 +700,14 @@ func (s *PgStore) AttachChild(tenant, childID, parentID string) error {
 	return nil
 }
 
-func (s *PgStore) MoveChild(tenant, childID, newParentID string) error {
+func (s *PgStore) MoveChild(ctx context.Context, tenant, childID, newParentID string) error {
 	if childID == "" || newParentID == "" {
 		return fmt.Errorf("relation: missing child/new parent")
 	}
 	if childID == newParentID {
 		return fmt.Errorf("relation: self-reference denied (%q)", childID)
 	}
-	ctx, cancel := s.ctx()
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	var cur string
 	err := s.pool.QueryRow(ctx,
@@ -665,18 +725,28 @@ func (s *PgStore) MoveChild(tenant, childID, newParentID string) error {
 	return err
 }
 
-func (s *PgStore) DetachChild(tenant, childID string) {
-	ctx, cancel := s.ctx()
+func (s *PgStore) DetachChild(ctx context.Context, tenant, childID string) {
+	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	_, _ = s.pool.Exec(ctx,
 		`DELETE FROM relations_v2 WHERE tenant=$1 AND from_id=$2`, tenant, childID)
 }
 
+// rowQuerier abstraherar pool och transaktion för valideringsläsningar som
+// måste se egna osparade skrivningar (TV-03).
+type rowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // partOfCreatesCycle följer föräldrakedjan från newParentID (rekursiv CTE):
 // når den childID skulle kanten skapa en cykel.
 func (s *PgStore) partOfCreatesCycle(ctx context.Context, tenant, childID, newParentID string) bool {
+	return partOfCreatesCycleQ(ctx, s.pool, tenant, childID, newParentID)
+}
+
+func partOfCreatesCycleQ(ctx context.Context, q rowQuerier, tenant, childID, newParentID string) bool {
 	var exists bool
-	err := s.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		WITH RECURSIVE chain(cur) AS (
 			SELECT $3::text
 			UNION
@@ -686,6 +756,228 @@ func (s *PgStore) partOfCreatesCycle(ctx context.Context, tenant, childID, newPa
 		SELECT EXISTS(SELECT 1 FROM chain WHERE cur=$2)`,
 		tenant, childID, newParentID).Scan(&exists)
 	return err == nil && exists
+}
+
+// thingExistsQ rapporterar om saken finns (för relationsvalidering i tx).
+func thingExistsQ(ctx context.Context, q rowQuerier, tenant, thingID string) bool {
+	var exists bool
+	if err := q.QueryRow(ctx, `SELECT true FROM things_v2 WHERE tenant=$1 AND id=$2`, tenant, thingID).Scan(&exists); err != nil {
+		return false
+	}
+	return exists
+}
+
+// attachChildTx är AttachChild-logiken i transaktion (samma fel och
+// idempotens, men validering mot tx-snapshot).
+func attachChildTx(ctx context.Context, tx pgx.Tx, tenant, childID, parentID string) error {
+	if childID == parentID {
+		return fmt.Errorf("relation: self-reference denied (%q)", childID)
+	}
+	if !thingExistsQ(ctx, tx, tenant, parentID) {
+		return fmt.Errorf("%w: relation target %q", things.ErrNotFound, parentID)
+	}
+	var cur string
+	err := tx.QueryRow(ctx,
+		`SELECT to_id FROM relations_v2 WHERE tenant=$1 AND from_id=$2 AND type='partOf'`,
+		tenant, childID).Scan(&cur)
+	if err == nil {
+		if cur == parentID {
+			return nil
+		}
+		return fmt.Errorf("relation: child %q already has partOf parent %q", childID, cur)
+	}
+	if partOfCreatesCycleQ(ctx, tx, tenant, childID, parentID) {
+		return fmt.Errorf("relation: partOf cycle denied for child %q parent %q", childID, parentID)
+	}
+	tag, err := tx.Exec(ctx,
+		`INSERT INTO relations_v2(tenant, id, type, from_id, to_id) VALUES($1,$2,'partOf',$3,$4) ON CONFLICT DO NOTHING`,
+		tenant, "partof-"+childID, childID, parentID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Kapplöpning inom transaktionen kan inte inträffa (samma tx ser
+		// egna skrivningar); 0 rader betyder att raden redan fanns.
+		var cur2 string
+		if err := tx.QueryRow(ctx,
+			`SELECT to_id FROM relations_v2 WHERE tenant=$1 AND from_id=$2 AND type='partOf'`,
+			tenant, childID).Scan(&cur2); err != nil {
+			return err
+		}
+		if cur2 == parentID {
+			return nil
+		}
+		return fmt.Errorf("relation: child %q already has partOf parent %q", childID, cur2)
+	}
+	return nil
+}
+
+// moveChildTx är MoveChild-logiken i transaktion.
+func moveChildTx(ctx context.Context, tx pgx.Tx, tenant, childID, newParentID string) error {
+	if childID == "" || newParentID == "" {
+		return fmt.Errorf("relation: missing child/new parent")
+	}
+	if childID == newParentID {
+		return fmt.Errorf("relation: self-reference denied (%q)", childID)
+	}
+	if !thingExistsQ(ctx, tx, tenant, newParentID) {
+		return fmt.Errorf("%w: relation target %q", things.ErrNotFound, newParentID)
+	}
+	var cur string
+	err := tx.QueryRow(ctx,
+		`SELECT to_id FROM relations_v2 WHERE tenant=$1 AND from_id=$2 AND type='partOf'`,
+		tenant, childID).Scan(&cur)
+	if err != nil {
+		return fmt.Errorf("relation: no partOf parent for child %q", childID)
+	}
+	if cur != newParentID && partOfCreatesCycleQ(ctx, tx, tenant, childID, newParentID) {
+		return fmt.Errorf("relation: partOf cycle denied for child %q parent %q", childID, newParentID)
+	}
+	_, err = tx.Exec(ctx,
+		`UPDATE relations_v2 SET to_id=$1 WHERE tenant=$2 AND from_id=$3 AND type='partOf'`,
+		newParentID, tenant, childID)
+	return err
+}
+
+// detachChildTx tar bort utgående relationer (alla typer, som RemoveOutgoing).
+func detachChildTx(ctx context.Context, tx pgx.Tx, tenant, childID string) error {
+	_, err := tx.Exec(ctx,
+		`DELETE FROM relations_v2 WHERE tenant=$1 AND from_id=$2`, tenant, childID)
+	return err
+}
+
+// storeRawEventsTx är StoreRawEvents i transaktion (samma CTE-dedup).
+func storeRawEventsTx(ctx context.Context, tx pgx.Tx, tenant, thingID string, events []application.RawOutboxEvent) error {
+	for _, e := range events {
+		if e.ID == "" {
+			continue
+		}
+		if _, err := tx.Exec(ctx, `
+			WITH s AS (
+				INSERT INTO outbox_seen_v2(id) VALUES($1) ON CONFLICT DO NOTHING RETURNING id
+			)
+			INSERT INTO outbox_v2(id, tenant, thing_id, observed_at, revision, payload, topic, trace_context)
+			SELECT $2,$3,$4,$5,$6,$7,$8,$9 WHERE EXISTS (SELECT 1 FROM s)`,
+			seenKey(e.ID), e.ID, tenant, thingID, e.ObservedAt, e.Revision, e.Payload, e.Topic, encodeTrace(e.TraceContext)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// lockTenant serialiserar mutations-transaktioner per tenant mellan
+// instanser (TV-03): blob-fence skyddar enskilda rader, men
+// relationsinvarianter (en förälder, acyklicitet) behöver ömsesidig
+// uteslutning. Xact-scoped: släpps automatiskt vid commit/rollback.
+func lockTenant(ctx context.Context, tx pgx.Tx, tenant string) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, tenant)
+	return err
+}
+
+// SaveThingWithRelations persisterar blob (insert vid create, CAS på
+// expected annars), validerar+applicerar partOf-länköperationer och lagrar
+// råa outbox-events — atomärt med revisionsfence (TV-03). Feltyper matchar
+// de granulära metoderna: ErrConflict vid fence-krock, ErrNotFound vid
+// saknat relationsmål, övriga relationsfel oförändrade.
+func (s *PgStore) SaveThingWithRelations(ctx context.Context, tenant, thingID string, create bool, expected int64, st application.StoredThingState, relOps []application.RelationOp, raw []application.RawOutboxEvent) error {
+	ctx, cancel := s.ctxWith(ctx)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockTenant(ctx, tx, tenant); err != nil {
+		return err
+	}
+	blob, _ := json.Marshal(st)
+	if create {
+		tag, err := tx.Exec(ctx,
+			`INSERT INTO things_v2(tenant, id, revision, config_revision, data) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+			tenant, thingID, st.DataRevision, st.Revision, blob)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return things.ErrConflict
+		}
+		// Ingen epok-rensning här: delete lämnar livscykel-/relationsrader
+		// för dränering (TV-03) och rensar redan värderader; nya
+		// livscykel-ID:n bär kind (created vs deleted) och kolliderar
+		// aldrig med föregående epok. Rensning skulle tappa delete-event
+		// före dränering.
+	} else {
+		tag, err := tx.Exec(ctx,
+			`UPDATE things_v2 SET revision=$1, config_revision=$2, data=$3, updated_at=now() WHERE tenant=$4 AND id=$5 AND revision=$6`,
+			st.DataRevision, st.Revision, blob, tenant, thingID, expected)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return things.ErrConflict
+		}
+	}
+	for _, op := range relOps {
+		var err error
+		switch op.Op {
+		case "attach":
+			err = attachChildTx(ctx, tx, tenant, thingID, op.Target)
+		case "move":
+			err = moveChildTx(ctx, tx, tenant, thingID, op.Target)
+		case "detach":
+			err = detachChildTx(ctx, tx, tenant, thingID)
+		default:
+			err = fmt.Errorf("relation: unknown op %q", op.Op)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := storeRawEventsTx(ctx, tx, tenant, thingID, raw); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// DeleteThingWithRelations kontrollerar barnlöst tillstånd, kopplar loss,
+// raderar state och lagrar råa outbox-events — atomärt (TV-03).
+// Saknad blob ger ErrNotFound, aktiva barn ErrConflict.
+func (s *PgStore) DeleteThingWithRelations(ctx context.Context, tenant, thingID string, raw []application.RawOutboxEvent) error {
+	ctx, cancel := s.ctxWith(ctx)
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockTenant(ctx, tx, tenant); err != nil {
+		return err
+	}
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT true FROM things_v2 WHERE tenant=$1 AND id=$2`, tenant, thingID).Scan(&exists); err != nil {
+		return fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
+	}
+	var nChildren int
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM relations_v2 WHERE tenant=$1 AND to_id=$2`, tenant, thingID).Scan(&nChildren); err != nil {
+		return err
+	}
+	if nChildren > 0 {
+		return fmt.Errorf("%w: thing %q has %d active children", things.ErrConflict, thingID, nChildren)
+	}
+	if err := detachChildTx(ctx, tx, tenant, thingID); err != nil {
+		return err
+	}
+	// Samma state-rensning som DeleteThingState (B6: historik bevaras).
+	if err := s.deleteThingTransient(ctx, tx, tenant, thingID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM things_v2 WHERE tenant=$1 AND id=$2`, tenant, thingID); err != nil {
+		return err
+	}
+	if err := storeRawEventsTx(ctx, tx, tenant, thingID, raw); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func orNow(t time.Time) time.Time {
@@ -705,7 +997,7 @@ func nullableFloat(v *float64) any {
 // QueryThing implements application.ThingsReader (legacy facade): thing
 // blob + write fence. Primärvägen är RuntimeStore-metoderna ovan.
 func (s *PgStore) QueryThing(tenant, id string) ([]byte, int64, bool) {
-	st, ok := s.LoadThing(tenant, id)
+	st, ok := s.LoadThing(context.Background(), tenant, id)
 	if !ok {
 		return nil, 0, false
 	}

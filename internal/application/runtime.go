@@ -19,6 +19,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"sort"
@@ -43,6 +44,73 @@ import (
 // beräkning -> värdesevent hänger ihop i collectorn.
 var runtimeTracer = otel.Tracer("iot-things-v2/runtime")
 
+// traceContextFrom fångar transportens trace-context för beständig lagring
+// i outbox separat från domänpayloaden (TV-07). Tom map vid spårlös context.
+func traceContextFrom(ctx context.Context) map[string]string {
+	carrier := make(map[string]string)
+	otel.GetTextMapPropagator().Inject(ctx, propagationMapCarrier(carrier))
+	if len(carrier) == 0 {
+		return nil
+	}
+	return carrier
+}
+
+// parentSpanContext återställer lagrad trace-context till en remote
+// SpanContext för länkning vid senare leverans (omstart). False vid saknad
+// eller ogiltig carrier.
+func parentSpanContext(tc map[string]string) (trace.SpanContext, bool) {
+	if len(tc) == 0 {
+		return trace.SpanContext{}, false
+	}
+	ctx := otel.GetTextMapPropagator().Extract(context.Background(), propagationMapCarrier(tc))
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return trace.SpanContext{}, false
+	}
+	return sc, true
+}
+
+type propagationMapCarrier map[string]string
+
+func (c propagationMapCarrier) Get(key string) string { return c[key] }
+func (c propagationMapCarrier) Set(key, value string) { c[key] = value }
+func (c propagationMapCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for k := range c {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// traceLinks samlar unika giltiga föräldra-SpanContexts från en värdesgrupp
+// för länkning vid publicering (TV-07, omstart).
+func traceLinks(group []FlowEvent) []trace.Link {
+	seen := make(map[string]struct{})
+	var out []trace.Link
+	for _, e := range group {
+		sc, ok := parentSpanContext(e.TraceContext)
+		if !ok {
+			continue
+		}
+		key := sc.TraceID().String() + "/" + sc.SpanID().String()
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, trace.Link{SpanContext: sc})
+	}
+	return out
+}
+
+// traceLinkForRaw länkar ett rått lifecycle-/relationsevent till dess ursprung.
+func traceLinkForRaw(re RawOutboxEvent) []trace.Link {
+	sc, ok := parentSpanContext(re.TraceContext)
+	if !ok {
+		return nil
+	}
+	return []trace.Link{{SpanContext: sc}}
+}
+
 // StoredThingState är det persisterade tillståndet per sak. Revision är
 // konfigurationsversionen (API-ytan, If-Match); DataRevision är
 // skrivstaketet för CAS (bumpas vid varje blob-skrivning, även batchar
@@ -66,12 +134,21 @@ type StoredThingState struct {
 // distribuerade transaktioner: samtidig skrivning upptäcks (false) och
 // anroparen läser om + räknar om + försöker igen (begränsat antal).
 type RuntimeStore interface {
-	LoadThing(tenant, thingID string) (StoredThingState, bool)
+	// Alla metoder tar ctx först (TV-07): tracing och cancellation
+	// propagerar genom lagringsgränssnitten i stället för att kapas av
+	// context.Background(). Minnesimplementationen ignorerar ctx (ingen
+	// I/O), PostgreSQL härleder query-timeout från den.
+	LoadThing(ctx context.Context, tenant, thingID string) (StoredThingState, bool)
+	// LoadThingErr är felklassificerande variant av LoadThing (TV-05):
+	// saknad rad ger things.ErrNotFound, SQL-fel och korrupt blob ger
+	// andra fel. Används där feltyp styr svaret (relationsupplösning):
+	// endast ErrNotFound får bli target:null.
+	LoadThingErr(ctx context.Context, tenant, thingID string) (StoredThingState, error)
 	// InsertThing lagrar ny sak; false om den redan finns.
-	InsertThing(tenant, thingID string, st StoredThingState) bool
+	InsertThing(ctx context.Context, tenant, thingID string, st StoredThingState) bool
 	// SaveThingCAS lagrar endast om lagrat skrivstaket är expected
 	// (DataRevision, ej konfigurationsrevisionen).
-	SaveThingCAS(tenant, thingID string, expected int64, st StoredThingState) bool
+	SaveThingCAS(ctx context.Context, tenant, thingID string, expected int64, st StoredThingState) bool
 	// CommitBatch persisterar en omgång atomärt: blob-CAS på expected
 	// staket + idempotent historik + idempotent pending + dedupmarkering
 	// i samma atomära enhet. False vid staketkonflikt (inget skrivs,
@@ -79,53 +156,68 @@ type RuntimeStore interface {
 	// Markeringen i samma enhet stänger fönstret mellan commit och mark:
 	// en krasch lämnar aldrig state utan dedup (dubbeltillämpning av
 	// sum/delta vid återleverans) eller dedup utan state (tappad omgång).
-	CommitBatch(tenant, thingID, messageID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool
-	DeleteThingState(tenant, thingID string) error
+	CommitBatch(ctx context.Context, tenant, thingID, messageID string, expected int64, st StoredThingState, hist []HistoryWrite, pending []FlowEvent) bool
+	DeleteThingState(ctx context.Context, tenant, thingID string) error
 	// PurgeThingHistory raderar sakens värdehistorik, väntande outbox samt
 	// dedup/sedda ID:n (K6 GDPR-radering). Fungerar för levande och
 	// borttagna saker; idempotent. Returnerar antal raderade historikrader.
 	// Fel propageras åtskilt från "0 rader" (TV-01).
-	PurgeThingHistory(tenant, thingID string) (int64, error)
+	PurgeThingHistory(ctx context.Context, tenant, thingID string) (int64, error)
 	// PurgeHistoryOlderThan raderar historikrader äldre än cutoff i alla
 	// tenants (K4 retention). Returnerar antal raderade rader; fel
 	// propageras åtskilt från "0 rader" (TV-01).
-	PurgeHistoryOlderThan(cutoff time.Time) (int64, error)
-	ListThingIDs(tenant string) []string
-	ListTenants() []string
-	AppendHistory(tenant, thingID string, h HistoryWrite) bool
+	PurgeHistoryOlderThan(ctx context.Context, cutoff time.Time) (int64, error)
+	ListThingIDs(ctx context.Context, tenant string) []string
+	ListTenants(ctx context.Context) []string
+	AppendHistory(ctx context.Context, tenant, thingID string, h HistoryWrite) bool
 	// History läser egenskapshistorik äldst först. Noll-tid betyder ingen
 	// gräns; limit > 0 kapar, offset > 0 hoppar över de äldsta raderna.
-	History(tenant, thingID, prop string, from, to time.Time, limit, offset int) []HistoryWrite
-	PendingEvents(tenant, thingID string) []FlowEvent
-	StorePending(tenant, thingID string, events []FlowEvent)
-	ClearPendingIDs(tenant, thingID string, ids []string)
+	History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) []HistoryWrite
+	PendingEvents(ctx context.Context, tenant, thingID string) []FlowEvent
+	StorePending(ctx context.Context, tenant, thingID string, events []FlowEvent)
+	ClearPendingIDs(ctx context.Context, tenant, thingID string, ids []string)
 	// Raw outbox for thing lifecycle and relation events (other topics
 	// than property values, same durability). IDs are namespaced per
 	// topic so values and lifecycle never collide.
-	StoreRawEvents(tenant, thingID string, events []RawOutboxEvent)
-	PendingRawEvents(tenant, thingID string) []RawOutboxEvent
-	ClearRawIDs(tenant, thingID string, ids []string)
+	StoreRawEvents(ctx context.Context, tenant, thingID string, events []RawOutboxEvent)
+	PendingRawEvents(ctx context.Context, tenant, thingID string) []RawOutboxEvent
+	ClearRawIDs(ctx context.Context, tenant, thingID string, ids []string)
 	// ListRawTargets lists tenant/things with pending non-values events,
 	// including deleted things (their values are gone but lifecycle
 	// events must still drain). Used by restart drain.
-	ListRawTargets() []RawTarget
-	DedupCheck(tenant, messageID, thingID string) bool
-	DedupMark(tenant, messageID, thingID string)
-	Children(tenant, parentID string) []string
-	ParentOf(tenant, childID string) (string, bool)
-	AttachChild(tenant, childID, parentID string) error
-	MoveChild(tenant, childID, newParentID string) error
-	DetachChild(tenant, childID string)
+	ListRawTargets(ctx context.Context) []RawTarget
+	DedupCheck(ctx context.Context, tenant, messageID, thingID string) bool
+	DedupMark(ctx context.Context, tenant, messageID, thingID string)
+	Children(ctx context.Context, tenant, parentID string) []string
+	ParentOf(ctx context.Context, tenant, childID string) (string, bool)
+	AttachChild(ctx context.Context, tenant, childID, parentID string) error
+	MoveChild(ctx context.Context, tenant, childID, newParentID string) error
+	DetachChild(ctx context.Context, tenant, childID string)
+	// SaveThingWithRelations persists blob (insert when create, CAS on
+	// expected data revision otherwise), validates+applies partOf
+	// relation ops and stores raw outbox events — atomically, fenced on
+	// revision (TV-03). Relation validation errors and ErrConflict pass
+	// through with the same values as the granular methods.
+	SaveThingWithRelations(ctx context.Context, tenant, thingID string, create bool, expected int64, st StoredThingState, relOps []RelationOp, raw []RawOutboxEvent) error
+	// DeleteThingWithRelations checks no active children, detaches,
+	// deletes state and stores raw outbox events — atomically (TV-03).
+	// Missing blob gives ErrNotFound, children give ErrConflict.
+	DeleteThingWithRelations(ctx context.Context, tenant, thingID string, raw []RawOutboxEvent) error
 }
 
 // RawOutboxEvent is one durable non-values outbox entry (lifecycle or
 // relation change): topic routes, ID dedups, Payload is the event JSON.
+// TraceContext bär transportens W3C trace-context separat från
+// domänpayloaden (TV-07): vid omstart återställs/länkas den vid leverans
+// så att kedjan till ursprungsobservationen bevaras. Tom vid händelser
+// utan incoming trace (t.ex. API-registrering utan spans).
 type RawOutboxEvent struct {
-	ID         string
-	Topic      string
-	Payload    []byte
-	ObservedAt time.Time
-	Revision   int64
+	ID           string
+	Topic        string
+	Payload      []byte
+	ObservedAt   time.Time
+	Revision     int64
+	TraceContext map[string]string
 }
 
 // RawTarget identifies a thing with pending raw outbox events.
@@ -156,13 +248,21 @@ func NewRuntime(store RuntimeStore) *Runtime {
 	return &Runtime{store: store}
 }
 
+// RelationOp is one hierarchy mutation applied atomically with a blob
+// save. Only partOf is persisted (other named slots stay views derived
+// at read); attach/move carry the parent, detach clears it.
+type RelationOp struct {
+	Op     string // "attach", "move" or "detach"
+	Target string // parent for attach/move; "" for detach
+}
+
 // RegisterThing kompilerar obj via cat och lagrar konfiguration + revision.
 // Aktuellt tillstånd, historik och dedupmarkörer bevaras vid omregistrering.
 // Gammal revision vid uppdatering nekas med ErrConflict (optimistisk
 // låsning, B19): anroparen ska läsa aktuell revision och försöka igen.
 // Vid lyckad uppdatering inkrementeras revisionen (If-Match-semantik);
 // nyskapad sak får den begärda revisionen (kräver revision > 0).
-func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalog.ObjectSpec, revision int64) (*catalog.EffectiveConfig, error) {
+func (rt *Runtime) RegisterThing(ctx context.Context, tenant string, cat *catalog.Catalog, obj catalog.ObjectSpec, revision int64) (*catalog.EffectiveConfig, error) {
 	if tenant == "" {
 		return nil, fmt.Errorf("%w: tenant must be provided", things.ErrValidation)
 	}
@@ -179,7 +279,7 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	st, exists := rt.store.LoadThing(tenant, obj.ThingID)
+	st, exists := rt.store.LoadThing(ctx, tenant, obj.ThingID)
 	fence := st.DataRevision
 	var newRevision int64
 	if !exists {
@@ -193,13 +293,10 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 		newRevision = revision + 1
 		st.DataRevision++
 	}
-	// Relationsfel ska komma före blob-skrivning: validera mål och beräkna
-	// planerade länkändringar utan att mutera ännu.
-	type relOp struct {
-		op     string // "attach", "move" eller "detach"
-		target string
-	}
-	var relOps []relOp
+	// Relationsplanering (endast läsning här): validera mål och beräkna
+	// planerade länkändringar. Lagringen återvaliderar atomärt före
+	// skrivning, så samtidiga ändringar inte kan smita emellan (TV-03).
+	var relOps []RelationOp
 	hasPartOf := false
 	for _, rel := range cfg.Relations {
 		// Hierarkimedlemskap (partOf) persisteras som barn->förälder;
@@ -208,22 +305,22 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 			continue
 		}
 		hasPartOf = true
-		if _, ok := rt.store.LoadThing(tenant, rel.TargetThingID); !ok {
+		if _, ok := rt.store.LoadThing(ctx, tenant, rel.TargetThingID); !ok {
 			return nil, fmt.Errorf("%w: relation target %q", things.ErrNotFound, rel.TargetThingID)
 		}
-		if cur, ok := rt.store.ParentOf(tenant, obj.ThingID); ok {
+		if cur, ok := rt.store.ParentOf(ctx, tenant, obj.ThingID); ok {
 			if cur == rel.TargetThingID {
 				continue
 			}
-			relOps = append(relOps, relOp{op: "move", target: rel.TargetThingID})
+			relOps = append(relOps, RelationOp{Op: "move", Target: rel.TargetThingID})
 			continue
 		}
-		relOps = append(relOps, relOp{op: "attach", target: rel.TargetThingID})
+		relOps = append(relOps, RelationOp{Op: "attach", Target: rel.TargetThingID})
 	}
 	if !hasPartOf {
 		// Borttagen partOf i ny config ska koppla loss (lämna ej kvar gammal länk).
-		if _, ok := rt.store.ParentOf(tenant, obj.ThingID); ok {
-			relOps = append(relOps, relOp{op: "detach"})
+		if _, ok := rt.store.ParentOf(ctx, tenant, obj.ThingID); ok {
+			relOps = append(relOps, RelationOp{Op: "detach"})
 		}
 	}
 	st.Revision = newRevision
@@ -239,44 +336,36 @@ func (rt *Runtime) RegisterThing(tenant string, cat *catalog.Catalog, obj catalo
 	if exists {
 		pruneRemovedState(cfg, &st)
 	}
-	if !exists {
-		if !rt.store.InsertThing(tenant, obj.ThingID, st) {
-			return nil, fmt.Errorf("%w: thing %q created concurrently",
-				things.ErrConflict, obj.ThingID)
-		}
-	} else if !rt.store.SaveThingCAS(tenant, obj.ThingID, fence, st) {
-		return nil, fmt.Errorf("%w: thing %q changed concurrently",
-			things.ErrConflict, obj.ThingID)
-	}
-	for _, op := range relOps {
-		var err error
-		switch op.op {
-		case "attach":
-			err = rt.store.AttachChild(tenant, obj.ThingID, op.target)
-		case "move":
-			err = rt.store.MoveChild(tenant, obj.ThingID, op.target)
-		case "detach":
-			rt.store.DetachChild(tenant, obj.ThingID)
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-	// Livscykel- och relationshändelser köas beständigt (P10/P11):
+	// Livscykel- och relationshändelser byggs här men persisteras i samma
+	// atomära lagringsoperation som blob + länkar (P10/P11, TV-03):
 	// konsumenter utan API-åtkomst hålls synkade inklusive borttag.
 	now := time.Now().UTC()
 	kind := pkgtypes.ThingCreated
 	if exists {
 		kind = pkgtypes.ThingUpdated
 	}
-	rt.emitLifecycleLocked(tenant, cfg, kind, newRevision, now)
+	rawEvents := []RawOutboxEvent{buildLifecycleEvent(tenant, cfg, kind, newRevision, now)}
 	for _, op := range relOps {
-		switch op.op {
+		switch op.Op {
 		case "attach", "move":
-			rt.emitRelationLocked(tenant, obj.ThingID, op.target, false, newRevision, now)
+			rawEvents = append(rawEvents, buildRelationEvent(tenant, obj.ThingID, op.Target, false, newRevision, now))
 		case "detach":
-			rt.emitRelationLocked(tenant, obj.ThingID, "", true, newRevision, now)
+			rawEvents = append(rawEvents, buildRelationEvent(tenant, obj.ThingID, "", true, newRevision, now))
 		}
+	}
+	// Ett atomärt anrop: blob-CAS/insert + relationsvalidering med
+	// länkändringar + outbox. Misslyckas något (cykel, saknat mål,
+	// samtidig skrivning) ändras ingenting.
+	if err := rt.store.SaveThingWithRelations(ctx, tenant, obj.ThingID, !exists, fence, st, relOps, rawEvents); err != nil {
+		if errors.Is(err, things.ErrConflict) {
+			if !exists {
+				return nil, fmt.Errorf("%w: thing %q created concurrently",
+					things.ErrConflict, obj.ThingID)
+			}
+			return nil, fmt.Errorf("%w: thing %q changed concurrently",
+				things.ErrConflict, obj.ThingID)
+		}
+		return nil, err
 	}
 	return cfg, nil
 }
@@ -357,11 +446,12 @@ func describeThing(cfg *catalog.EffectiveConfig) *pkgtypes.ThingDescriptorV1 {
 	return desc
 }
 
-// emitLifecycleLocked köar en livscykelhändelse. Anroparen håller rt.mu;
-// payloaden marshalas direkt så att senare mutationer aldrig läcker in.
-// ID:t bär kind: create och delete på samma revision (ingen uppdatering
-// emellan) är olika händelser och får inte dedupliceras mot varandra.
-func (rt *Runtime) emitLifecycleLocked(tenant string, cfg *catalog.EffectiveConfig, kind pkgtypes.ThingLifecycleKind, revision int64, at time.Time) {
+// buildLifecycleEvent bygger en livscykelhändelse utan sidoeffekter.
+// Anroparen persisterar den atomärt med mutationen. Payloaden marshalas
+// direkt så att senare mutationer aldrig läcker in. ID:t bär kind: create
+// och delete på samma revision (ingen uppdatering emellan) är olika
+// händelser och får inte dedupliceras mot varandra.
+func buildLifecycleEvent(tenant string, cfg *catalog.EffectiveConfig, kind pkgtypes.ThingLifecycleKind, revision int64, at time.Time) RawOutboxEvent {
 	ev := pkgtypes.ThingLifecycleV1{
 		Schema:           pkgtypes.SchemaV1,
 		EventID:          "v1/" + sanitizeEventID(tenant) + "/" + sanitizeEventID(cfg.ThingID) + "/lifecycle/" + string(kind) + "/" + strconv.FormatInt(revision, 10),
@@ -375,17 +465,18 @@ func (rt *Runtime) emitLifecycleLocked(tenant string, cfg *catalog.EffectiveConf
 		Thing:            describeThing(cfg),
 	}
 	body, _ := json.Marshal(ev)
-	rt.store.StoreRawEvents(tenant, cfg.ThingID, []RawOutboxEvent{{
+	return RawOutboxEvent{
 		ID: ev.EventID, Topic: ev.TopicName(), Payload: body, ObservedAt: at, Revision: revision,
-	}})
+	}
 }
 
-// emitRelationLocked köar en relationsändring för ett barns partOf-länk.
+// buildRelationEvent bygger en relationsändring för ett barns partOf-länk
+// utan sidoeffekter. Anroparen persisterar den atomärt med mutationen.
 // Relations-ID:t delas med lagringen ("partof-<barn>"). Event-ID:t bär
 // åtgärd: set och removed på samma revision (t.ex. skapa-med-förälder
 // följt av delete utan uppdatering emellan) är olika händelser och får
 // inte dedupliceras mot varandra.
-func (rt *Runtime) emitRelationLocked(tenant, childID, parentID string, removed bool, revision int64, at time.Time) {
+func buildRelationEvent(tenant, childID, parentID string, removed bool, revision int64, at time.Time) RawOutboxEvent {
 	action := "set"
 	if removed {
 		action = "removed"
@@ -401,10 +492,10 @@ func (rt *Runtime) emitRelationLocked(tenant, childID, parentID string, removed 
 		ChangedAt:  at,
 	}
 	body, _ := json.Marshal(ev)
-	rt.store.StoreRawEvents(tenant, childID, []RawOutboxEvent{{
+	return RawOutboxEvent{
 		ID:    "v1/" + sanitizeEventID(tenant) + "/" + sanitizeEventID(childID) + "/relations/partof/" + strconv.FormatInt(revision, 10) + "/" + action,
 		Topic: ev.TopicName(), Payload: body, ObservedAt: at, Revision: revision,
-	}})
+	}
 }
 
 // BatchOutcome är resultatet per sak för en batch.
@@ -441,8 +532,8 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 	defer rt.mu.Unlock()
 
 	states := make(map[string]*storedDecoded)
-	for _, id := range rt.store.ListThingIDs(tenant) {
-		st, ok := rt.store.LoadThing(tenant, id)
+	for _, id := range rt.store.ListThingIDs(ctx, tenant) {
+		st, ok := rt.store.LoadThing(ctx, tenant, id)
 		if !ok {
 			continue
 		}
@@ -483,7 +574,7 @@ func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, ob
 		// atomärt i CommitBatch, så varken fel/omstart före commit (dedup
 		// utan state) eller krasch efter commit (state utan dedup) ger
 		// divergerande tillstånd.
-		if rt.store.DedupCheck(tenant, messageID, id) {
+		if rt.store.DedupCheck(ctx, tenant, messageID, id) {
 			outcomes = append(outcomes, BatchOutcome{
 				ThingID:   id,
 				Outcome:   &FlowOutcome{Updated: map[string]CurrentValue{}, Events: append([]FlowEvent(nil), sd.state.LastEvents...)},
@@ -551,7 +642,14 @@ func (rt *Runtime) persistBatch(ctx context.Context, tenant, messageID, id strin
 		sd.state.LastMessageID = messageID
 		fence := sd.state.DataRevision
 		sd.state.DataRevision++
-		if rt.store.CommitBatch(tenant, id, messageID, fence, sd.state, outcome.History, outcome.Events) {
+		// Spara transportens trace-context separat från domänpayload i
+		// outbox (TV-07): omstart dränerar med länk till ursprunget.
+		if tc := traceContextFrom(ctx); tc != nil {
+			for i := range outcome.Events {
+				outcome.Events[i].TraceContext = tc
+			}
+		}
+		if rt.store.CommitBatch(ctx, tenant, id, messageID, fence, sd.state, outcome.History, outcome.Events) {
 			span.SetAttributes(
 				attribute.Int("events", len(outcome.Events)),
 				attribute.Int("history", len(outcome.History)),
@@ -565,12 +663,12 @@ func (rt *Runtime) persistBatch(ctx context.Context, tenant, messageID, id strin
 			time.Sleep(time.Duration(attempt*attempt)*time.Millisecond +
 				time.Duration(rand.IntN(1000))*time.Microsecond)
 		}
-		fresh, ok := rt.store.LoadThing(tenant, id)
+		fresh, ok := rt.store.LoadThing(ctx, tenant, id)
 		if !ok {
 			err = fmt.Errorf("%w: thing %q deleted concurrently", things.ErrConflict, id)
 			return nil, err
 		}
-		if rt.store.DedupCheck(tenant, messageID, id) {
+		if rt.store.DedupCheck(ctx, tenant, messageID, id) {
 			// En samtidig skribent slutförde samma batch under vårt omtag:
 			// spela upp lagrade händelser i stället för att räkna om.
 			// Omberäkning är inte konvergent för tillståndsbärande
@@ -611,17 +709,17 @@ func decodeConfig(raw []byte) (*catalog.EffectiveConfig, error) {
 // värdehistorik bevaras i storet. Livscykel (deleted) och borttagen
 // partOf-länk köas för konsumenter före lagringens rensning (som tömmer
 // väntande händelser för saken).
-func (rt *Runtime) DeleteThing(tenant, thingID string) error {
+func (rt *Runtime) DeleteThing(ctx context.Context, tenant, thingID string) error {
 	if tenant == "" || thingID == "" {
 		return fmt.Errorf("%w: tenant and thing ID must be provided", things.ErrValidation)
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	st, ok := rt.store.LoadThing(tenant, thingID)
+	st, ok := rt.store.LoadThing(ctx, tenant, thingID)
 	if !ok {
 		return fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
 	}
-	if children := rt.store.Children(tenant, thingID); len(children) > 0 {
+	if children := rt.store.Children(ctx, tenant, thingID); len(children) > 0 {
 		return fmt.Errorf("%w: thing %q has %d active children", things.ErrConflict, thingID, len(children))
 	}
 	// K6 livscykel vid borttagning: blob + aktuella värden försvinner,
@@ -630,38 +728,37 @@ func (rt *Runtime) DeleteThing(tenant, thingID string) error {
 	// från andra saker behålls som historiska referenser (läsningar
 	// tolererar saknade mål); barn blockerar i stället för kaskad.
 	// Explicit GDPR-radering av historik: PurgeThingHistory.
-	parent, hasParent := rt.store.ParentOf(tenant, thingID)
+	parent, hasParent := rt.store.ParentOf(ctx, tenant, thingID)
 	cfg, err := decodeConfig(st.ConfigJSON)
 	if err != nil {
 		return fmt.Errorf("runtime: thing %q has undecodable config: %w", thingID, err)
 	}
+	// Ett atomärt anrop: barnkontroll (igen, mot samtidig attach),
+	// detach, state-delete och events. Misslyckas något är ingenting
+	// ändrat — till skillnad från tidigare uppdelad sekvens (TV-03).
 	now := time.Now().UTC()
-	rt.store.DetachChild(tenant, thingID)
-	if err := rt.store.DeleteThingState(tenant, thingID); err != nil {
-		return err
-	}
-	rt.emitLifecycleLocked(tenant, cfg, pkgtypes.ThingDeleted, st.Revision, now)
+	raw := []RawOutboxEvent{buildLifecycleEvent(tenant, cfg, pkgtypes.ThingDeleted, st.Revision, now)}
 	if hasParent {
-		rt.emitRelationLocked(tenant, thingID, parent, true, st.Revision, now)
+		raw = append(raw, buildRelationEvent(tenant, thingID, parent, true, st.Revision, now))
 	}
-	return nil
+	return rt.store.DeleteThingWithRelations(ctx, tenant, thingID, raw)
 }
 
 // MoveThing flyttar ett barns partOf-förälder atomärt under låset.
 // Barnets ID, bindningar, konfiguration och historik påverkas inte.
-func (rt *Runtime) MoveThing(tenant, childID, newParentID string) error {
+func (rt *Runtime) MoveThing(ctx context.Context, tenant, childID, newParentID string) error {
 	if tenant == "" || childID == "" || newParentID == "" {
 		return fmt.Errorf("%w: tenant, child and parent must be provided", things.ErrValidation)
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	if _, ok := rt.store.LoadThing(tenant, childID); !ok {
+	if _, ok := rt.store.LoadThing(ctx, tenant, childID); !ok {
 		return fmt.Errorf("%w: thing %q", things.ErrNotFound, childID)
 	}
-	if _, ok := rt.store.LoadThing(tenant, newParentID); !ok {
+	if _, ok := rt.store.LoadThing(ctx, tenant, newParentID); !ok {
 		return fmt.Errorf("%w: thing %q", things.ErrNotFound, newParentID)
 	}
-	return rt.store.MoveChild(tenant, childID, newParentID)
+	return rt.store.MoveChild(ctx, tenant, childID, newParentID)
 }
 
 // StableEventID är det stabila deduplicerings-ID:t per (sak, meddelande,
@@ -740,8 +837,8 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 		return 0, err
 	}
 	rt.mu.Lock()
-	st, ok := rt.store.LoadThing(tenant, thingID)
-	pending := rt.store.PendingEvents(tenant, thingID)
+	st, ok := rt.store.LoadThing(ctx, tenant, thingID)
+	pending := rt.store.PendingEvents(ctx, tenant, thingID)
 	rt.mu.Unlock()
 	if !ok {
 		return 0, fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
@@ -782,7 +879,23 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 				return published, err
 			}
 		}
-		if perr := pub.PublishThingValues(ctx, ev); perr != nil {
+		// Länka till ursprungsobservationen (TV-07): outbox bevarar
+		// trace-context över omstart; dränering publicerar med länk så att
+		// kedjan mätvärde→beräkning→event håller även efter omstart.
+		publish := func(pctx context.Context) error {
+			return pub.PublishThingValues(pctx, ev)
+		}
+		if links := traceLinks(group); len(links) > 0 {
+			pctx, pspan := runtimeTracer.Start(ctx, "publish-values",
+				trace.WithLinks(links...),
+				trace.WithAttributes(attribute.String("messaging.message_id", group[0].MessageID)))
+			perr := publish(pctx)
+			tracing.RecordAnyErrorAndEndSpan(perr, pspan)
+			if perr != nil {
+				err = perr
+				return published, err
+			}
+		} else if perr := publish(ctx); perr != nil {
 			err = perr
 			return published, err
 		}
@@ -794,7 +907,7 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 			ids = append(ids, StableEventID(tenant, thingID, e.MessageID, e.PropertyID))
 		}
 		rt.mu.Lock()
-		rt.store.ClearPendingIDs(tenant, thingID, ids)
+		rt.store.ClearPendingIDs(ctx, tenant, thingID, ids)
 		rt.mu.Unlock()
 	}
 	return published, nil
@@ -811,9 +924,9 @@ func (rt *Runtime) DrainAll(ctx context.Context, pub EventPublisher, now time.Ti
 	type target struct{ tenant, thing string }
 	var targets []target
 	rt.mu.Lock()
-	for _, tenant := range rt.store.ListTenants() {
-		for _, id := range rt.store.ListThingIDs(tenant) {
-			if len(rt.store.PendingEvents(tenant, id)) > 0 {
+	for _, tenant := range rt.store.ListTenants(ctx) {
+		for _, id := range rt.store.ListThingIDs(ctx, tenant) {
+			if len(rt.store.PendingEvents(ctx, tenant, id)) > 0 {
 				targets = append(targets, target{tenant, id})
 			}
 		}
@@ -831,7 +944,7 @@ func (rt *Runtime) DrainAll(ctx context.Context, pub EventPublisher, now time.Ti
 	// Råa händelser för borttagna saker syns inte i saklistningen;
 	// svep dem separat så att deletes levereras efter omstart.
 	rt.mu.Lock()
-	rawTargets := rt.store.ListRawTargets()
+	rawTargets := rt.store.ListRawTargets(ctx)
 	rt.mu.Unlock()
 	for _, t := range rawTargets {
 		if _, rerr := rt.DrainRaw(ctx, pub, t.Tenant, t.ThingID); rerr != nil {
@@ -858,7 +971,7 @@ func (rt *Runtime) DrainRaw(ctx context.Context, pub EventPublisher, tenant, thi
 		tracing.RecordAnyErrorAndEndSpan(err, span)
 	}()
 	rt.mu.Lock()
-	pending := rt.store.PendingRawEvents(tenant, thingID)
+	pending := rt.store.PendingRawEvents(ctx, tenant, thingID)
 	rt.mu.Unlock()
 	delivered = 0
 	for _, re := range pending {
@@ -887,13 +1000,28 @@ func (rt *Runtime) DrainRaw(ctx context.Context, pub EventPublisher, tenant, thi
 			// lämnas för framtida konsumenter utan att blockera kön.
 			continue
 		}
-		if perr := pub.PublishMessage(ctx, msg); perr != nil {
+		// Länka till ursprung vid omstart (TV-07); utan lagrad context
+		// publiceras med dräneringscontexten som tidigare.
+		publish := func(pctx context.Context) error {
+			return pub.PublishMessage(pctx, msg)
+		}
+		if links := traceLinkForRaw(re); len(links) > 0 {
+			pctx, pspan := runtimeTracer.Start(ctx, "publish-raw",
+				trace.WithLinks(links...),
+				trace.WithAttributes(attribute.String("outbox.id", re.ID)))
+			perr := publish(pctx)
+			tracing.RecordAnyErrorAndEndSpan(perr, pspan)
+			if perr != nil {
+				err = perr
+				return delivered, err
+			}
+		} else if perr := publish(ctx); perr != nil {
 			err = perr
 			return delivered, err
 		}
 		delivered++
 		rt.mu.Lock()
-		rt.store.ClearRawIDs(tenant, thingID, []string{re.ID})
+		rt.store.ClearRawIDs(ctx, tenant, thingID, []string{re.ID})
 		rt.mu.Unlock()
 	}
 	return delivered, nil

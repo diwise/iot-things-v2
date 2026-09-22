@@ -226,13 +226,34 @@ func writeAPIError(w http.ResponseWriter, err error) {
 	}
 }
 
-func decodeBody[T any](r *http.Request) (T, error) {
-	var v T
+// maxRequestBodyBytes gränsar HTTP-kroppar (TV-08, K5): samma
+// storleksordning som katalogens geometri-/strängtak. Överskridande nekas
+// med 400 (valideringsfel) innan io.ReadAll/json.Decode allokerar.
+const maxRequestBodyBytes = 1 << 20
+
+func readLimitedBody(r *http.Request) ([]byte, error) {
 	if r.Body == nil {
-		return v, fmt.Errorf("%w: empty body", things.ErrValidation)
+		return nil, fmt.Errorf("%w: empty body", things.ErrValidation)
 	}
 	defer r.Body.Close()
-	if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+	limited := io.LimitReader(r.Body, maxRequestBodyBytes+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid JSON body: %v", things.ErrValidation, err)
+	}
+	if len(raw) > maxRequestBodyBytes {
+		return nil, fmt.Errorf("%w: body has %d bytes, max %d (K5)", things.ErrValidation, len(raw), maxRequestBodyBytes)
+	}
+	return raw, nil
+}
+
+func decodeBody[T any](r *http.Request) (T, error) {
+	var v T
+	raw, err := readLimitedBody(r)
+	if err != nil {
+		return v, err
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
 		return v, fmt.Errorf("%w: invalid JSON body: %v", things.ErrValidation, err)
 	}
 	return v, nil
@@ -265,13 +286,9 @@ func firstManualField(m map[string]json.RawMessage) string {
 // har inga värdefält i sina kroppar och behöver inget skydd.
 func decodeThingSpec(r *http.Request) (catalog.ObjectSpec, error) {
 	var obj catalog.ObjectSpec
-	if r.Body == nil {
-		return obj, fmt.Errorf("%w: empty body", things.ErrValidation)
-	}
-	defer r.Body.Close()
-	raw, err := io.ReadAll(r.Body)
+	raw, err := readLimitedBody(r)
 	if err != nil {
-		return obj, fmt.Errorf("%w: invalid JSON body: %v", things.ErrValidation, err)
+		return obj, err
 	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {

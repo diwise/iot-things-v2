@@ -753,11 +753,11 @@ func TestManagePreviewNoMutate(t *testing.T) {
 	mgr, _, fs, _ := mgmtSetup(t)
 	ctx := context.Background()
 	mgmtWastebin(t, mgr)
-	before := len(fs.ListThingIDs("t"))
+	before := len(fs.ListThingIDs(context.Background(), "t"))
 	if _, err := mgr.PreviewObject(ctx, "t", mgmtBinObject()); err != nil {
 		t.Fatalf("preview: %v", err)
 	}
-	if got := len(fs.ListThingIDs("t")); got != before {
+	if got := len(fs.ListThingIDs(context.Background(), "t")); got != before {
 		t.Fatalf("preview created things: %d -> %d", before, got)
 	}
 	if _, err := mgr.CreateObject(ctx, "t", mgmtBinObject()); err != nil {
@@ -2136,5 +2136,76 @@ func TestManagePrimaryNilWhenNotActivated(t *testing.T) {
 	}
 	if sum.Primary != nil {
 		t.Fatalf("primary=%+v, want nil when property not activated", sum.Primary)
+	}
+}
+
+// TV-05: endast saknat mål (ErrNotFound) får bli target:null. Korrupt
+// målblobb (JSON-fel) och lagringsfel ska propageras, inte döljas som
+// trasig referens.
+func TestRelationsCorruptTargetPropagates(t *testing.T) {
+	ctx := context.Background()
+	mgr, _, fs, _ := mgmtSetup(t)
+
+	if err := mgr.PublishTemplate(ctx, catalog.TemplateSpec{Template: things.Template{
+		ID: "building", Version: "v1", Category: "building",
+	}}); err != nil {
+		t.Fatalf("publish building: %v", err)
+	}
+	if err := mgr.PublishTemplate(ctx, catalog.TemplateSpec{Template: things.Template{
+		ID: "room", Version: "v1", Category: "room",
+		Relations: []things.RelationSpec{
+			{Name: "partOf", AllowedTargets: []string{"building"}, Min: 0, Max: 1},
+		},
+	}}); err != nil {
+		t.Fatalf("publish room: %v", err)
+	}
+	mk := func(id, parent string) catalog.ObjectSpec {
+		obj := catalog.ObjectSpec{
+			ThingID: id, Tenant: "t", Name: id,
+			Location: &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.0,59.3]`)},
+			Metadata: map[string]string{}, TemplateID: "room", TemplateVersion: "v1",
+			Properties: map[string]things.Property{},
+		}
+		if parent != "" {
+			obj.Relations = []catalog.RelationRef{{Name: "partOf", TargetThingID: parent, TargetTemplateID: "building"}}
+		} else {
+			obj.TemplateID = "building"
+			obj.Relations = nil
+		}
+		return obj
+	}
+	if _, err := mgr.CreateObject(ctx, "t", mk("b-a", "")); err != nil {
+		t.Fatalf("create b-a: %v", err)
+	}
+	room := mk("room-a", "")
+	room.TemplateID = "room"
+	room.Relations = []catalog.RelationRef{{Name: "partOf", TargetThingID: "b-a", TargetTemplateID: "building"}}
+	if _, err := mgr.CreateObject(ctx, "t", room); err != nil {
+		t.Fatalf("create room-a: %v", err)
+	}
+
+	// Sanity: intakt mål löses.
+	rels, err := mgr.Relations(ctx, "t", "room-a")
+	if err != nil {
+		t.Fatalf("relations: %v", err)
+	}
+	if len(rels) != 1 || rels[0].Target == nil {
+		t.Fatalf("relations=%+v, want resolved target", rels)
+	}
+
+	// Korrumpera målets blob: Relations måste fela, inte ge target:null.
+	fs.mu.Lock()
+	key := fkey("t", "b-a")
+	st := fs.things[key]
+	st.ConfigJSON = []byte(`{invalid`)
+	fs.things[key] = st
+	fs.mu.Unlock()
+
+	rels, err = mgr.Relations(ctx, "t", "room-a")
+	if err == nil {
+		t.Fatalf("corrupt target must propagate error, got null-target %+v", rels)
+	}
+	if !errors.Is(err, things.ErrNotFound) && rels != nil {
+		// Förväntat: annat fel än NotFound, ingen tyst null-rad.
 	}
 }

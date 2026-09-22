@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -50,18 +51,18 @@ func TestPostgresPurgeHistoryOlderThan(t *testing.T) {
 		return application.HistoryWrite{PropertyID: prop, Value: &v, Quality: "ok",
 			ObservedAt: at, ReceivedAt: at, Source: "s", MessageID: "m-" + prop}
 	}
-	a.AppendHistory("t", "bin-42", mk("old", cutoff.Add(-time.Hour)))
-	a.AppendHistory("t", "bin-42", mk("edge", cutoff))
-	a.AppendHistory("t", "bin-42", mk("new", cutoff.Add(time.Hour)))
-	a.AppendHistory("t", "bin-43", mk("old", cutoff.Add(-time.Hour)))
+	a.AppendHistory(context.Background(), "t", "bin-42", mk("old", cutoff.Add(-time.Hour)))
+	a.AppendHistory(context.Background(), "t", "bin-42", mk("edge", cutoff))
+	a.AppendHistory(context.Background(), "t", "bin-42", mk("new", cutoff.Add(time.Hour)))
+	a.AppendHistory(context.Background(), "t", "bin-43", mk("old", cutoff.Add(-time.Hour)))
 
-	if n, err := s.PurgeHistoryOlderThan(cutoff); err != nil || n != 2 {
+	if n, err := s.PurgeHistoryOlderThan(context.Background(), cutoff); err != nil || n != 2 {
 		t.Fatalf("purged=%d err=%v, want 2 (both tenants)", n, err)
 	}
-	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
+	if got := a.History(context.Background(), "t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
 		t.Fatalf("bin-42 survivors=%d, want 2", len(got))
 	}
-	if got := a.History("t", "bin-43", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
+	if got := a.History(context.Background(), "t", "bin-43", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("bin-43 must be fully purged: %+v", got)
 	}
 }

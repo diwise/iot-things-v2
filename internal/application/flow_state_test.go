@@ -267,7 +267,7 @@ func TestSewerEndToEndWithRestart(t *testing.T) {
 	cat, obj := sewerCatalog(t)
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
-	if _, err := rt.RegisterThing("t", cat, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -337,7 +337,7 @@ func TestSewerThresholdChangeKeepsAccumulated(t *testing.T) {
 	cat, obj := sewerCatalog(t)
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
-	if _, err := rt.RegisterThing("t", cat, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -347,7 +347,7 @@ func TestSewerThresholdChangeKeepsAccumulated(t *testing.T) {
 	}
 	// Skärp tröskeln under pågående bräddning (rev 1 -> 2).
 	obj.ParamOverrides = map[string]float64{"high": 1.8, "low": 1.65}
-	if _, err := rt.RegisterThing("t", cat, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, obj, 1); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
 	// Nivå 1.7 ligger nu under nya high men över nya low: hysteresen
@@ -398,7 +398,7 @@ func TestActiveTimeDuplicateNoDoubleCount(t *testing.T) {
 	}
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
-	if _, err := rt.RegisterThing("tn", c, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "tn", c, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -421,7 +421,7 @@ func TestActiveTimeDuplicateNoDoubleCount(t *testing.T) {
 	if got := *out[0].Outcome.Updated["run"].Value; got != 900 {
 		t.Fatalf("run=%v, want 900 (duplicate must not double)", got)
 	}
-	st, _ := fs.LoadThing("tn", "th")
+	st, _ := fs.LoadThing(context.Background(), "tn", "th")
 	if acc := decodeActiveTime(t, st.ProcessorStates["run"]).AccumulatedSec; acc != 900 {
 		t.Fatalf("accumulated=%d, want 900", acc)
 	}
@@ -556,24 +556,24 @@ func TestProcStateNoAliasing(t *testing.T) {
 	}
 	fs := newFakeStore()
 	rt := NewRuntime(fs)
-	if _, err := rt.RegisterThing("tn", c, obj, 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "tn", c, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	if _, err := rt.HandleBatch(context.Background(), "tn", "m1", []things.Observation{sigObs("s", 1, t1)}, t1); err != nil {
 		t.Fatalf("batch: %v", err)
 	}
-	st1, _ := fs.LoadThing("tn", "th")
+	st1, _ := fs.LoadThing(context.Background(), "tn", "th")
 	origJSON := append([]byte(nil), st1.ProcessorStates["run"].StateJSON...)
 	st1.ProcessorStates["run"].StateJSON[0] ^= 0xFF
 	st1.ProcessorStates["evil"] = StoredProcessor{Operator: "x"}
-	st2, _ := fs.LoadThing("tn", "th")
+	st2, _ := fs.LoadThing(context.Background(), "tn", "th")
 	if _, ok := st2.ProcessorStates["evil"]; ok {
 		t.Fatal("LoadThing shares processor map with store (aliasing)")
 	}
 	if string(st2.ProcessorStates["run"].StateJSON) != string(origJSON) {
 		t.Fatal("LoadThing shares StateJSON array with store (aliasing): store corrupted via loaded copy")
 	}
-	st3, _ := fs.LoadThing("tn", "th")
+	st3, _ := fs.LoadThing(context.Background(), "tn", "th")
 	orig := decodeActiveTime(t, st3.ProcessorStates["run"])
 	if !orig.Active || orig.StartUnix != t1.Unix() {
 		t.Fatalf("store corrupted via loaded copy: %+v", orig)

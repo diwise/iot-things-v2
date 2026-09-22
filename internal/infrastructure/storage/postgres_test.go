@@ -92,29 +92,29 @@ func TestPostgresThingCAS(t *testing.T) {
 	s := pgTestStore(t)
 	a := application.RuntimeStore(s)
 	st := application.StoredThingState{ConfigJSON: []byte(`{"a":1}`), Revision: 1, DataRevision: 1}
-	if !a.InsertThing("t", "x", st) {
+	if !a.InsertThing(context.Background(), "t", "x", st) {
 		t.Fatal("insert must store")
 	}
-	if a.InsertThing("t", "x", st) {
+	if a.InsertThing(context.Background(), "t", "x", st) {
 		t.Fatal("duplicate insert must fail")
 	}
 	st.Revision = 2
 	st.DataRevision = 2
-	if a.SaveThingCAS("t", "x", 99, st) {
+	if a.SaveThingCAS(context.Background(), "t", "x", 99, st) {
 		t.Fatal("stale CAS must fail")
 	}
-	if !a.SaveThingCAS("t", "x", 1, st) {
+	if !a.SaveThingCAS(context.Background(), "t", "x", 1, st) {
 		t.Fatal("matching CAS must store")
 	}
-	got, ok := a.LoadThing("t", "x")
+	got, ok := a.LoadThing(context.Background(), "t", "x")
 	if !ok || got.Revision != 2 || got.DataRevision != 2 {
 		t.Fatalf("got=%+v", got)
 	}
-	if _, ok := a.LoadThing("other", "x"); ok {
+	if _, ok := a.LoadThing(context.Background(), "other", "x"); ok {
 		t.Fatal("cross-tenant leak")
 	}
-	a.DeleteThingState("t", "x")
-	if _, ok := a.LoadThing("t", "x"); ok {
+	a.DeleteThingState(context.Background(), "t", "x")
+	if _, ok := a.LoadThing(context.Background(), "t", "x"); ok {
 		t.Fatal("delete must remove")
 	}
 }
@@ -127,7 +127,7 @@ func TestPostgresReadableConfig(t *testing.T) {
 		ConfigJSON: []byte(`{"thingId":"x","templateId":"wastebin","templateVersion":"v1"}`),
 		Revision:   3, DataRevision: 5,
 	}
-	if !a.InsertThing("t", "x", st) {
+	if !a.InsertThing(context.Background(), "t", "x", st) {
 		t.Fatal("insert must store")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -158,7 +158,7 @@ func TestPostgresCommitBatchAtomic(t *testing.T) {
 			"distance": {Value: &v, Quality: "ok", ObservedAt: at},
 		},
 	}
-	if !a.InsertThing("t", "gauge-1", st) {
+	if !a.InsertThing(context.Background(), "t", "gauge-1", st) {
 		t.Fatal("insert")
 	}
 	hist := []application.HistoryWrite{{
@@ -170,28 +170,28 @@ func TestPostgresCommitBatchAtomic(t *testing.T) {
 		ObservedAt: at, ReceivedAt: at, MessageID: "stale", ConfigRevision: 1,
 	}}
 	st.DataRevision = 8
-	if a.CommitBatch("t", "gauge-1", "stale", 6, st, hist, pending) {
+	if a.CommitBatch(context.Background(), "t", "gauge-1", "stale", 6, st, hist, pending) {
 		t.Fatal("conflicting fence must fail")
 	}
-	if got := a.History("t", "gauge-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
+	if got := a.History(context.Background(), "t", "gauge-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 0 {
 		t.Fatalf("history=%d after failed commit, want 0", len(got))
 	}
-	if pending := a.PendingEvents("t", "gauge-1"); len(pending) != 0 {
+	if pending := a.PendingEvents(context.Background(), "t", "gauge-1"); len(pending) != 0 {
 		t.Fatalf("pending=%d after failed commit, want 0", len(pending))
 	}
-	if a.DedupCheck("t", "stale", "gauge-1") {
+	if a.DedupCheck(context.Background(), "t", "stale", "gauge-1") {
 		t.Fatal("failed commit must not mark dedup")
 	}
-	if !a.CommitBatch("t", "gauge-1", "stale", 7, st, hist, pending) {
+	if !a.CommitBatch(context.Background(), "t", "gauge-1", "stale", 7, st, hist, pending) {
 		t.Fatal("matching fence must commit")
 	}
-	if !a.DedupCheck("t", "stale", "gauge-1") {
+	if !a.DedupCheck(context.Background(), "t", "stale", "gauge-1") {
 		t.Fatal("successful commit must mark dedup atomically")
 	}
-	if got := a.History("t", "gauge-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
+	if got := a.History(context.Background(), "t", "gauge-1", "", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("history=%d after commit, want 1", len(got))
 	}
-	if pending := a.PendingEvents("t", "gauge-1"); len(pending) != 1 {
+	if pending := a.PendingEvents(context.Background(), "t", "gauge-1"); len(pending) != 1 {
 		t.Fatalf("pending=%d after commit, want 1", len(pending))
 	}
 }
@@ -205,10 +205,10 @@ func TestPostgresHistoryDedup(t *testing.T) {
 		PropertyID: "temperature.window", Value: &v, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, Source: "s1/3303/5700", MessageID: "m1",
 	}
-	if !a.AppendHistory("t", "room-a", hw) {
+	if !a.AppendHistory(context.Background(), "t", "room-a", hw) {
 		t.Fatal("first append must store")
 	}
-	if a.AppendHistory("t", "room-a", hw) {
+	if a.AppendHistory(context.Background(), "t", "room-a", hw) {
 		t.Fatal("identical append must dedup")
 	}
 	// Nil-värden dedupliceras också (NULL-safe uniknyckel).
@@ -216,19 +216,19 @@ func TestPostgresHistoryDedup(t *testing.T) {
 		PropertyID: "temperature.window", Quality: "invalid",
 		ObservedAt: at.Add(time.Hour), ReceivedAt: at, Source: "s1/3303/5700",
 	}
-	if !a.AppendHistory("t", "room-a", nilHW) {
+	if !a.AppendHistory(context.Background(), "t", "room-a", nilHW) {
 		t.Fatal("nil append must store")
 	}
-	if a.AppendHistory("t", "room-a", nilHW) {
+	if a.AppendHistory(context.Background(), "t", "room-a", nilHW) {
 		t.Fatal("nil duplicate must dedup")
 	}
-	if got := a.History("t", "room-a", "temperature.window", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
+	if got := a.History(context.Background(), "t", "room-a", "temperature.window", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
 		t.Fatalf("history=%d, want 2", len(got))
 	}
-	if got := a.History("t", "room-a", "", at, at, 0, 0); len(got) != 1 {
+	if got := a.History(context.Background(), "t", "room-a", "", at, at, 0, 0); len(got) != 1 {
 		t.Fatalf("ranged history=%d, want 1", len(got))
 	}
-	if got := a.History("t", "room-a", "", time.Time{}, time.Time{}, 1, 0); len(got) != 1 {
+	if got := a.History(context.Background(), "t", "room-a", "", time.Time{}, time.Time{}, 1, 0); len(got) != 1 {
 		t.Fatalf("limited history=%d, want 1", len(got))
 	}
 }
@@ -241,25 +241,25 @@ func TestPostgresOutbox(t *testing.T) {
 		PropertyID: "distance", Value: 0.3, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
 	}
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
-	if pending := a.PendingEvents("t", "bin-42"); len(pending) != 1 {
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
+	if pending := a.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 1 {
 		t.Fatalf("pending=%d, want deduped 1", len(pending))
 	}
-	a.ClearPendingIDs("t", "bin-42", []string{application.StableEventID("t", "bin-42", "m1", "distance")})
-	if pending := a.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	a.ClearPendingIDs(context.Background(), "t", "bin-42", []string{application.StableEventID("t", "bin-42", "m1", "distance")})
+	if pending := a.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("pending=%d after clear", len(pending))
 	}
 	// Seen överlever clear: återleverans publiceras ej igen.
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
-	if pending := a.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
+	if pending := a.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("redelivery must stay deduped, pending=%d", len(pending))
 	}
-	if a.DedupCheck("t", "m1", "bin-42") {
+	if a.DedupCheck(context.Background(), "t", "m1", "bin-42") {
 		t.Fatal("first sight must not hit")
 	}
-	a.DedupMark("t", "m1", "bin-42")
-	if !a.DedupCheck("t", "m1", "bin-42") {
+	a.DedupMark(context.Background(), "t", "m1", "bin-42")
+	if !a.DedupCheck(context.Background(), "t", "m1", "bin-42") {
 		t.Fatal("second sight must hit")
 	}
 }
@@ -275,20 +275,20 @@ func TestPostgresOutboxTenantIsolation(t *testing.T) {
 		PropertyID: "p", Value: 1.0, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
 	}
-	a.StorePending("a/b", "c", []application.FlowEvent{ev})
-	a.StorePending("a~b", "c", []application.FlowEvent{ev})
-	if pending := a.PendingEvents("a/b", "c"); len(pending) != 1 {
+	a.StorePending(context.Background(), "a/b", "c", []application.FlowEvent{ev})
+	a.StorePending(context.Background(), "a~b", "c", []application.FlowEvent{ev})
+	if pending := a.PendingEvents(context.Background(), "a/b", "c"); len(pending) != 1 {
 		t.Fatalf("pending a/b=%d, want 1", len(pending))
 	}
-	if pending := a.PendingEvents("a~b", "c"); len(pending) != 1 {
+	if pending := a.PendingEvents(context.Background(), "a~b", "c"); len(pending) != 1 {
 		t.Fatalf("pending a~b=%d, want 1 (no cross-tenant false dedup)", len(pending))
 	}
-	a.DeleteThingState("a/b", "c")
-	if pending := a.PendingEvents("a~b", "c"); len(pending) != 1 {
+	a.DeleteThingState(context.Background(), "a/b", "c")
+	if pending := a.PendingEvents(context.Background(), "a~b", "c"); len(pending) != 1 {
 		t.Fatalf("pending a~b after forget=%d, want 1", len(pending))
 	}
-	a.StorePending("a~b", "c", []application.FlowEvent{ev})
-	if pending := a.PendingEvents("a~b", "c"); len(pending) != 1 {
+	a.StorePending(context.Background(), "a~b", "c", []application.FlowEvent{ev})
+	if pending := a.PendingEvents(context.Background(), "a~b", "c"); len(pending) != 1 {
 		t.Fatalf("redelivery for survivor must stay deduped, pending=%d", len(pending))
 	}
 }
@@ -296,32 +296,32 @@ func TestPostgresOutboxTenantIsolation(t *testing.T) {
 func TestPostgresRelations(t *testing.T) {
 	s := pgTestStore(t)
 	a := application.RuntimeStore(s)
-	if err := a.AttachChild("t", "room-a", "building-a"); err != nil {
+	if err := a.AttachChild(context.Background(), "t", "room-a", "building-a"); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
-	if err := a.AttachChild("t", "room-a", "building-a"); err != nil {
+	if err := a.AttachChild(context.Background(), "t", "room-a", "building-a"); err != nil {
 		t.Fatalf("re-attach must be idempotent: %v", err)
 	}
-	if err := a.AttachChild("t", "building-a", "building-a"); err == nil {
+	if err := a.AttachChild(context.Background(), "t", "building-a", "building-a"); err == nil {
 		t.Fatal("self-reference must fail")
 	}
-	if children := a.Children("t", "building-a"); len(children) != 1 || children[0] != "room-a" {
+	if children := a.Children(context.Background(), "t", "building-a"); len(children) != 1 || children[0] != "room-a" {
 		t.Fatalf("children=%v", children)
 	}
-	if parent, ok := a.ParentOf("t", "room-a"); !ok || parent != "building-a" {
+	if parent, ok := a.ParentOf(context.Background(), "t", "room-a"); !ok || parent != "building-a" {
 		t.Fatalf("parent=%q", parent)
 	}
-	if err := a.AttachChild("t", "building-a", "room-a"); err == nil {
+	if err := a.AttachChild(context.Background(), "t", "building-a", "room-a"); err == nil {
 		t.Fatal("cycle must be denied")
 	}
-	if err := a.MoveChild("t", "room-a", "building-b"); err != nil {
+	if err := a.MoveChild(context.Background(), "t", "room-a", "building-b"); err != nil {
 		t.Fatalf("move: %v", err)
 	}
-	if parent, _ := a.ParentOf("t", "room-a"); parent != "building-b" {
+	if parent, _ := a.ParentOf(context.Background(), "t", "room-a"); parent != "building-b" {
 		t.Fatalf("parent=%q after move", parent)
 	}
-	a.DetachChild("t", "room-a")
-	if _, ok := a.ParentOf("t", "room-a"); ok {
+	a.DetachChild(context.Background(), "t", "room-a")
+	if _, ok := a.ParentOf(context.Background(), "t", "room-a"); ok {
 		t.Fatal("detach must remove link")
 	}
 }
@@ -405,7 +405,7 @@ func TestPostgresRuntimeEndToEnd(t *testing.T) {
 	a := application.RuntimeStore(s)
 	rt := application.NewRuntime(a)
 	cat := pgBinCatalog(t)
-	if _, err := rt.RegisterThing("t", cat, pgBinObject(), 1); err != nil {
+	if _, err := rt.RegisterThing(context.Background(), "t", cat, pgBinObject(), 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -416,7 +416,7 @@ func TestPostgresRuntimeEndToEnd(t *testing.T) {
 	if len(out) != 1 || len(out[0].Outcome.Events) != 3 {
 		t.Fatalf("outcome=%+v", out)
 	}
-	if got := a.History("t", "bin-42", "fillRate", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
+	if got := a.History(context.Background(), "t", "bin-42", "fillRate", time.Time{}, time.Time{}, 0, 0); len(got) != 1 {
 		t.Fatalf("fillRate history=%d, want 1", len(got))
 	}
 	// Omstart: nytt Runtime över samma PgStore.
@@ -428,7 +428,7 @@ func TestPostgresRuntimeEndToEnd(t *testing.T) {
 	if !dup[0].Duplicate {
 		t.Fatal("dedup must survive restart")
 	}
-	if got := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 3 {
+	if got := a.History(context.Background(), "t", "bin-42", "", time.Time{}, time.Time{}, 0, 0); len(got) != 3 {
 		t.Fatalf("history=%d, want 3 (no double count)", len(got))
 	}
 	pub := &pgStubPublisher{}
@@ -439,7 +439,7 @@ func TestPostgresRuntimeEndToEnd(t *testing.T) {
 	if n != 1 || pub.events != 3 {
 		t.Fatalf("drained=%d values=%d, want 1/3", n, pub.events)
 	}
-	if pending := a.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	if pending := a.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("pending=%d after drain", len(pending))
 	}
 }
@@ -466,7 +466,7 @@ func TestPostgresCrossInstanceConcurrency(t *testing.T) {
 		},
 	}
 	rtA := application.NewRuntime(a)
-	if _, err := rtA.RegisterThing("t", c, obj, 1); err != nil {
+	if _, err := rtA.RegisterThing(context.Background(), "t", c, obj, 1); err != nil {
 		t.Fatalf("register: %v", err)
 	}
 	rtB := application.NewRuntime(a)
@@ -499,12 +499,12 @@ func TestPostgresCrossInstanceConcurrency(t *testing.T) {
 			t.Fatalf("batch %d: %v", i, err)
 		}
 	}
-	st, ok := a.LoadThing("t", "gauge-1")
+	st, ok := a.LoadThing(context.Background(), "t", "gauge-1")
 	if !ok {
 		t.Fatal("thing missing")
 	}
 	_ = st
-	hist := a.History("t", "gauge-1", "distance", time.Time{}, time.Time{}, 0, 0)
+	hist := a.History(context.Background(), "t", "gauge-1", "distance", time.Time{}, time.Time{}, 0, 0)
 	if len(hist) != 10 {
 		t.Fatalf("history=%d, want 10 (no lost writes)", len(hist))
 	}
@@ -514,7 +514,7 @@ func TestPostgresCrossInstanceConcurrency(t *testing.T) {
 	}
 	// Aktuellt ska vara senaste mättid (inte nödvändigtvis värde 9 om
 	// batchar omlott, men aldrig äldre än äldsta vinnare: kontrollera via state).
-	cur, ok := a.LoadThing("t", "gauge-1")
+	cur, ok := a.LoadThing(context.Background(), "t", "gauge-1")
 	if !ok || len(cur.Current) == 0 {
 		t.Fatal("current missing")
 	}
@@ -537,13 +537,13 @@ func TestPostgresHistoryLateRoundTrip(t *testing.T) {
 		ObservedAt: at, ReceivedAt: at, Source: "recipe:wastebin-level",
 		MessageID: "m1",
 	}
-	if !a.AppendHistory("t", "bin-42", late) {
+	if !a.AppendHistory(context.Background(), "t", "bin-42", late) {
 		t.Fatal("late append must store")
 	}
-	if !a.AppendHistory("t", "bin-42", cur) {
+	if !a.AppendHistory(context.Background(), "t", "bin-42", cur) {
 		t.Fatal("current append must store")
 	}
-	all := a.History("t", "bin-42", "", time.Time{}, time.Time{}, 0, 0)
+	all := a.History(context.Background(), "t", "bin-42", "", time.Time{}, time.Time{}, 0, 0)
 	if len(all) != 2 {
 		t.Fatalf("empty prop must return all, got %d", len(all))
 	}
@@ -569,10 +569,10 @@ func TestPostgresHistoryNullVsNaN(t *testing.T) {
 		PropertyID: "p", Quality: "invalid",
 		ObservedAt: at, ReceivedAt: at, Source: "s",
 	}
-	if !a.AppendHistory("t", "thing-1", nilHW) {
+	if !a.AppendHistory(context.Background(), "t", "thing-1", nilHW) {
 		t.Fatal("nil append must store")
 	}
-	if a.AppendHistory("t", "thing-1", nilHW) {
+	if a.AppendHistory(context.Background(), "t", "thing-1", nilHW) {
 		t.Fatal("nil duplicate must dedup")
 	}
 	nan := float64(0)
@@ -581,13 +581,13 @@ func TestPostgresHistoryNullVsNaN(t *testing.T) {
 		PropertyID: "p", Value: &nan, Quality: "uncertain",
 		ObservedAt: at, ReceivedAt: at, Source: "s",
 	}
-	if !a.AppendHistory("t", "thing-1", nanHW) {
+	if !a.AppendHistory(context.Background(), "t", "thing-1", nanHW) {
 		t.Fatal("NaN with different quality must store as distinct row")
 	}
-	if a.AppendHistory("t", "thing-1", nanHW) {
+	if a.AppendHistory(context.Background(), "t", "thing-1", nanHW) {
 		t.Fatal("NaN duplicate must dedup")
 	}
-	if got := a.History("t", "thing-1", "p", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
+	if got := a.History(context.Background(), "t", "thing-1", "p", time.Time{}, time.Time{}, 0, 0); len(got) != 2 {
 		t.Fatalf("history=%d, want 2 (nil + NaN distinct)", len(got))
 	}
 }
@@ -601,40 +601,40 @@ func TestPostgresDeleteForgetsSeenAndDedup(t *testing.T) {
 	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	v := 21.5
 	st := application.StoredThingState{ConfigJSON: []byte(`{"a":1}`), Revision: 1, DataRevision: 1}
-	if !a.InsertThing("t", "bin-42", st) {
+	if !a.InsertThing(context.Background(), "t", "bin-42", st) {
 		t.Fatal("insert")
 	}
 	hw := application.HistoryWrite{
 		PropertyID: "temperature.window", Value: &v, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, Source: "s1", MessageID: "m1",
 	}
-	if !a.AppendHistory("t", "bin-42", hw) {
+	if !a.AppendHistory(context.Background(), "t", "bin-42", hw) {
 		t.Fatal("history append")
 	}
 	ev := application.FlowEvent{
 		PropertyID: "temperature.window", Value: 21.5, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
 	}
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
-	a.DedupMark("t", "m1", "bin-42")
-	a.DeleteThingState("t", "bin-42")
-	if _, ok := a.LoadThing("t", "bin-42"); ok {
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
+	a.DedupMark(context.Background(), "t", "m1", "bin-42")
+	a.DeleteThingState(context.Background(), "t", "bin-42")
+	if _, ok := a.LoadThing(context.Background(), "t", "bin-42"); ok {
 		t.Fatal("state must be gone after delete")
 	}
-	if pending := a.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	if pending := a.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("pending=%d after delete, want 0", len(pending))
 	}
-	if a.DedupCheck("t", "m1", "bin-42") {
+	if a.DedupCheck(context.Background(), "t", "m1", "bin-42") {
 		t.Fatal("dedup must be forgotten after delete")
 	}
-	if a.AppendHistory("t", "bin-42", hw) {
+	if a.AppendHistory(context.Background(), "t", "bin-42", hw) {
 		t.Fatal("history must survive delete (duplicate must dedup)")
 	}
-	if !a.InsertThing("t", "bin-42", st) {
+	if !a.InsertThing(context.Background(), "t", "bin-42", st) {
 		t.Fatal("recreate must succeed")
 	}
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
-	if pending := a.PendingEvents("t", "bin-42"); len(pending) != 1 {
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
+	if pending := a.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 1 {
 		t.Fatalf("pending=%d after recreate, want 1 (seen forgotten)", len(pending))
 	}
 }
@@ -650,9 +650,9 @@ func TestPostgresSeenSurvivesRestart(t *testing.T) {
 		PropertyID: "distance", Value: 0.3, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m1", ConfigRevision: 1,
 	}
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
-	a.ClearPendingIDs("t", "bin-42", []string{application.StableEventID("t", "bin-42", "m1", "distance")})
-	a.DedupMark("t", "m1", "bin-42")
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
+	a.ClearPendingIDs(context.Background(), "t", "bin-42", []string{application.StableEventID("t", "bin-42", "m1", "distance")})
+	a.DedupMark(context.Background(), "t", "m1", "bin-42")
 	get := func(key, def string) string {
 		if v := os.Getenv(key); v != "" {
 			return v
@@ -673,11 +673,11 @@ func TestPostgresSeenSurvivesRestart(t *testing.T) {
 	}
 	defer s2.Close()
 	a2 := application.RuntimeStore(s2)
-	a2.StorePending("t", "bin-42", []application.FlowEvent{ev})
-	if pending := a2.PendingEvents("t", "bin-42"); len(pending) != 0 {
+	a2.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
+	if pending := a2.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 0 {
 		t.Fatalf("redelivery after restart must stay deduped, pending=%d", len(pending))
 	}
-	if !a2.DedupCheck("t", "m1", "bin-42") {
+	if !a2.DedupCheck(context.Background(), "t", "m1", "bin-42") {
 		t.Fatal("dedup must survive restart")
 	}
 }
@@ -725,7 +725,7 @@ func TestPostgresConcurrentRegisterSameThing(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			insertWins[i] = a.InsertThing("t", "race-insert",
+			insertWins[i] = a.InsertThing(context.Background(), "t", "race-insert",
 				application.StoredThingState{ConfigJSON: []byte(`{"a":1}`), Revision: 1, DataRevision: 1})
 		}(i)
 	}
@@ -760,7 +760,7 @@ func TestPostgresConcurrentRegisterSameThing(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			rt := application.NewRuntime(a)
-			_, errs[i] = rt.RegisterThing("t", c, obj, 1)
+			_, errs[i] = rt.RegisterThing(context.Background(), "t", c, obj, 1)
 		}(i)
 	}
 	wg.Wait()
@@ -773,7 +773,7 @@ func TestPostgresConcurrentRegisterSameThing(t *testing.T) {
 	if rwins < 1 || rwins > 2 {
 		t.Fatalf("register wins=%d, want 1 or 2 (create + at most one update)", rwins)
 	}
-	if _, ok := a.LoadThing("t", "gauge-1"); !ok {
+	if _, ok := a.LoadThing(context.Background(), "t", "gauge-1"); !ok {
 		t.Fatal("thing missing after concurrent register")
 	}
 }
@@ -790,12 +790,12 @@ func TestPostgresHistoryNegZeroDedup(t *testing.T) {
 			ObservedAt: at, ReceivedAt: at, Source: "s",
 		}
 	}
-	if !a.AppendHistory("t", "negzero", mk(0.0)) {
+	if !a.AppendHistory(context.Background(), "t", "negzero", mk(0.0)) {
 		t.Fatal("0.0 must store")
 	}
 	neg := 0.0
 	neg = -neg
-	if a.AppendHistory("t", "negzero", mk(neg)) {
+	if a.AppendHistory(context.Background(), "t", "negzero", mk(neg)) {
 		t.Fatal("-0 must dedup against 0 (same as memory)")
 	}
 }
@@ -811,17 +811,17 @@ func TestPostgresHistorySubMicrosecondDedup(t *testing.T) {
 		PropertyID: "p", Value: &v, Quality: "ok",
 		ObservedAt: base, ReceivedAt: base, Source: "s",
 	}
-	if !a.AppendHistory("t", "micros", first) {
+	if !a.AppendHistory(context.Background(), "t", "micros", first) {
 		t.Fatal("first must store")
 	}
 	dup := first
 	dup.ObservedAt = time.Date(2026, 9, 17, 12, 0, 0, 123456780, time.UTC)
-	if a.AppendHistory("t", "micros", dup) {
+	if a.AppendHistory(context.Background(), "t", "micros", dup) {
 		t.Fatal("same microsecond (different nanos) must dedup")
 	}
 	other := first
 	other.ObservedAt = base.Add(2 * time.Microsecond)
-	if !a.AppendHistory("t", "micros", other) {
+	if !a.AppendHistory(context.Background(), "t", "micros", other) {
 		t.Fatal("different microsecond must store")
 	}
 }
@@ -840,29 +840,29 @@ func TestPostgresDeleteSeenPrefixEscaping(t *testing.T) {
 		}
 	}
 	// "a_b" innehåller '_' (LIKE-wildcard); "aXb" skulle felaktigt matchas.
-	a.StorePending("t", "a_b", []application.FlowEvent{mkEv("m1")})
-	a.StorePending("t", "aXb", []application.FlowEvent{mkEv("m1")})
-	a.ClearPendingIDs("t", "a_b", []string{application.StableEventID("t", "a_b", "m1", "p")})
-	a.ClearPendingIDs("t", "aXb", []string{application.StableEventID("t", "aXb", "m1", "p")})
+	a.StorePending(context.Background(), "t", "a_b", []application.FlowEvent{mkEv("m1")})
+	a.StorePending(context.Background(), "t", "aXb", []application.FlowEvent{mkEv("m1")})
+	a.ClearPendingIDs(context.Background(), "t", "a_b", []string{application.StableEventID("t", "a_b", "m1", "p")})
+	a.ClearPendingIDs(context.Background(), "t", "aXb", []string{application.StableEventID("t", "aXb", "m1", "p")})
 	st := application.StoredThingState{ConfigJSON: []byte(`{}`), Revision: 1, DataRevision: 1}
-	if !a.InsertThing("t", "a_b", st) {
+	if !a.InsertThing(context.Background(), "t", "a_b", st) {
 		t.Fatal("insert a_b")
 	}
-	if !a.InsertThing("t", "aXb", st) {
+	if !a.InsertThing(context.Background(), "t", "aXb", st) {
 		t.Fatal("insert aXb")
 	}
-	a.DeleteThingState("t", "a_b")
+	a.DeleteThingState(context.Background(), "t", "a_b")
 	// aXb:s seen ska vara orörd: återleverans ska fortsatt dedupliceras.
-	a.StorePending("t", "aXb", []application.FlowEvent{mkEv("m1")})
-	if pending := a.PendingEvents("t", "aXb"); len(pending) != 0 {
+	a.StorePending(context.Background(), "t", "aXb", []application.FlowEvent{mkEv("m1")})
+	if pending := a.PendingEvents(context.Background(), "t", "aXb"); len(pending) != 0 {
 		t.Fatalf("aXb seen wrongly deleted by a_b delete, pending=%d", len(pending))
 	}
 	// a_b:s seen ska vara glömd: nyskapad sak kan återanvända ID.
-	if !a.InsertThing("t", "a_b", st) {
+	if !a.InsertThing(context.Background(), "t", "a_b", st) {
 		t.Fatal("recreate a_b")
 	}
-	a.StorePending("t", "a_b", []application.FlowEvent{mkEv("m1")})
-	if pending := a.PendingEvents("t", "a_b"); len(pending) != 1 {
+	a.StorePending(context.Background(), "t", "a_b", []application.FlowEvent{mkEv("m1")})
+	if pending := a.PendingEvents(context.Background(), "t", "a_b"); len(pending) != 1 {
 		t.Fatalf("a_b seen must be forgotten after delete, pending=%d", len(pending))
 	}
 }
@@ -878,7 +878,7 @@ func TestPostgresPendingSurvivesRestart(t *testing.T) {
 		PropertyID: "distance", Value: 0.3, Quality: "ok",
 		ObservedAt: at, ReceivedAt: at, MessageID: "m-pending", ConfigRevision: 1,
 	}
-	a.StorePending("t", "bin-42", []application.FlowEvent{ev})
+	a.StorePending(context.Background(), "t", "bin-42", []application.FlowEvent{ev})
 	get := func(key, def string) string {
 		if v := os.Getenv(key); v != "" {
 			return v
@@ -899,7 +899,7 @@ func TestPostgresPendingSurvivesRestart(t *testing.T) {
 	}
 	defer s2.Close()
 	a2 := application.RuntimeStore(s2)
-	if pending := a2.PendingEvents("t", "bin-42"); len(pending) != 1 {
+	if pending := a2.PendingEvents(context.Background(), "t", "bin-42"); len(pending) != 1 {
 		t.Fatalf("pending must survive restart, got %d", len(pending))
 	}
 }
@@ -910,7 +910,7 @@ func TestPostgresPendingSurvivesRestart(t *testing.T) {
 func TestPostgresAttachChildConflictAfterRace(t *testing.T) {
 	s := pgTestStore(t)
 	a := application.RuntimeStore(s)
-	if err := a.AttachChild("t", "race-child", "parent-a"); err != nil {
+	if err := a.AttachChild(context.Background(), "t", "race-child", "parent-a"); err != nil {
 		t.Fatalf("first attach: %v", err)
 	}
 	// Simulerar förlorarens INSERT efter att vinnaren redan skrivit:
@@ -927,10 +927,10 @@ func TestPostgresAttachChildConflictAfterRace(t *testing.T) {
 		t.Fatal("conflicting raw insert should affect 0 rows (PK conflict)")
 	}
 	// Adaptervägen ska nu rapportera konflikt, ej nil.
-	if err := a.AttachChild("t", "race-child", "parent-b"); err == nil {
+	if err := a.AttachChild(context.Background(), "t", "race-child", "parent-b"); err == nil {
 		t.Fatal("second parent must conflict, not silent success")
 	}
-	if parent, _ := a.ParentOf("t", "race-child"); parent != "parent-a" {
+	if parent, _ := a.ParentOf(context.Background(), "t", "race-child"); parent != "parent-a" {
 		t.Fatalf("parent=%q, want parent-a (winner kept)", parent)
 	}
 }
@@ -961,24 +961,24 @@ func TestPostgresRawOutbox(t *testing.T) {
 		ID: "v1/t/x/lifecycle/created/1", Topic: pkgtypes.TopicLifecycleChanges,
 		Payload: []byte(`{"kind":"created"}`), ObservedAt: at, Revision: 1,
 	}
-	a.StoreRawEvents("t", "x", []application.RawOutboxEvent{ev, ev})
-	got := a.PendingRawEvents("t", "x")
+	a.StoreRawEvents(context.Background(), "t", "x", []application.RawOutboxEvent{ev, ev})
+	got := a.PendingRawEvents(context.Background(), "t", "x")
 	if len(got) != 1 || got[0].Topic != pkgtypes.TopicLifecycleChanges {
 		t.Fatalf("pending raw=%+v, want one lifecycle row", got)
 	}
-	targets := a.ListRawTargets()
+	targets := a.ListRawTargets(context.Background())
 	if len(targets) != 1 || targets[0].Tenant != "t" || targets[0].ThingID != "x" {
 		t.Fatalf("targets=%+v, want t/x", targets)
 	}
 	// Värderader syns inte i råa frågor.
-	if len(a.PendingRawEvents("t", "nope")) != 0 {
+	if len(a.PendingRawEvents(context.Background(), "t", "nope")) != 0 {
 		t.Fatal("unknown thing must have no raw rows")
 	}
-	a.ClearRawIDs("t", "x", []string{ev.ID})
-	if len(a.PendingRawEvents("t", "x")) != 0 {
+	a.ClearRawIDs(context.Background(), "t", "x", []string{ev.ID})
+	if len(a.PendingRawEvents(context.Background(), "t", "x")) != 0 {
 		t.Fatal("cleared raw rows must vanish")
 	}
-	if len(a.ListRawTargets()) != 0 {
+	if len(a.ListRawTargets(context.Background())) != 0 {
 		t.Fatal("targets must be empty after clear")
 	}
 }
@@ -988,13 +988,13 @@ func TestPostgresRawOutbox(t *testing.T) {
 func TestPostgresDeleteFailureSurfaces(t *testing.T) {
 	s := pgTestStore(t)
 	s.pool.Close()
-	if err := s.DeleteThingState("t", "x"); err == nil {
+	if err := s.DeleteThingState(context.Background(), "t", "x"); err == nil {
 		t.Fatal("closed pool DeleteThingState must fail")
 	}
-	if n, err := s.PurgeThingHistory("t", "x"); err == nil || n != 0 {
+	if n, err := s.PurgeThingHistory(context.Background(), "t", "x"); err == nil || n != 0 {
 		t.Fatalf("closed pool PurgeThingHistory=%d err=%v, want error", n, err)
 	}
-	if n, err := s.PurgeHistoryOlderThan(time.Now().UTC()); err == nil || n != 0 {
+	if n, err := s.PurgeHistoryOlderThan(context.Background(), time.Now().UTC()); err == nil || n != 0 {
 		t.Fatalf("closed pool PurgeHistoryOlderThan=%d err=%v, want error", n, err)
 	}
 }

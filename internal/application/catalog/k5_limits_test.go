@@ -1,137 +1,73 @@
 package catalog
 
 import (
-	"errors"
-	"fmt"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/diwise/iot-things-v2/internal/application/things"
 )
 
-// K5: ändliga tak per mall/sak. Taken ligger långt över legitimt bruk
-// (seed max: 8 egenskaper, 3 recept, 2 parametrar) och nekas med 400.
-func k5IDs(prefix string, n int) []string {
-	out := make([]string, n)
-	for i := range out {
-		out[i] = fmt.Sprintf("%s%02d", prefix, i)
+// TV-08: stora geometrier/strängar nekas vid kompilering.
+func TestCompileRejectsOversizeGeometryAndName(t *testing.T) {
+	c := New()
+	if err := c.PutTemplate(TemplateSpec{Template: things.Template{
+		ID: "t", Version: "v1", Category: "t",
+	}}); err != nil {
+		t.Fatalf("put: %v", err)
 	}
-	return out
+	// Stor polygon (över 64KB koordinater).
+	bigCoords := "[" + strings.Repeat("[18.0,59.3],", 6000) + "[18.0,59.3]]"
+	obj := ObjectSpec{
+		ThingID: "x", Tenant: "t", Name: "n",
+		Location:   &things.Location{Type: "Polygon", Coordinates: json.RawMessage(bigCoords)},
+		TemplateID: "t", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+	}
+	if _, err := c.Compile(obj); err == nil {
+		t.Fatal("oversize polygon must be rejected")
+	}
+	// Långt namn.
+	obj2 := ObjectSpec{
+		ThingID: "y", Tenant: "t", Name: strings.Repeat("n", 300),
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.0,59.3]`)},
+		TemplateID: "t", TemplateVersion: "v1",
+		Properties: map[string]things.Property{},
+	}
+	if _, err := c.Compile(obj2); err == nil {
+		t.Fatal("oversize name must be rejected")
+	}
 }
 
-func TestK5PublishRejectsTooManyProperties(t *testing.T) {
-	mk := func(n int) TemplateSpec {
-		return TemplateSpec{
-			Template: things.Template{
-				ID: "big", Version: "v1", Required: k5IDs("p", n), Category: "big",
-			},
-		}
-	}
-	if err := New().PutTemplate(mk(maxPropertiesPerThing + 1)); !errors.Is(err, things.ErrValidation) {
-		t.Fatalf("65 properties must fail validation, got %v", err)
-	}
-	if err := New().PutTemplate(mk(maxPropertiesPerThing)); err != nil {
-		t.Fatalf("64 properties must publish, got %v", err)
-	}
-}
-
-func TestK5PublishRejectsTooManyRecipes(t *testing.T) {
-	spec := TemplateSpec{
-		Template: things.Template{
-			ID: "many", Version: "v1", Required: []string{"p0"}, Category: "many",
-		},
-	}
-	for i := 0; i < maxRecipesPerTemplate+1; i++ {
-		spec.Recipes = append(spec.Recipes, Recipe{
-			Name: fmt.Sprintf("r%02d", i), Operator: "passthrough", Version: "v1",
-			Inputs: []string{"p0"}, Outputs: []string{"p0"},
+// TV-08: äldre mallar över recept-/parametertak nekas vid kompilering,
+// inte bara vid publicering.
+func TestCompileRejectsLegacyOverCapTemplate(t *testing.T) {
+	c := New()
+	recipes := make([]Recipe, 0, 33)
+	for i := 0; i < 33; i++ {
+		recipes = append(recipes, Recipe{
+			Name:     "r" + strings.Repeat("x", 3) + string(rune('a'+i%26)),
+			Operator: "noop", Inputs: []string{"p"}, Outputs: []string{"q"},
 		})
 	}
-	if err := New().PutTemplate(spec); !errors.Is(err, things.ErrValidation) {
-		t.Fatalf("33 recipes must fail validation, got %v", err)
-	}
-}
-
-func TestK5PublishRejectsTooManyParams(t *testing.T) {
 	spec := TemplateSpec{
-		Template: things.Template{
-			ID: "par", Version: "v1", Required: []string{"p0"}, Category: "par",
-		},
-		ParamDefaults: map[string]float64{},
+		Template: things.Template{ID: "legacy", Version: "v1", Category: "c", Required: []string{"p"}, Optional: []string{"q"}},
+		Recipes:  recipes,
 	}
-	for i := 0; i < maxParamsPerTemplate+1; i++ {
-		spec.ParamDefaults[fmt.Sprintf("par%02d", i)] = float64(i)
+	c.mu.Lock()
+	if c.templates == nil {
+		c.templates = make(map[string]TemplateSpec)
 	}
-	if err := New().PutTemplate(spec); !errors.Is(err, things.ErrValidation) {
-		t.Fatalf("65 params must fail validation, got %v", err)
-	}
-}
+	c.templates[versionKey("legacy", "v1")] = spec
+	c.mu.Unlock()
 
-func TestK5CompileRejectsTooManyBindings(t *testing.T) {
-	c := New()
-	if err := c.PutTemplate(wastebinTemplate()); err != nil {
-		t.Fatalf("publish: %v", err)
+	obj := ObjectSpec{
+		ThingID: "z", Tenant: "t", Name: "n",
+		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.0,59.3]`)},
+		TemplateID: "legacy", TemplateVersion: "v1",
+		Properties: map[string]things.Property{"p": {}},
 	}
-	bindings := make([]things.Binding, maxBindingsPerThing+1)
-	for i := range bindings {
-		bindings[i] = things.Binding{DeviceID: "s", Object: urnDistance, Resource: "5700", Input: "distance"}
-	}
-	_, err := c.Compile(ObjectSpec{
-		ThingID: "bin-42", Tenant: "t", Name: "Soptunna 42",
-		Location: testLocation(), Metadata: testMetadata(),
-		TemplateID: "wastebin", TemplateVersion: "v1",
-		Properties: map[string]things.Property{
-			"distance": {}, "level": {}, "fillRate": {},
-		},
-		Bindings: bindings,
-	})
-	if !errors.Is(err, things.ErrValidation) {
-		t.Fatalf("65 bindings must fail validation, got %v", err)
-	}
-}
-
-func TestK5CompileRejectsTooManyRelations(t *testing.T) {
-	c := New()
-	if err := c.PutTemplate(wastebinTemplate()); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	rels := make([]RelationRef, maxRelationsPerThing+1)
-	for i := range rels {
-		rels[i] = RelationRef{Name: "partOf", TargetThingID: fmt.Sprintf("parent-%d", i)}
-	}
-	_, err := c.Compile(ObjectSpec{
-		ThingID: "bin-42", Tenant: "t", Name: "Soptunna 42",
-		Location: testLocation(), Metadata: testMetadata(),
-		TemplateID: "wastebin", TemplateVersion: "v1",
-		Properties: map[string]things.Property{
-			"distance": {}, "level": {}, "fillRate": {},
-		},
-		Relations: rels,
-	})
-	if !errors.Is(err, things.ErrValidation) {
-		t.Fatalf("17 relations must fail validation, got %v", err)
-	}
-}
-
-func TestK5CompileRejectsTooManyProperties(t *testing.T) {
-	c := New()
-	ids := k5IDs("p", maxPropertiesPerThing+1)
-	props := make(map[string]things.Property, len(ids))
-	for _, id := range ids {
-		props[id] = things.Property{}
-	}
-	// Pre-K5-mall förbi publicering: kompilering nekar ändå.
-	c.templates[versionKey("big", "v1")] = TemplateSpec{
-		Template: things.Template{
-			ID: "big", Version: "v1", Required: ids, Category: "big",
-		},
-	}
-	_, err := c.Compile(ObjectSpec{
-		ThingID: "big-1", Tenant: "t", Name: "Stor",
-		Location: testLocation(), Metadata: testMetadata(),
-		TemplateID: "big", TemplateVersion: "v1",
-		Properties: props,
-	})
-	if !errors.Is(err, things.ErrValidation) {
-		t.Fatalf("65 properties must fail validation, got %v", err)
+	if _, err := c.Compile(obj); err == nil {
+		t.Fatal("legacy template over recipe cap must be rejected at compile")
 	}
 }
