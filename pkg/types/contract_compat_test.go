@@ -122,3 +122,47 @@ func TestGoldenEventJSON(t *testing.T) {
 		}
 	}
 }
+
+// Relationshändelser bär from/to-descriptors så att konsumenter kan routa
+// och rendera utan kataloguppslag. Fälten är additiva (omitempty): äldre
+// konsumenter som bara läser relationId/type/fromId/toId påverkas inte.
+func TestGoldenRelationChangeFromTo(t *testing.T) {
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	ev := RelationChangeV1{
+		RelationID: "partof-tank-1", Type: "partOf",
+		FromID: "tank-1", ToID: "greenhouse-a",
+		Tenant: "t", Revision: 2, ChangedAt: at,
+		FromThingType: "tank",
+		From:          &ThingDescriptorV1{ThingID: "tank-1", Name: "Tank 1", Category: "tank"},
+		ToThingType:   "greenhouse",
+		To:            &ThingDescriptorV1{ThingID: "greenhouse-a", Name: "Växthus A", Category: "greenhouse"},
+	}
+	raw := string(ev.Body())
+	for _, want := range []string{
+		`"relationId":"partof-tank-1"`,
+		`"type":"partOf"`,
+		`"fromId":"tank-1"`,
+		`"toId":"greenhouse-a"`,
+		`"fromThingType":"tank"`,
+		`"toThingType":"greenhouse"`,
+		`"thingId":"tank-1"`,
+		`"thingId":"greenhouse-a"`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("golden saknar %s:\n%s", want, raw)
+		}
+	}
+	var back RelationChangeV1
+	if err := json.Unmarshal([]byte(raw), &back); err != nil {
+		t.Fatalf("round-trip: %v", err)
+	}
+	if back.FromThingType != "tank" || back.From == nil || back.From.Name != "Tank 1" {
+		t.Fatalf("from=%+v, want descriptor", back.From)
+	}
+	if back.ToThingType != "greenhouse" || back.To == nil || back.To.Name != "Växthus A" {
+		t.Fatalf("to=%+v, want descriptor", back.To)
+	}
+	if back.TopicName() != TopicRelationChanges {
+		t.Fatalf("topic=%q", back.TopicName())
+	}
+}

@@ -75,3 +75,30 @@ mätpunkt läggs aldrig till automatiskt (R4/B4).
 Lufttemperatur hör till en separat observation från mätvärdet, inte
 till växthusentiteten. `alternateName` mappas från sakens
 `alternativeName` (samma värde som ID-segmentet) för spårbarhet.
+
+## Relationer (partOf set/removed)
+
+Relationshändelser (`things.v1.relations`) bär from/to-descriptors så att
+konsumenten kan routa och rendera utan kataloguppslag. `removed: true`
+betyder bortkopplad länk; `toId` bär då sista kända mål (vilken länk som
+försvann). Saknad rad, DB-fel och korrupt blob skiljs åt i lagringen;
+endast verkligt saknat mål ger `target: null` vid läsning (TV-05).
+
+```yaml
+# fromThingType/from: barnets mall + deskriptor (alltid satt).
+# toThingType/to: förälderns mall + deskriptor (saknas endast om
+# föräldersidan är okänd). Fältsökvägarna nedan är de som
+# transform-fiware exponerar (relation.{from,to}.*).
+- match: { kind: thing, event: things.v1.relations, relation: partOf, type: tank }
+  entities:
+    - id: "urn:ngsi-ld:AgriGreenhouse:{{field:relation.to.nameOrID}}"
+      type: AgriGreenhouse
+      properties:
+        - { target: hasWaterQualityObserved, field: relation.from.waterQualityObserved }
+```
+
+Konventioner (samma som sakens egna regler): `typeName` är
+`subType > thingType` och `nameOrID` är
+`alternativeName > name > thingId`. Konsumenten bygger förälderns
+entitets-ID ur `to`-deskriptorn och barnets observations-ID ur
+`from`-deskriptorn — aldrig ur råa ID:n ensamma.

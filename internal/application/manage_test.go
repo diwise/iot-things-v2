@@ -1810,14 +1810,34 @@ func TestManageLifecycleAndRelations(t *testing.T) {
 		if ev.RelationID == "" || ev.Type != "partOf" {
 			t.Fatalf("relation=%+v, want partOf with ID", ev)
 		}
+		// From-sidan bär alltid barnets mall + deskriptor så att konsumenter
+		// kan routa och rendera utan kataloguppslag.
+		if ev.FromThingType != "room" {
+			t.Fatalf("relation=%+v, want fromThingType room", ev)
+		}
+		if ev.From == nil || ev.From.ThingID != ev.FromID || ev.From.Category != "room" {
+			t.Fatalf("relation=%+v, want from descriptor", ev)
+		}
 		if ev.Removed {
 			removed++
 			// Removed bär sista kända mål (informativt: vilken länk som försvann).
 			removedTargets[ev.FromID] = ev.ToID
+			if ev.ToID == "" {
+				t.Fatalf("removed relation ToID empty: %+v", ev)
+			}
+			if ev.To == nil || ev.To.ThingID != ev.ToID {
+				t.Fatalf("relation=%+v, want to descriptor", ev)
+			}
 		} else {
 			sets++
 			if ev.ToID == "" {
 				t.Fatalf("set relation ToID empty: %+v", ev)
+			}
+			if ev.ToThingType != "building" {
+				t.Fatalf("relation=%+v, want toThingType building", ev)
+			}
+			if ev.To == nil || ev.To.ThingID != ev.ToID {
+				t.Fatalf("relation=%+v, want to descriptor", ev)
 			}
 		}
 		if ev.FromID == "room-a" && !ev.Removed {
@@ -1833,6 +1853,9 @@ func TestManageLifecycleAndRelations(t *testing.T) {
 	}
 	if removedTargets["room-b"] != "b-b" {
 		t.Fatalf("room-b removed target=%v, want b-b", removedTargets)
+	}
+	if removedTargets["room-a"] != "b-b" {
+		t.Fatalf("room-a removed target=%v, want b-b (unlink bär sista kända mål)", removedTargets)
 	}
 }
 

@@ -317,10 +317,15 @@ func (rt *Runtime) RegisterThing(ctx context.Context, tenant string, cat *catalo
 		}
 		relOps = append(relOps, RelationOp{Op: "attach", Target: rel.TargetThingID})
 	}
+	// detachedFrom bär den borttagna förälderns ID till removed-händelsen
+	// (ToID = sista kända mål enligt kontraktet). Op:et i sig förblir
+	// mållöst — lagringen tar bort utgående länk oavsett mål.
+	var detachedFrom string
 	if !hasPartOf {
 		// Borttagen partOf i ny config ska koppla loss (lämna ej kvar gammal länk).
-		if _, ok := rt.store.ParentOf(ctx, tenant, obj.ThingID); ok {
+		if old, ok := rt.store.ParentOf(ctx, tenant, obj.ThingID); ok {
 			relOps = append(relOps, RelationOp{Op: "detach"})
+			detachedFrom = old
 		}
 	}
 	st.Revision = newRevision
@@ -346,12 +351,19 @@ func (rt *Runtime) RegisterThing(ctx context.Context, tenant string, cat *catalo
 	}
 	rawEvents := []RawOutboxEvent{buildLifecycleEvent(tenant, cfg, kind, newRevision, now)}
 	for _, op := range relOps {
-		switch op.Op {
-		case "attach", "move":
-			rawEvents = append(rawEvents, buildRelationEvent(tenant, obj.ThingID, op.Target, false, newRevision, now))
-		case "detach":
-			rawEvents = append(rawEvents, buildRelationEvent(tenant, obj.ThingID, "", true, newRevision, now))
+		target := op.Target
+		if op.Op == "detach" {
+			target = detachedFrom
 		}
+		var parentCfg *catalog.EffectiveConfig
+		if target != "" {
+			var err error
+			parentCfg, err = rt.loadParentCfg(ctx, tenant, target)
+			if err != nil {
+				return nil, err
+			}
+		}
+		rawEvents = append(rawEvents, buildRelationEvent(tenant, cfg, parentCfg, obj.ThingID, target, op.Op == "detach", newRevision, now))
 	}
 	// Ett atomärt anrop: blob-CAS/insert + relationsvalidering med
 	// länkändringar + outbox. Misslyckas något (cykel, saknat mål,
@@ -476,7 +488,12 @@ func buildLifecycleEvent(tenant string, cfg *catalog.EffectiveConfig, kind pkgty
 // åtgärd: set och removed på samma revision (t.ex. skapa-med-förälder
 // följt av delete utan uppdatering emellan) är olika händelser och får
 // inte dedupliceras mot varandra.
-func buildRelationEvent(tenant, childID, parentID string, removed bool, revision int64, at time.Time) RawOutboxEvent {
+//
+// fromCfg är alltid barnets effektiva config; toCfg är förälderns (nil
+// ⇔ okänd föräldersida — undviks i praktiken genom att anroparen läser
+// föräldern före bygget). Båda serialiseras via describeThing så att
+// konsumenter kan routa och rendera utan kataloguppslag.
+func buildRelationEvent(tenant string, fromCfg, toCfg *catalog.EffectiveConfig, childID, parentID string, removed bool, revision int64, at time.Time) RawOutboxEvent {
 	action := "set"
 	if removed {
 		action = "removed"
@@ -491,11 +508,30 @@ func buildRelationEvent(tenant, childID, parentID string, removed bool, revision
 		Revision:   revision,
 		ChangedAt:  at,
 	}
+	if fromCfg != nil {
+		ev.FromThingType = fromCfg.TemplateID
+		ev.From = describeThing(fromCfg)
+	}
+	if toCfg != nil {
+		ev.ToThingType = toCfg.TemplateID
+		ev.To = describeThing(toCfg)
+	}
 	body, _ := json.Marshal(ev)
 	return RawOutboxEvent{
 		ID:    "v1/" + sanitizeEventID(tenant) + "/" + sanitizeEventID(childID) + "/relations/partof/" + strconv.FormatInt(revision, 10) + "/" + action,
 		Topic: ev.TopicName(), Payload: body, ObservedAt: at, Revision: revision,
 	}
+}
+
+// loadParentCfg läser och avkodar en förälders config för
+// relationshändelsers To-descriptor. Saknad eller korrupt förälder ger fel
+// (TV-05) — den får aldrig bli en tyst typlös händelse.
+func (rt *Runtime) loadParentCfg(ctx context.Context, tenant, parentID string) (*catalog.EffectiveConfig, error) {
+	pst, err := rt.store.LoadThingErr(ctx, tenant, parentID)
+	if err != nil {
+		return nil, err
+	}
+	return decodeConfig(pst.ConfigJSON)
 }
 
 // BatchOutcome är resultatet per sak för en batch.
@@ -739,7 +775,11 @@ func (rt *Runtime) DeleteThing(ctx context.Context, tenant, thingID string) erro
 	now := time.Now().UTC()
 	raw := []RawOutboxEvent{buildLifecycleEvent(tenant, cfg, pkgtypes.ThingDeleted, st.Revision, now)}
 	if hasParent {
-		raw = append(raw, buildRelationEvent(tenant, thingID, parent, true, st.Revision, now))
+		parentCfg, err := rt.loadParentCfg(ctx, tenant, parent)
+		if err != nil {
+			return err
+		}
+		raw = append(raw, buildRelationEvent(tenant, cfg, parentCfg, thingID, parent, true, st.Revision, now))
 	}
 	return rt.store.DeleteThingWithRelations(ctx, tenant, thingID, raw)
 }

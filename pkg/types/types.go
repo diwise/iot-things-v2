@@ -164,6 +164,11 @@ type ThingValuesEventV1 struct {
 // RelationChangeV1 describes a single directed relation change.
 // Removed marks a detached link; ToID then carries the last known target
 // (which link disappeared), otherwise the new one.
+//
+// FromThingType/From and ToThingType/To let consumers route and render
+// without a catalog join: typeName is SubType over thing type and nameOrID
+// is alternativeName over name over thing ID (same convention as the
+// thing's own rules). All four are additive and omitempty.
 type RelationChangeV1 struct {
 	RelationID string    `json:"relationId"`
 	Type       string    `json:"type"`
@@ -173,6 +178,13 @@ type RelationChangeV1 struct {
 	Tenant     string    `json:"tenant"`
 	Revision   int64     `json:"revision"`
 	ChangedAt  time.Time `json:"changedAt"`
+	// FromThingType is the child's template ID; From is its descriptor.
+	FromThingType string             `json:"fromThingType,omitempty"`
+	From          *ThingDescriptorV1 `json:"from,omitempty"`
+	// ToThingType is the parent's template ID; To is its descriptor.
+	// Absent only when the parent side is unknown.
+	ToThingType string             `json:"toThingType,omitempty"`
+	To          *ThingDescriptorV1 `json:"to,omitempty"`
 }
 
 // TopicName reports the publish topic (B20: isolated v1 topics).
