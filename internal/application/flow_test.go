@@ -1,6 +1,7 @@
 package application
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -1214,5 +1215,75 @@ func TestPerRecipeLinearConversions(t *testing.T) {
 	}
 	if got := *out.Updated["powerKw"].Value; got < 1.999 || got > 2.001 {
 		t.Fatalf("powerKw=%v, want 2.0", got)
+	}
+}
+
+// Seed-backed SI-parity: building/v3 och sink/v3 ur catalog-seed.json
+// kompilerar och konverterar v1-råvärden (J->kWh, W->kW) med låsta
+// faktorer. Låser att seed-innehållet faktiskt sluter konverteringsgapet,
+// inte bara att motorn kan linear (se TestPerRecipeLinearConversions).
+func TestSeedV3SIConversions(t *testing.T) {
+	raw, err := os.ReadFile("../../assets/config/catalog-seed.json")
+	if err != nil {
+		t.Fatalf("read seed: %v", err)
+	}
+	seed, err := catalog.ParseSeed(raw)
+	if err != nil {
+		t.Fatalf("parse seed: %v", err)
+	}
+	c := catalog.New()
+	for _, spec := range seed.Templates {
+		if err := c.PutTemplate(spec); err != nil {
+			t.Fatalf("publish %s/%s: %v", spec.Template.ID, spec.Template.Version, err)
+		}
+	}
+
+	compile := func(thingID, templateID string) catalog.EffectiveConfig {
+		t.Helper()
+		props := map[string]things.Property{"energy": {}, "power": {}, "energyKwh": {}, "powerKw": {}}
+		if templateID == "sink" {
+			for _, id := range []string{"temperature", "presence", "distance", "digitalInput", "illuminance", "humidity"} {
+				props[id] = things.Property{}
+			}
+		} else {
+			props["temperature"] = things.Property{}
+		}
+		cfg, err := c.Compile(catalog.ObjectSpec{
+			ThingID: thingID, Tenant: "t", Name: thingID,
+			Location: rtLoc(), Metadata: rtMeta(),
+			TemplateID: templateID, TemplateVersion: "v3",
+			Properties: props,
+			Bindings: []things.Binding{
+				{DeviceID: "s-e", Object: "urn:oma:lwm2m:ext:3331", Resource: "5700", Input: "energy"},
+				{DeviceID: "s-p", Object: "urn:oma:lwm2m:ext:3328", Resource: "5700", Input: "power"},
+			},
+		})
+		if err != nil {
+			t.Fatalf("compile %s/v3: %v", templateID, err)
+		}
+		return *cfg
+	}
+
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	joule, watt := 3600000.0, 2000.0
+	obs := []things.Observation{
+		{Signal: things.ParseSignalID("s-e", "", "urn:oma:lwm2m:ext:3331", "5700"), Value: &joule,
+			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+		{Signal: things.ParseSignalID("s-p", "", "urn:oma:lwm2m:ext:3328", "5700"), Value: &watt,
+			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
+	}
+
+	for _, templateID := range []string{"building", "sink"} {
+		cfg := compile("si-"+templateID, templateID)
+		out, err := EvaluateBatchFlow(&cfg, nil, nil, obs, base, "m1", 1)
+		if err != nil {
+			t.Fatalf("%s flow: %v", templateID, err)
+		}
+		if got := *out.Updated["energyKwh"].Value; got < 0.999 || got > 1.001 {
+			t.Fatalf("%s energyKwh=%v, want 1.0", templateID, got)
+		}
+		if got := *out.Updated["powerKw"].Value; got < 1.999 || got > 2.001 {
+			t.Fatalf("%s powerKw=%v, want 2.0", templateID, got)
+		}
 	}
 }

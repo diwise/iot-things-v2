@@ -1507,7 +1507,315 @@
           }
         ]
       }
+    },
+    {
+      "template": {
+        "id": "building",
+        "version": "v3",
+        "optional": [
+          "energy",
+          "power",
+          "temperature",
+          "energyKwh",
+          "powerKw"
+        ],
+        "category": "building",
+        "labels": [
+          "Byggnad"
+        ],
+        "primaryProperty": "temperature",
+        "displayName": "Byggnad",
+        "description": "Byggnad med valfri energi-, effekt- och temperaturmätning. Råingångarna energy (J) och power (W) motsvarar v1-sensorkällorna; energyKwh (kWh) och powerKw (kW) beräknas med fasta SI-faktorer. v1/v2 märkte råvärden som kWh/kW utan konvertering; nya saker bör läsa energyKwh/powerKw.",
+        "propertyDefs": {
+          "energy": {
+            "displayName": "Energi rå",
+            "description": "Rå energi från sensor i joule (v1-källa)",
+            "dataType": "number",
+            "quantity": "energy",
+            "unit": "J",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3331",
+                "resource": "5700"
+              }
+            ]
+          },
+          "power": {
+            "displayName": "Effekt rå",
+            "description": "Rå effekt från sensor i watt (v1-källa)",
+            "dataType": "number",
+            "quantity": "power",
+            "unit": "W",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3328",
+                "resource": "5700"
+              }
+            ]
+          },
+          "temperature": {
+            "displayName": "Temperatur",
+            "dataType": "number",
+            "quantity": "temperature",
+            "unit": "Cel",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3303",
+                "resource": "5700"
+              }
+            ]
+          },
+          "energyKwh": {
+            "displayName": "Energi",
+            "description": "Beräknad energi i kWh (J/3600000)",
+            "dataType": "number",
+            "quantity": "energy",
+            "unit": "kWh"
+          },
+          "powerKw": {
+            "displayName": "Effekt",
+            "description": "Beräknad effekt i kW (W/1000)",
+            "dataType": "number",
+            "quantity": "power",
+            "unit": "kW"
+          }
+        },
+        "relations": [
+          {
+            "name": "partOf",
+            "min": 0,
+            "max": 1
+          }
+        ]
+      },
+      "paramDefaults": {
+        "energyFactor": 2.7777777777777776e-07,
+        "powerFactor": 0.001
+      },
+      "paramInfo": {
+        "energyFactor": {
+          "description": "Fast SI-faktor J->kWh (lås, ej överstyrbar)",
+          "unit": "kWh/J"
+        },
+        "powerFactor": {
+          "description": "Fast SI-faktor W->kW (lås, ej överstyrbar)",
+          "unit": "kW/W"
+        }
+      },
+      "recipes": [
+        {
+          "name": "energy-j-to-kwh",
+          "operator": "linear",
+          "version": "v1",
+          "inputs": [
+            "energy"
+          ],
+          "outputs": [
+            "energyKwh"
+          ],
+          "params": [
+            "energyFactor"
+          ]
+        },
+        {
+          "name": "power-w-to-kw",
+          "operator": "linear",
+          "version": "v1",
+          "inputs": [
+            "power"
+          ],
+          "outputs": [
+            "powerKw"
+          ],
+          "params": [
+            "powerFactor"
+          ]
+        }
+      ]
+    },
+    {
+      "template": {
+        "id": "sink",
+        "version": "v3",
+        "optional": [
+          "temperature",
+          "presence",
+          "power",
+          "energy",
+          "distance",
+          "digitalInput",
+          "illuminance",
+          "humidity",
+          "energyKwh",
+          "powerKw"
+        ],
+        "category": "sink",
+        "displayName": "Vask",
+        "description": "Multisensor med valfria mätpunkter. Råingångarna energy (J) och power (W) motsvarar v1-sensorkällorna; energyKwh (kWh) och powerKw (kW) beräknas med fasta SI-faktorer. v1/v2 märkte råvärden som kWh/kW utan konvertering; nya saker bör läsa energyKwh/powerKw. Övriga mätpunkter är råa direktvärden.",
+        "propertyDefs": {
+          "temperature": {
+            "displayName": "Temperatur",
+            "dataType": "number",
+            "quantity": "temperature",
+            "unit": "Cel",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3303",
+                "resource": "5700"
+              }
+            ]
+          },
+          "presence": {
+            "displayName": "Närvaro",
+            "dataType": "boolean",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3302",
+                "resource": "5500"
+              }
+            ]
+          },
+          "power": {
+            "displayName": "Effekt rå",
+            "description": "Rå effekt från sensor i watt (v1-källa)",
+            "dataType": "number",
+            "quantity": "power",
+            "unit": "W",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3328",
+                "resource": "5700"
+              }
+            ]
+          },
+          "energy": {
+            "displayName": "Energi rå",
+            "description": "Rå energi från sensor i joule (v1-källa)",
+            "dataType": "number",
+            "quantity": "energy",
+            "unit": "J",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3331",
+                "resource": "5700"
+              }
+            ]
+          },
+          "distance": {
+            "displayName": "Avstånd",
+            "dataType": "number",
+            "quantity": "distance",
+            "unit": "m",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3330",
+                "resource": "5700"
+              }
+            ]
+          },
+          "digitalInput": {
+            "displayName": "Digital ingång",
+            "dataType": "boolean",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3200",
+                "resource": "5500"
+              }
+            ]
+          },
+          "illuminance": {
+            "displayName": "Belysningsstyrka",
+            "dataType": "number",
+            "quantity": "illuminance",
+            "unit": "lux",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3301",
+                "resource": "5700"
+              }
+            ]
+          },
+          "humidity": {
+            "displayName": "Luftfuktighet",
+            "dataType": "number",
+            "quantity": "humidity",
+            "unit": "%RH",
+            "signals": [
+              {
+                "object": "urn:oma:lwm2m:ext:3304",
+                "resource": "5700"
+              }
+            ]
+          },
+          "energyKwh": {
+            "displayName": "Energi",
+            "description": "Beräknad energi i kWh (J/3600000)",
+            "dataType": "number",
+            "quantity": "energy",
+            "unit": "kWh"
+          },
+          "powerKw": {
+            "displayName": "Effekt",
+            "description": "Beräknad effekt i kW (W/1000)",
+            "dataType": "number",
+            "quantity": "power",
+            "unit": "kW"
+          }
+        },
+        "relations": [
+          {
+            "name": "partOf",
+            "min": 0,
+            "max": 1
+          }
+        ]
+      },
+      "paramDefaults": {
+        "energyFactor": 2.7777777777777776e-07,
+        "powerFactor": 0.001
+      },
+      "paramInfo": {
+        "energyFactor": {
+          "description": "Fast SI-faktor J->kWh (lås, ej överstyrbar)",
+          "unit": "kWh/J"
+        },
+        "powerFactor": {
+          "description": "Fast SI-faktor W->kW (lås, ej överstyrbar)",
+          "unit": "kW/W"
+        }
+      },
+      "recipes": [
+        {
+          "name": "energy-j-to-kwh",
+          "operator": "linear",
+          "version": "v1",
+          "inputs": [
+            "energy"
+          ],
+          "outputs": [
+            "energyKwh"
+          ],
+          "params": [
+            "energyFactor"
+          ]
+        },
+        {
+          "name": "power-w-to-kw",
+          "operator": "linear",
+          "version": "v1",
+          "inputs": [
+            "power"
+          ],
+          "outputs": [
+            "powerKw"
+          ],
+          "params": [
+            "powerFactor"
+          ]
+        }
+      ]
     }
+
   ],
   "variants": [
     {
