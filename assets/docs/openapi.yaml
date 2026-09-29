@@ -146,6 +146,10 @@ paths:
         - name: category
           in: query
           schema: { type: string }
+        - name: tag
+          in: query
+          description: Enskild tagg i metadata["tags"] (exakt per tagg efter trimning).
+          schema: { type: string }
         - name: bbox
           in: query
           description: minLon,minLat,maxLon,maxLat (WGS84).

@@ -447,6 +447,7 @@ func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
 		VariantID:       q.Get("variant"),
 		NameContains:    q.Get("name"),
 		Category:        q.Get("category"),
+		Tag:             q.Get("tag"),
 	}
 	for key, vals := range q {
 		name, ok := strings.CutPrefix(key, "meta.")

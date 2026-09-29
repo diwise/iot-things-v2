@@ -543,6 +543,7 @@ type SearchFilter struct {
 	VariantID       string
 	NameContains    string
 	Category        string
+	Tag             string
 	Metadata        map[string]string
 	BBox            *things.BBox
 	Near            *things.NearFilter
@@ -575,6 +576,9 @@ func (m *Manager) SearchObjects(ctx context.Context, tenant string, f SearchFilt
 			continue
 		}
 		if f.Category != "" && cfg.Category != f.Category {
+			continue
+		}
+		if f.Tag != "" && !hasTag(cfg.Metadata["tags"], f.Tag) {
 			continue
 		}
 		if len(f.Metadata) > 0 {
@@ -697,6 +701,18 @@ func (m *Manager) ExportObjects(ctx context.Context, tenant string) []catalog.Ob
 		out = []catalog.ObjectSpec{}
 	}
 	return out
+}
+
+// hasTag rapporterar om en enskild tagg finns bland kommaseparerade
+// metadata-tags (importformatet): exakt match per tagg efter trimning,
+// så "park" matchar "park, centrum" men inte "parker".
+func hasTag(raw, tag string) bool {
+	for _, part := range strings.Split(raw, ",") {
+		if strings.TrimSpace(part) == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // Overview läser förälder + direkta barn med aktuella värden för gemensamma

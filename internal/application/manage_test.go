@@ -992,6 +992,33 @@ func TestManageSearchFilterAndPaging(t *testing.T) {
 	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Offset: 9}); len(got) != 0 {
 		t.Fatalf("offset past end=%d, want 0", len(got))
 	}
+	taggedBin := func(id, tags string) catalog.ObjectSpec {
+		obj := mgmtBinObject()
+		obj.ThingID = id
+		md := map[string]string{"test": "true"}
+		if tags != "" {
+			md["tags"] = tags
+		}
+		obj.Metadata = md
+		return obj
+	}
+	for _, obj := range []catalog.ObjectSpec{
+		taggedBin("bin-tag-1", "park, centrum"),
+		taggedBin("bin-tag-2", "parker"),
+	} {
+		if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+			t.Fatalf("create %s: %v", obj.ThingID, err)
+		}
+	}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Tag: "park"}); len(got) != 1 || got[0].ThingID != "bin-tag-1" {
+		t.Fatalf("tag park=%v, want [bin-tag-1]", got)
+	}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Tag: "centrum"}); len(got) != 1 {
+		t.Fatalf("tag centrum=%d, want 1", len(got))
+	}
+	if got := mgr.SearchObjects(ctx, "t", SearchFilter{Tag: "parkering"}); len(got) != 0 {
+		t.Fatalf("tag parkering=%d, want 0", len(got))
+	}
 }
 
 // ListTags: distincta dynamiska kategoriseringstaggar ur metadata["tags"]
