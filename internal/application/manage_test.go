@@ -1044,6 +1044,63 @@ func TestManageListTags(t *testing.T) {
 	}
 }
 
+// ExportObjects: återskapbara specs + rundtur. Exporten av två skapade
+// saker ska bära mallreferenser, bindningar och saknivå-overrides (men
+// inte variantärvda värden), och ska gå att skapa på en ny manager med
+// samma katalog (samma export igen).
+func TestManageExportObjectsRoundTrip(t *testing.T) {
+	mkMgr := func(t *testing.T) *Manager {
+		t.Helper()
+		mgr, _, _, _ := mgmtSetup(t)
+		mgmtWastebin(t, mgr)
+		return mgr
+	}
+	mgr := mkMgr(t)
+	ctx := context.Background()
+
+	obj2 := mgmtBinObject()
+	obj2.ThingID = "bin-43"
+	obj2.Name = "Soptunna 43"
+	for _, obj := range []catalog.ObjectSpec{mgmtBinObject(), obj2} {
+		if _, err := mgr.CreateObject(ctx, "t", obj); err != nil {
+			t.Fatalf("create %s: %v", obj.ThingID, err)
+		}
+	}
+
+	specs := mgr.ExportObjects(ctx, "t")
+	if len(specs) != 2 || specs[0].ThingID != "bin-42" || specs[1].ThingID != "bin-43" {
+		t.Fatalf("exported=%v, want [bin-42 bin-43]", specs)
+	}
+	first := specs[0]
+	if first.TemplateID != "wastebin" || first.TemplateVersion != "v1" {
+		t.Fatalf("template ref=%v, want wastebin/v1", first)
+	}
+	if first.VariantID != "wastebin-B" || first.ParamOverrides["sensorToBottom"] != 1.42 {
+		t.Fatalf("overrides=%v, want sensorToBottom=1.42", first.ParamOverrides)
+	}
+	if _, ok := first.ParamOverrides["usableHeight"]; ok {
+		t.Fatalf("overrides=%v, variant-arvda usableHeight får inte exporteras", first.ParamOverrides)
+	}
+	if len(first.Bindings) != 1 || first.Bindings[0].Input != "distance" {
+		t.Fatalf("bindings=%v, want distance-bindning", first.Bindings)
+	}
+
+	mgr2 := mkMgr(t)
+	for _, spec := range specs {
+		if _, err := mgr2.CreateObject(ctx, spec.Tenant, spec); err != nil {
+			t.Fatalf("recreate %s: %v", spec.ThingID, err)
+		}
+	}
+	again := mgr2.ExportObjects(ctx, "t")
+	if len(again) != 2 || again[0].ThingID != "bin-42" || again[1].ThingID != "bin-43" {
+		t.Fatalf("re-exported=%v, want [bin-42 bin-43]", again)
+	}
+
+	if got := mgr.ExportObjects(ctx, "other"); len(got) != 0 {
+		t.Fatalf("other export=%v, want []", got)
+	}
+}
+
 // Katalogläsning: enstaka mall/variant, okänd version ger NotFound.
 func TestManageGetTemplateVariant(t *testing.T) {
 

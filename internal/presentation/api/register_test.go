@@ -235,6 +235,42 @@ func TestV0ListTags(t *testing.T) {
 	}
 }
 
+func TestV0ExportThings(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+
+	for _, id := range []string{"bin-1", "bin-2"} {
+		obj := v0binObject()
+		obj.ThingID = id
+		obj.Bindings = []things.Binding{
+			{DeviceID: "milesight:" + id, Object: v0DistURN, Resource: "5700", Input: "distance"},
+		}
+		if rr := doJSON(h.createThing, ctx, "", obj, ""); rr.Code != http.StatusCreated {
+			t.Fatalf("create %s: %d %s", id, rr.Code, rr.Body.String())
+		}
+	}
+
+	rr := doGET(h.exportThings, ctx, "", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("export: %d %s", rr.Code, rr.Body.String())
+	}
+	var specs []catalog.ObjectSpec
+	if err := json.Unmarshal(rr.Body.Bytes(), &specs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(specs) != 2 || specs[0].ThingID != "bin-1" || specs[1].ThingID != "bin-2" {
+		t.Fatalf("export=%v, want [bin-1 bin-2]", specs)
+	}
+	if specs[0].Tenant != "t" || specs[0].TemplateID != "wastebin" || len(specs[0].Bindings) != 1 {
+		t.Fatalf("spec=%+v, want tenant/template/bindning", specs[0])
+	}
+
+	if rr := doGET(h.exportThings, context.Background(), "", ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated export=%d, want 401", rr.Code)
+	}
+}
+
 func TestV0BindingsPreviewHistory(t *testing.T) {
 	h, _, _ := v0setup(t)
 	ctx := v0ctx("t")

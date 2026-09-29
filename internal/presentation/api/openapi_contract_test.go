@@ -94,6 +94,17 @@ func TestOpenAPIBindingsPutContract(t *testing.T) {
 	if !strings.Contains(string(code), `r.Get("tags"`) {
 		t.Fatal("code must register GET tags (listTags)")
 	}
+
+	tagsExport, ok := doc.Paths["/things/export"]
+	if !ok {
+		t.Fatal("openapi must document /things/export")
+	}
+	if _, ok := tagsExport["get"]; !ok {
+		t.Fatal("export must document GET")
+	}
+	if !strings.Contains(string(code), `r.Get("export"`) {
+		t.Fatal("code must register GET export (exportThings)")
+	}
 }
 
 // TV-06 andra halvan: target ska vara obligatoriskt men nullable —

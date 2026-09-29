@@ -213,6 +213,26 @@ paths:
                 items:
                   type: string
         '401': { $ref: '#/components/responses/Unauthorized' }
+  /things/export:
+    get:
+      tags: [Things]
+      summary: Exportera saker som återskapbara ObjectSpec (JSON, slås ihop över alla auktoriserade tenants)
+      description: >-
+        Samma form som POST /api/v1/things tar: importera genom att POSTa
+        varje spec mot en miljö med samma mallar. Endast saknivå-
+        paramoverrides exporteras (variantärvda värden ej).
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+      responses:
+        '200':
+          description: Saker som ObjectSpec (tomt resultat är [])
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ObjectSpec'
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /things/{id}:
     parameters:
       - $ref: '#/components/parameters/ThingId'

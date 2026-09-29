@@ -643,8 +643,64 @@ func (m *Manager) ListTags(ctx context.Context, tenant string) []string {
 	return out
 }
 
+// ExportObjects returnerar alla saker för tenant som återskapbara
+// ObjectSpec (samma form som CreateObject tar): identitet, mall-/variant-
+// referenser, aktiverade egenskaper, bindningar, saknivå-paramoverrides
+// och relationer. Sorterat på thing-ID. Avsett för backup/migrering:
+// svaret kan POSTas mot /api/v1/things på en miljö med samma mallar.
+func (m *Manager) ExportObjects(ctx context.Context, tenant string) []catalog.ObjectSpec {
+	var out []catalog.ObjectSpec
+	for _, id := range m.store.ListThingIDs(ctx, tenant) {
+		st, ok := m.store.LoadThing(ctx, tenant, id)
+		if !ok {
+			continue
+		}
+		cfg, err := decodeConfig(st.ConfigJSON)
+		if err != nil {
+			continue
+		}
+		spec := catalog.ObjectSpec{
+			ThingID:         id,
+			Tenant:          tenant,
+			Name:            cfg.Name,
+			AlternativeName: cfg.AlternativeName,
+			SubType:         cfg.SubType,
+			Category:        cfg.Category,
+			Location:        cfg.Location,
+			Metadata:        cfg.Metadata,
+			TemplateID:      cfg.TemplateID,
+			TemplateVersion: cfg.TemplateVersion,
+			VariantID:       cfg.VariantID,
+			VariantVersion:  cfg.VariantVersion,
+			Properties:      cfg.Properties,
+			Bindings:        cfg.Bindings,
+		}
+		for k, v := range cfg.ParamValues {
+			if cfg.ParamSources[k] == things.ParamSourceThing {
+				if spec.ParamOverrides == nil {
+					spec.ParamOverrides = make(map[string]float64)
+				}
+				spec.ParamOverrides[k] = v
+			}
+		}
+		for _, r := range cfg.Relations {
+			spec.Relations = append(spec.Relations, catalog.RelationRef{
+				Name:             r.Name,
+				TargetThingID:    r.TargetThingID,
+				TargetTemplateID: r.TargetTemplateID,
+			})
+		}
+		out = append(out, spec)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ThingID < out[j].ThingID })
+	if out == nil {
+		out = []catalog.ObjectSpec{}
+	}
+	return out
+}
+
 // Overview läser förälder + direkta barn med aktuella värden för gemensamma
-// översikter (byggnad/rum, växthus/bänkar). Otillgängliga objekt (annan
+// översikter (byggnad/rum, växthus/rum). Otillgängliga objekt (annan
 // tenant) syns aldrig: allt läses inom tenant.
 func (m *Manager) Overview(ctx context.Context, tenant, thingID string) (Overview, error) {
 	parent, err := m.GetObject(ctx, tenant, thingID)

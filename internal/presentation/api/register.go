@@ -71,6 +71,7 @@ type Manager interface {
 	Relations(ctx context.Context, tenant, thingID string) ([]application.RelationResolve, error)
 	GetConfig(ctx context.Context, tenant, thingID string) (*catalog.EffectiveConfig, error)
 	SearchObjects(ctx context.Context, tenant string, filter application.SearchFilter) []application.ThingSummary
+	ExportObjects(ctx context.Context, tenant string) []catalog.ObjectSpec
 	ListTags(ctx context.Context, tenant string) []string
 	Overview(ctx context.Context, tenant, thingID string) (application.Overview, error)
 	Subtree(ctx context.Context, tenant, thingID string, depth int) (application.TreeNode, error)
@@ -126,6 +127,7 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, poli
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(ReadThings))
 			r.Get("", h.searchThings)
+			r.Get("export", h.exportThings)
 			r.Get("tags", h.listTags)
 			r.Get("{id}", h.getThing)
 			r.Get("{id}/bindings", h.getBindings)
@@ -521,6 +523,32 @@ func (h *handler) listTags(w http.ResponseWriter, r *http.Request) {
 		merged = append(merged, tag)
 	}
 	sort.Strings(merged)
+	writeJSON(w, http.StatusOK, merged)
+}
+
+// exportThings returnerar alla saker som återskapbara ObjectSpec (JSON):
+// samma form som POST /api/v1/things tar, för backup/migrering mot en
+// miljö med samma mallar. Slås ihop över auktoriserade tenants (?tenant=
+// filtrerar). Tomt resultat är [] (aldrig null).
+func (h *handler) exportThings(w http.ResponseWriter, r *http.Request) {
+	ts, err := tenants(r, ReadThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	var merged []catalog.ObjectSpec
+	for _, t := range ts {
+		merged = append(merged, h.mgr.ExportObjects(r.Context(), t)...)
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].Tenant != merged[j].Tenant {
+			return merged[i].Tenant < merged[j].Tenant
+		}
+		return merged[i].ThingID < merged[j].ThingID
+	})
+	if merged == nil {
+		merged = []catalog.ObjectSpec{}
+	}
 	writeJSON(w, http.StatusOK, merged)
 }
 
