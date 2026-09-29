@@ -994,6 +994,56 @@ func TestManageSearchFilterAndPaging(t *testing.T) {
 	}
 }
 
+// ListTags: distincta dynamiska kategoriseringstaggar ur metadata["tags"]
+// (importformat: komma-separerat). Duplikat/blanksteg/tomma slås ihop,
+// sorteras och avgränsas per tenant.
+func TestManageListTags(t *testing.T) {
+	mgr, _, _, _ := mgmtSetup(t)
+	ctx := context.Background()
+	mgmtWastebin(t, mgr)
+
+	tagged := func(id, tenant, tags string) catalog.ObjectSpec {
+		obj := mgmtBinObject()
+		obj.ThingID = id
+		obj.Tenant = tenant
+		md := map[string]string{"test": "true"}
+		if tags != "" {
+			md["tags"] = tags
+		}
+		obj.Metadata = md
+		return obj
+	}
+
+	for _, obj := range []catalog.ObjectSpec{
+		tagged("bin-1", "t", "park, centrum"),
+		tagged("bin-2", "t", "centrum ,hamn"),
+		tagged("bin-3", "t", ""),
+		tagged("bin-x", "other", "utanför"),
+	} {
+		if _, err := mgr.CreateObject(ctx, obj.Tenant, obj); err != nil {
+			t.Fatalf("create %s: %v", obj.ThingID, err)
+		}
+	}
+
+	got := mgr.ListTags(ctx, "t")
+	want := []string{"centrum", "hamn", "park"}
+	if len(got) != len(want) {
+		t.Fatalf("tags=%v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("tags=%v, want %v", got, want)
+		}
+	}
+
+	if got := mgr.ListTags(ctx, "other"); len(got) != 1 || got[0] != "utanför" {
+		t.Fatalf("other tags=%v, want [utanför]", got)
+	}
+	if got := mgr.ListTags(ctx, "empty"); len(got) != 0 {
+		t.Fatalf("empty tags=%v, want []", got)
+	}
+}
+
 // Katalogläsning: enstaka mall/variant, okänd version ger NotFound.
 func TestManageGetTemplateVariant(t *testing.T) {
 

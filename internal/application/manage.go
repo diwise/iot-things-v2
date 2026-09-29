@@ -614,6 +614,35 @@ func (m *Manager) SearchObjects(ctx context.Context, tenant string, f SearchFilt
 	return out
 }
 
+// ListTags samlar distincta dynamiska kategoriseringstaggar för tenant:
+// varje saks metadata["tags"] splittas på komma (importformatet), trimmas
+// och tomma bidrag ignoreras. Resultatet är sorterat och tenant-avgränsat
+// (samma in-memory skanning som SearchObjects; ingen storage-ändring).
+func (m *Manager) ListTags(ctx context.Context, tenant string) []string {
+	seen := make(map[string]struct{})
+	for _, id := range m.store.ListThingIDs(ctx, tenant) {
+		st, ok := m.store.LoadThing(ctx, tenant, id)
+		if !ok {
+			continue
+		}
+		cfg, err := decodeConfig(st.ConfigJSON)
+		if err != nil {
+			continue
+		}
+		for _, tag := range strings.Split(cfg.Metadata["tags"], ",") {
+			if tag = strings.TrimSpace(tag); tag != "" {
+				seen[tag] = struct{}{}
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for tag := range seen {
+		out = append(out, tag)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Overview läser förälder + direkta barn med aktuella värden för gemensamma
 // översikter (byggnad/rum, växthus/bänkar). Otillgängliga objekt (annan
 // tenant) syns aldrig: allt läses inom tenant.

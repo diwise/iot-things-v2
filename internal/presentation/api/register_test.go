@@ -195,6 +195,46 @@ func TestV0ValidationAndAuth(t *testing.T) {
 	}
 }
 
+func TestV0ListTags(t *testing.T) {
+	h, _, _ := v0setup(t)
+	ctx := v0ctx("t")
+	v0wastebin(t, h)
+
+	tagged := func(id, tags string) catalog.ObjectSpec {
+		obj := v0binObject()
+		obj.ThingID = id
+		obj.Metadata = map[string]string{"test": "true", "tags": tags}
+		obj.Bindings = []things.Binding{
+			{DeviceID: "milesight:" + id, Object: v0DistURN, Resource: "5700", Input: "distance"},
+		}
+		return obj
+	}
+	for _, obj := range []catalog.ObjectSpec{
+		tagged("bin-1", "park, centrum"),
+		tagged("bin-2", "centrum,hamn"),
+	} {
+		if rr := doJSON(h.createThing, ctx, "", obj, ""); rr.Code != http.StatusCreated {
+			t.Fatalf("create %s: %d %s", obj.ThingID, rr.Code, rr.Body.String())
+		}
+	}
+
+	rr := doGET(h.listTags, ctx, "", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("tags: %d %s", rr.Code, rr.Body.String())
+	}
+	var tags []string
+	if err := json.Unmarshal(rr.Body.Bytes(), &tags); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(tags) != 3 || tags[0] != "centrum" || tags[1] != "hamn" || tags[2] != "park" {
+		t.Fatalf("tags=%v, want [centrum hamn park]", tags)
+	}
+
+	if rr := doGET(h.listTags, context.Background(), "", ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated tags=%d, want 401", rr.Code)
+	}
+}
+
 func TestV0BindingsPreviewHistory(t *testing.T) {
 	h, _, _ := v0setup(t)
 	ctx := v0ctx("t")

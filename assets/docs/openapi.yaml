@@ -197,6 +197,22 @@ paths:
                 $ref: '#/components/schemas/ThingSummary'
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
+  /things/tags:
+    get:
+      tags: [Things]
+      summary: Lista distincta dynamiska kategoriseringstaggar (metadata["tags"], slås ihop över alla auktoriserade tenants)
+      parameters:
+        - $ref: '#/components/parameters/Tenant'
+      responses:
+        '200':
+          description: Sorterade distincta taggar (tomt resultat är [])
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /things/{id}:
     parameters:
       - $ref: '#/components/parameters/ThingId'

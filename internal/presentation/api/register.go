@@ -71,6 +71,7 @@ type Manager interface {
 	Relations(ctx context.Context, tenant, thingID string) ([]application.RelationResolve, error)
 	GetConfig(ctx context.Context, tenant, thingID string) (*catalog.EffectiveConfig, error)
 	SearchObjects(ctx context.Context, tenant string, filter application.SearchFilter) []application.ThingSummary
+	ListTags(ctx context.Context, tenant string) []string
 	Overview(ctx context.Context, tenant, thingID string) (application.Overview, error)
 	Subtree(ctx context.Context, tenant, thingID string, depth int) (application.TreeNode, error)
 }
@@ -125,6 +126,7 @@ func RegisterHandlers(ctx context.Context, mux *http.ServeMux, mgr Manager, poli
 		r.Group(func(r router.ServeMux) {
 			r.Use(authz.RequireAccess(ReadThings))
 			r.Get("", h.searchThings)
+			r.Get("tags", h.listTags)
 			r.Get("{id}", h.getThing)
 			r.Get("{id}/bindings", h.getBindings)
 			r.Get("{id}/config", h.getConfig)
@@ -496,6 +498,29 @@ func (h *handler) searchThings(w http.ResponseWriter, r *http.Request) {
 	if merged == nil {
 		merged = []application.ThingSummary{}
 	}
+	writeJSON(w, http.StatusOK, merged)
+}
+
+// listTags returnerar distincta dynamiska kategoriseringstaggar
+// (metadata["tags"]) förenade över auktoriserade tenants (?tenant=
+// filtrerar). Tomt resultat är [] (aldrig null), i linje med searchThings.
+func (h *handler) listTags(w http.ResponseWriter, r *http.Request) {
+	ts, err := tenants(r, ReadThings)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	seen := make(map[string]struct{})
+	for _, t := range ts {
+		for _, tag := range h.mgr.ListTags(r.Context(), t) {
+			seen[tag] = struct{}{}
+		}
+	}
+	merged := make([]string, 0, len(seen))
+	for tag := range seen {
+		merged = append(merged, tag)
+	}
+	sort.Strings(merged)
 	writeJSON(w, http.StatusOK, merged)
 }
 
