@@ -9,18 +9,20 @@ identitet via deskriptorn, tid via `EventTimestamp`
 (`max(values[].observedAt)`), kvalitet via
 `ShouldEmitProperty/ShouldEmitEntity`.
 
-Variabelhärledning (låst i `pkg/types`, testad i
-`pkg/types/consumer_binding_test.go`):
+Bindningen nedan beskriver `iot-transform-fiware` och dess regler. Källpayloaden
+definieras i `pkg/types`; måltyp och ID-mall väljs av konsumenten. Standard-ID
+använder rått `thingId`, helst en GUID/UUID. Namn och alternativnamn är attribut.
+`nameOrID` används inte som regelvariabel eller implicit fallback.
 
 | Konsumentvariabel | Källa i v1 |
 | --- | --- |
 | `id` | `thingId` |
-| `nameOrID` | `thing.alternativeName > thing.name > thingId` (`NameOrID`), URN via `SafeURISegment` |
-| `uuid` | `UUID(thingId)` (sista `/`-segmentet) |
-| `type` | `thingType` (mall-ID) eller `thing.subType` via `TypeName(thingType)` (`subType > thingType`) |
+| `name` | rått `thing.name`, aldrig fallback till ID |
+| `alternativeName` | rått `thing.alternativeName` |
+| `type` | rått `thingType` (mall-ID) |
+| `typeName` | explicit genväg: rå subType om satt, annars thingType |
 | `tenant` | `tenant` (aldrig tom; tom payload nekas) |
 | `timestamp` | `EventTimestamp()` = `max(values[].observedAt)` (RFC3339/UTC) |
-| `revision` | `configRevision` (låst vid beräkning) |
 | `source` | per värde `source` (`device/[channel]/object/resource`) |
 | `quality` | per värde `quality`; `invalid` hoppar property, `required` saknad/invalid hoppar entitet |
 
@@ -28,32 +30,42 @@ Tillåtna `match`-fält för saker: `type` (mall-ID), `subType`,
 `tenant`. `match.device` för saker är död flagga (lås i K1.2).
 Trace endast i transport-headers/OTel, aldrig i payload (beslut).
 
+Generella mallfält kan läsas med exempelvis `{{thing.metadata.description}}`,
+`{{values."temperature.average".value}}` och `{{relation.to.thingId}}`.
+`safeURI` kodar text när regeln uttryckligen behöver URI-segmentkodning.
+Egen namnbaserad ID-policy är regelns författares ansvar: ingen automatisk
+hantering av namnbyten, kollisioner eller tidigare mål-ID:n införs.
+
 ## wastebin → WasteContainer
 
 ```yaml
-- match: { kind: thing, type: wastebin }
+- match: { kind: thing, event: things.v1.values, type: wastebin }
   entities:
-    - id: "urn:ngsi-ld:WasteContainer:{{nameOrID}}"
+    - id: "urn:ngsi-ld:WasteContainer:{{id}}"
       type: WasteContainer
       properties:
-        - { target: fillingLevel, type: Number, valueFrom: values.fillRate.value, unitFrom: values.fillRate.unit, observedAt: values.fillRate.observedAt, required: true }
-        - { target: location, type: Geo, valueFrom: thing.location, required: true }
+        - { target: name, type: Text, field: name, observedAt: none }
+        - { target: alternateName, type: Text, field: alternativeName, observedAt: none }
+        - { target: fillingLevel, type: Number, field: values.fillRate.value, observedAt: "field:values.fillRate.observedAt", required: true }
+        - { target: location, type: Geo, field: thing.location, required: true }
 ```
 
-`required: [fillRate]` för modellens `required (id, type, location)`:
+Mappningens obligatoriska källa är `fillRate`:
 partiellt event utan `fillRate` hoppar entiteten
 (`ShouldEmitEntity([fillRate]) == false`).
+Detta är en mappningsregel, inte bevis på full Smart Data Models-konformitet.
 
 ## room → IndoorEnvironmentObserved (medel + direktvärden)
 
 ```yaml
-- match: { kind: thing, type: room }
+- match: { kind: thing, event: things.v1.values, type: room }
   entities:
-    - id: "urn:ngsi-ld:IndoorEnvironmentObserved:{{nameOrID}}"
+    - id: "urn:ngsi-ld:IndoorEnvironmentObserved:{{id}}"
       type: IndoorEnvironmentObserved
       properties:
-        - { target: temperature, type: Number, valueFrom: values.temperature.average.value, observedAt: values.temperature.average.observedAt }
-        - { target: relativeHumidity, type: Number, valueFrom: values.humidity.value, observedAt: values.humidity.observedAt }
+        - { target: name, type: Text, field: name, observedAt: none }
+        - { target: temperature, type: Number, field: 'values."temperature.average".value', observedAt: 'field:values."temperature.average".observedAt' }
+        - { target: relativeHumidity, type: Number, field: values.humidity.value, observedAt: "field:values.humidity.observedAt" }
 ```
 
 Individuella `temperature.window/center/door` och `temperature.average`
@@ -63,18 +75,20 @@ mätpunkt läggs aldrig till automatiskt (R4/B4).
 ## greenhouse → AgriGreenhouse
 
 ```yaml
-- match: { kind: thing, type: greenhouse }
+- match: { kind: thing, event: things.v1.values, type: greenhouse }
   entities:
-    - id: "urn:ngsi-ld:AgriGreenhouse:{{nameOrID}}"
+    - id: "urn:ngsi-ld:AgriGreenhouse:{{id}}"
       type: AgriGreenhouse
       properties:
-        - { target: relativeHumidity, type: Number, valueFrom: values.humidity.value, observedAt: values.humidity.observedAt }
-        - { target: co2, type: Number, valueFrom: values.co2.value, observedAt: values.co2.observedAt }
+        - { target: name, type: Text, field: name, observedAt: none }
+        - { target: alternateName, type: Text, field: alternativeName, observedAt: none }
+        - { target: relativeHumidity, type: Number, field: values.humidity.value, observedAt: "field:values.humidity.observedAt" }
+        - { target: co2, type: Number, field: values.co2.value, observedAt: "field:values.co2.observedAt" }
 ```
 
 Lufttemperatur hör till en separat observation från mätvärdet, inte
 till växthusentiteten. `alternateName` mappas från sakens
-`alternativeName` (samma värde som ID-segmentet) för spårbarhet.
+`alternativeName`; ID-segmentet är alltid det stabila käll-ID:t.
 
 ## Relationer (partOf set/removed)
 
@@ -91,14 +105,17 @@ endast verkligt saknat mål ger `target: null` vid läsning (TV-05).
 # transform-fiware exponerar (relation.{from,to}.*).
 - match: { kind: thing, event: things.v1.relations, relation: partOf, type: tank }
   entities:
-    - id: "urn:ngsi-ld:AgriGreenhouse:{{field:relation.to.nameOrID}}"
+    - id: "urn:ngsi-ld:AgriGreenhouse:{{relation.to.thingId}}"
       type: AgriGreenhouse
       properties:
-        - { target: hasWaterQualityObserved, field: relation.from.waterQualityObserved }
+        - { target: hasWaterQualityObserved, type: Relationship, array: true, value: "urn:ngsi-ld:WaterQualityObserved:{{relation.from.thingId}}", required: true }
 ```
 
-Konventioner (samma som sakens egna regler): `typeName` är
-`subType > thingType` och `nameOrID` är
-`alternativeName > name > thingId`. Konsumenten bygger förälderns
-entitets-ID ur `to`-deskriptorn och barnets observations-ID ur
-`from`-deskriptorn — aldrig ur råa ID:n ensamma.
+Konsumenten väljer modellprefix i regeln och bygger båda målidentiteterna
+från råa käll-ID:n, inte namn. `relation.from` och `relation.to` innehåller
+generella descriptors med rå typ, undertyp, namn, kategori, plats, metadata
+och variantinformation. De innehåller inga modellberoende mål-URN:er.
+`array: true` gör en skalär URI till en enelementslista utan dubbelnästling.
+Det är inte flerrelationsaggregation: exemplet antar en tank per växthus,
+och bortkoppling rensar hela attributet. Set/remove för flera tankar kräver
+ett separat tillståndskontrakt.
