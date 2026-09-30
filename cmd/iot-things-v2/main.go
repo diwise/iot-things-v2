@@ -50,7 +50,7 @@ func defaultFlags() flagMap {
 		dbSSLMode:  "disable",
 
 		policiesFile:      "/opt/diwise/config/authz.rego",
-		authzAccessObject: "false",
+		authzAccessObject: "true",
 		thingsFile:        "/opt/diwise/config/things.csv",
 		catalogSeedFile:   "/opt/diwise/config/catalog-seed.json",
 		migrateBindings:   "true",

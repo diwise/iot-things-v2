@@ -67,7 +67,7 @@ func doAuth(ent Enticator, scopes []Scope, token string) (int, context.Context) 
 // Legacy-modellen: giltig token ger begärt scope i policyns tenants.
 func TestRequireAccessLegacyTenants(t *testing.T) {
 	is := is.New(t)
-	ent, err := NewAuthenticator(context.Background(), strings.NewReader(legacyPolicy))
+	ent, err := NewAuthenticator(context.Background(), strings.NewReader(legacyPolicy), WithAccessObjectAuthorization(false))
 	is.NoErr(err)
 
 	code, ctx := doAuth(ent, []Scope{"things.read"}, "good")
@@ -94,7 +94,7 @@ func TestRequireAccessLegacyTenants(t *testing.T) {
 // Access-objekt-modellen: scope filtreras per tenant mot policyns access.
 func TestRequireAccessObjectScopes(t *testing.T) {
 	is := is.New(t)
-	ent, err := NewAuthenticator(context.Background(), strings.NewReader(accessObjectPolicy), WithAccessObjectAuthorization(true))
+	ent, err := NewAuthenticator(context.Background(), strings.NewReader(accessObjectPolicy))
 	is.NoErr(err)
 
 	code, ctx := doAuth(ent, []Scope{"things.read"}, "good")

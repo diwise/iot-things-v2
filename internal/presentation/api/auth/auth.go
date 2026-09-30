@@ -145,7 +145,7 @@ func NewAuthenticator(ctx context.Context, policies io.Reader, opts ...Option) (
 		return nil, fmt.Errorf("unable to read authz policies: %w", err)
 	}
 
-	authOptions := options{}
+	authOptions := options{accessObjectAuthz: true}
 	for _, apply := range opts {
 		apply(&authOptions)
 	}

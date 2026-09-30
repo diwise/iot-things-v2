@@ -16,6 +16,15 @@ Status: Etapp 1–6 + K4-persistens (minne + PostgreSQL via PgStore, dedup/outbo
 - `assets/data/fixtures`: bins, rooms+building, greenhouse, sewer. `assets/config`: `authz.rego`, `things.csv`, `catalog-seed.json` (startkatalog: en mall per iot-things-typ + greenhouse/tank-mallar + wastebin-varianter, laddas idempotent vid start via `CATALOG_SEED_FILE`). `assets/docs`: `openapi.yaml` (beskriver `/api/v1`).
 - `deployments/Dockerfile`: samma multi-stage-bygge som iot-things (binary `iot-things-v2`).
 
+## Auktorisering
+
+Access-object är standard: runtime-policyn ska returnera ett `access`-objekt
+med scopes per tenant, exempelvis `{"access":{"default":["things.read"]}}`.
+Legacy-policyer som bara returnerar `tenants` kräver
+`AUTHZ_ACCESS_OBJECT_ENABLED=false` eller `-authz-access-object=false`.
+API-rutternas scopekrav och tenant-isolering gäller även när navigationen i
+webben visar länkar utifrån det fullständiga access-objektet.
+
 ## Verifiering
 
 ```sh
