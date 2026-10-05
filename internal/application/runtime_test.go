@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,8 +20,9 @@ import (
 )
 
 // fakeStore implementerar RuntimeStore med samma semantik som adaptern:
-// innehålls-dedupad historik, ID-dedupad pending-kö, tenantnycklad dedup
-// och partOf-regler (en förälder, cykelskydd).
+// innehålls-dedupad historik, ID-dedupad pending-kö, tenantnycklad dedup,
+// partOf-regler (en förälder, cykelskydd) och generella platser (set,
+// idempotent, max, ingen cykelgrind).
 type fakeStore struct {
 	mu       sync.Mutex
 	things   map[string]StoredThingState
@@ -31,8 +33,9 @@ type fakeStore struct {
 	raw      map[string][]RawOutboxEvent
 	rawSeen  map[string]struct{}
 	dedup    map[string]struct{}
-	parents  map[string]string          // tenant\x00barn -> förälder
-	children map[string]map[string]bool // tenant\x00förälder -> barn
+	parents  map[string]string          // tenant\x00barn -> förälder (partOf)
+	children map[string]map[string]bool // tenant\x00förälder -> barn (partOf)
+	general  map[string]struct{}        // tenant\x00namn\x00från\x00till (generella)
 	// failErr injicerar lagringsfel i raderingsvägarna (TV-01-tester).
 	failErr error
 }
@@ -54,7 +57,12 @@ func newFakeStore() *fakeStore {
 		dedup:    make(map[string]struct{}),
 		parents:  make(map[string]string),
 		children: make(map[string]map[string]bool),
+		general:  make(map[string]struct{}),
 	}
+}
+
+func generalKey(tenant, name, fromID, toID string) string {
+	return tenant + "\x00" + name + "\x00" + fromID + "\x00" + toID
 }
 
 func fkey(tenant, id string) string { return tenant + "\x00" + id }
@@ -318,7 +326,7 @@ func (f *fakeStore) appendHistoryLocked(tenant, thingID string, h HistoryWrite) 
 		h.ObservedAt = h.ObservedAt.Round(time.Microsecond)
 	}
 	key := tenant + "|" + thingID + "|" + h.PropertyID + "|" +
-		strconv.FormatInt(h.ObservedAt.UnixNano(), 10) + "|" + h.Source + "|" + h.Quality + "|" + val
+		strconv.FormatInt(h.ObservedAt.UnixNano(), 10) + "|" + h.Source + "|" + h.Quality + "|" + h.Unit + "|" + val
 	if _, ok := f.histSeen[key]; ok {
 		return false
 	}
@@ -672,32 +680,41 @@ func (f *fakeStore) saveThingWithRelationsLocked(tenant, thingID string, create 
 	}
 	// Snapshot för rollback vid partiellt relationsfel (flera ops).
 	parentsSnap := make(map[string]string, len(f.parents))
-	for k, v := range f.parents {
-		parentsSnap[k] = v
-	}
+	maps.Copy(parentsSnap, f.parents)
 	childrenSnap := make(map[string]map[string]bool, len(f.children))
 	for k, vs := range f.children {
 		cp := make(map[string]bool, len(vs))
-		for ck, cv := range vs {
-			cp[ck] = cv
-		}
+		maps.Copy(cp, vs)
 		childrenSnap[k] = cp
+	}
+	generalSnap := make(map[string]struct{}, len(f.general))
+	for k := range f.general {
+		generalSnap[k] = struct{}{}
 	}
 	for _, op := range relOps {
 		var err error
+		name := op.Name
+		if name == "" {
+			name = "partOf"
+		}
 		switch op.Op {
 		case "attach":
-			err = f.attachChildLocked(tenant, thingID, op.Target)
+			err = f.attachChildLockedWithType(tenant, thingID, op.Target, op.DeclaredTargetType)
 		case "move":
-			err = f.moveChildLocked(tenant, thingID, op.Target)
+			err = f.moveChildLockedWithType(tenant, thingID, op.Target, op.DeclaredTargetType)
 		case "detach":
 			f.detachChildLocked(tenant, thingID)
+		case "addLink":
+			err = f.addGeneralLocked(tenant, thingID, name, op.Target, op.DeclaredTargetType, op.Max)
+		case "removeLink":
+			delete(f.general, generalKey(tenant, name, thingID, op.Target))
 		default:
 			err = fmt.Errorf("relation: unknown op %q", op.Op)
 		}
 		if err != nil {
 			f.parents = parentsSnap
 			f.children = childrenSnap
+			f.general = generalSnap
 			return err
 		}
 	}
@@ -717,9 +734,26 @@ func (f *fakeStore) saveThingWithRelationsLocked(tenant, thingID string, create 
 	return nil
 }
 
-// attachChildLocked speglar AttachChild (samma regler och meddelanden).
-// Anroparen håller f.mu.
+// fakeTargetTemplate läser målets verkliga malltyp (samma tenant).
+func (f *fakeStore) fakeTargetTemplate(tenant, thingID string) (string, error) {
+	st, ok := f.things[fkey(tenant, thingID)]
+	if !ok {
+		return "", fmt.Errorf("%w: relation target %q", things.ErrNotFound, thingID)
+	}
+	var cfg catalog.EffectiveConfig
+	if err := json.Unmarshal(st.ConfigJSON, &cfg); err != nil {
+		return "", err
+	}
+	return cfg.TemplateID, nil
+}
+
+// attachChildLocked speglar AttachChild (samma regler och meddelanden +
+// verklig typ-kontroll). Anroparen håller f.mu.
 func (f *fakeStore) attachChildLocked(tenant, childID, parentID string) error {
+	// Real-type check via declared? fakeStore relOps bär inte declared (legacy
+	// anrop från saveThingWithRelationsLocked utan declared) - verklig typ
+	// kontrolleras i Runtime-planering; tx-kontroll för declaredType sker via
+	// saveThingWithRelationsLocked nedan (med declared från relOps).
 	if _, ok := f.things[fkey(tenant, parentID)]; !ok {
 		return fmt.Errorf("%w: relation target %q", things.ErrNotFound, parentID)
 	}
@@ -746,6 +780,72 @@ func (f *fakeStore) attachChildLocked(tenant, childID, parentID string) error {
 		f.children[pk] = make(map[string]bool)
 	}
 	f.children[pk][childID] = true
+	return nil
+}
+
+// attachChildLockedWithType är tx-återvalidering med verklig typ (atomär).
+func (f *fakeStore) attachChildLockedWithType(tenant, childID, parentID, declaredType string) error {
+	realType, err := f.fakeTargetTemplate(tenant, parentID)
+	if err != nil {
+		return err
+	}
+	if declaredType != "" && declaredType != realType {
+		return fmt.Errorf("%w: relation %q target %q has type %q, declared %q",
+			things.ErrValidation, "partOf", parentID, realType, declaredType)
+	}
+	return f.attachChildLocked(tenant, childID, parentID)
+}
+
+// moveChildLockedWithType är tx-återvalidering med verklig typ (atomär).
+func (f *fakeStore) moveChildLockedWithType(tenant, childID, newParentID, declaredType string) error {
+	realType, err := f.fakeTargetTemplate(tenant, newParentID)
+	if err != nil {
+		return err
+	}
+	if declaredType != "" && declaredType != realType {
+		return fmt.Errorf("%w: relation %q target %q has type %q, declared %q",
+			things.ErrValidation, "partOf", newParentID, realType, declaredType)
+	}
+	return f.moveChildLocked(tenant, childID, newParentID)
+}
+
+// addGeneralLocked persisterar en generell plats (idempotent, max, ingen cykel).
+// Anroparen håller f.mu (via saveThingWithRelationsLocked).
+func (f *fakeStore) addGeneralLocked(tenant, fromID, name, toID, declaredType string, max int) error {
+	if fromID == "" || name == "" || toID == "" {
+		return fmt.Errorf("relation: missing from/name/to for addLink")
+	}
+	if fromID == toID {
+		return fmt.Errorf("relation: self-reference denied (%q)", fromID)
+	}
+	realType, err := f.fakeTargetTemplate(tenant, toID)
+	if err != nil {
+		return err
+	}
+	if declaredType != "" && declaredType != realType {
+		return fmt.Errorf("%w: relation %q target %q has type %q, declared %q",
+			things.ErrValidation, name, toID, realType, declaredType)
+	}
+	key := generalKey(tenant, name, fromID, toID)
+	if _, ok := f.general[key]; ok {
+		return nil // Idempotent.
+	}
+	if max > 0 {
+		n := 0
+		prefix := tenant + "\x00" + name + "\x00" + fromID + "\x00"
+		for k := range f.general {
+			if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+				n++
+			}
+		}
+		if n+1 > max {
+			return fmt.Errorf("%w: relation %q exceeds max %d", things.ErrValidation, name, max)
+		}
+	}
+	if f.general == nil {
+		f.general = make(map[string]struct{})
+	}
+	f.general[key] = struct{}{}
 	return nil
 }
 
@@ -1409,7 +1509,11 @@ func TestRuntimeRelationsMoveDelete(t *testing.T) {
 	if _, err := rt.HandleBatch(context.Background(), "t", "m1", []things.Observation{obs}, base); err != nil {
 		t.Fatalf("batch: %v", err)
 	}
-	if err := rt.MoveThing(context.Background(), "t", "room-a", "building-b"); err != nil {
+	// Revisionsriktig flytt via Manager.MoveObject (RegisterThing+drain),
+	// inte direkt store.MoveChild utan revision/event (PLAN1050 B1).
+	mgr := NewManager(c, rt, fs)
+	stMove, _ := fs.LoadThing(context.Background(), "t", "room-a")
+	if err := mgr.MoveObject(context.Background(), "t", "room-a", "building-b", stMove.Revision); err != nil {
 		t.Fatalf("move: %v", err)
 	}
 	if parent, _ := fs.ParentOf(context.Background(), "t", "room-a"); parent != "building-b" {
@@ -1926,8 +2030,11 @@ func TestRuntimeRegisterCycleDenied(t *testing.T) {
 	if _, err := rt.RegisterThing(context.Background(), "t", c, mk("a", "b"), st.Revision); err == nil {
 		t.Fatal("cycle a->b->a via RegisterThing must be denied")
 	}
-	// Självreferens nekas redan i Compile, men verifiera via MoveThing också.
-	if err := rt.MoveThing(context.Background(), "t", "b", "b"); err == nil {
+	// Självreferens nekas redan i Compile; verifiera även via den
+	// revisionsriktiga flyttvägen (Manager.MoveObject).
+	mgrSelf := NewManager(c, rt, fs)
+	stB, _ := fs.LoadThing(context.Background(), "t", "b")
+	if err := mgrSelf.MoveObject(context.Background(), "t", "b", "b", stB.Revision); err == nil {
 		t.Fatal("self-move must be denied")
 	}
 }

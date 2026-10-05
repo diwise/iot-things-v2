@@ -20,9 +20,11 @@ FROM registry.access.redhat.com/ubi9/ubi-minimal
 
 WORKDIR /opt/diwise
 
-COPY --from=builder --chown=1001 /app/assets/config/catalog-seed.json /opt/diwise/config/catalog-seed.json
+# Ingen seed bakas in i imagen: katalog (catalog-seed.json) och saker
+# (things.csv) tillförs via mount (CATALOG_SEED_FILE / things.csv) eller
+# skapas via API. Saknade filer varnar vid start och tjänsten startar
+# med återställbar katalog från databasen.
 COPY --chown=1001 assets/config/authz.rego /opt/diwise/config/authz.rego
-COPY --chown=1001 assets/config/things.csv /opt/diwise/config/things.csv
 COPY --from=builder --chown=1001 /app/cmd/iot-things-v2/iot-things-v2 /opt/diwise
 
 RUN chown 1001 /opt/diwise

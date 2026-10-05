@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"maps"
 	"sort"
 	"strconv"
 	"sync"
@@ -154,6 +155,8 @@ func (s *MemThingStore) Tenants() []string {
 // för att undvika importcykel mot application/things; API kan anpassas av integrator.
 // Late markerar sena observationer som sparas utan att bli aktuella (B13)
 // och måste bevaras genom lagring/läsning (Etapp 6 P5).
+// Unit är fryst per configRevision (migrering 008): tom för legacy-rader
+// och enhetslösa egenskaper (bool 1/0); dedup skiljer olika enheter.
 type HistoryRecord struct {
 	Tenant     string
 	ThingID    string
@@ -162,6 +165,7 @@ type HistoryRecord struct {
 	ReceivedAt time.Time
 	Value      *float64
 	Quality    string
+	Unit       string
 	Source     string
 	MessageID  string
 	Late       bool
@@ -179,7 +183,7 @@ func NewMemHistoryStore() *MemHistoryStore {
 	return &MemHistoryStore{seen: make(map[string]struct{})}
 }
 
-func historyDedupKey(tenant, thingID, propID string, observed time.Time, source, quality string, value *float64) string {
+func historyDedupKey(tenant, thingID, propID string, observed time.Time, source, quality, unit string, value *float64) string {
 	val := "<nil>"
 	if value != nil {
 		// -0 conflatas med 0 för att matcha PostgreSQL (float8 '=' ser
@@ -190,9 +194,11 @@ func historyDedupKey(tenant, thingID, propID string, observed time.Time, source,
 			val = strconv.FormatFloat(*value, 'g', -1, 64)
 		}
 	}
-	// Dedup-nyckel: tenant|thing|prop|observedUnixMicro|source|quality|value.
+	// Dedup-nyckel: tenant|thing|prop|observedUnixMicro|source|quality|unit|value.
 	// Tenant bevarar isolering; quality ingår så att en kvalitetsändring
-	// (ok->uncertain) med samma värde/tid/källa inte tappas som dubblett.
+	// (ok->uncertain) med samma värde/tid/källa inte tappas som dubblett;
+	// unit ingår så att samma tid med olika frysta enheter inte conflatas
+	// (PLAN1050: olika enheter = olika observationer, aldrig ommärkta).
 	// MessageID/ReceivedAt ingår avsiktligt ej: retry med nytt ID men samma
 	// innehåll ska dedupliceras.
 	// Mättid normaliseras till mikrosekund (Round) för att matcha
@@ -200,7 +206,7 @@ func historyDedupKey(tenant, thingID, propID string, observed time.Time, source,
 	// utan detta skulle två nanos som avrundas till samma mikrosekund
 	// dedupliceras i pg men ej i minnet.
 	return tenant + "|" + thingID + "|" + propID + "|" +
-		strconv.FormatInt(canonicalObserved(observed).UnixNano(), 10) + "|" + source + "|" + quality + "|" + val
+		strconv.FormatInt(canonicalObserved(observed).UnixNano(), 10) + "|" + source + "|" + quality + "|" + unit + "|" + val
 }
 
 // canonicalObserved normaliserar mättid till mikrosekundprecision (samma som
@@ -229,7 +235,7 @@ func (s *MemHistoryStore) AppendIdempotent(rec HistoryRecord) bool {
 		s.seen = make(map[string]struct{})
 	}
 	rec.ObservedAt = canonicalObserved(rec.ObservedAt)
-	key := historyDedupKey(rec.Tenant, rec.ThingID, rec.PropertyID, rec.ObservedAt, rec.Source, rec.Quality, rec.Value)
+	key := historyDedupKey(rec.Tenant, rec.ThingID, rec.PropertyID, rec.ObservedAt, rec.Source, rec.Quality, rec.Unit, rec.Value)
 	if _, ok := s.seen[key]; ok {
 		return false
 	}
@@ -430,12 +436,15 @@ func (s *MemRelationStore) Move(tenant, childID, newParentID string) error {
 
 // Children returnerar relationer där ToID == parentID för tenant,
 // sorterade på FromID.
+// Children returnerar partOf-barn (hierarki) för tenant+förälder, sorterade
+// på FromID. Generella platser är ingen hierarki och ingår ej (de läses via
+// blobens Relations, inte via hierarkiindex).
 func (s *MemRelationStore) Children(tenant, parentID string) []RelationRecord {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var out []RelationRecord
 	for _, r := range s.byID {
-		if r.Tenant != tenant || r.ToID != parentID {
+		if r.Tenant != tenant || r.ToID != parentID || r.Type != "partOf" {
 			continue
 		}
 		out = append(out, r)
@@ -475,6 +484,62 @@ func (s *MemRelationStore) RemoveOutgoing(tenant, fromID string) int {
 			delete(s.childParent, relationChildKey(tenant, fromID))
 		}
 		removed++
+	}
+	return removed
+}
+
+// RemovePartOf tar bort endast partOf-länken för barnet (ej generella platser).
+// Används vid relOps detach (borttagen partOf ska inte radera generella länkar).
+func (s *MemRelationStore) RemovePartOf(tenant, fromID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for key, rec := range s.byID {
+		if rec.Tenant != tenant || rec.FromID != fromID || rec.Type != "partOf" {
+			continue
+		}
+		delete(s.byID, key)
+		delete(s.childParent, relationChildKey(tenant, fromID))
+		removed++
+	}
+	return removed
+}
+
+// HasLink rapporterar om länken (tenant,namn,från,till) finns.
+func (s *MemRelationStore) HasLink(tenant, name, fromID, toID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, rec := range s.byID {
+		if rec.Tenant == tenant && rec.Type == name && rec.FromID == fromID && rec.ToID == toID {
+			return true
+		}
+	}
+	return false
+}
+
+// CountLinks räknar länkar för (tenant,från,namn) (för max-prövning).
+func (s *MemRelationStore) CountLinks(tenant, fromID, name string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, rec := range s.byID {
+		if rec.Tenant == tenant && rec.FromID == fromID && rec.Type == name {
+			n++
+		}
+	}
+	return n
+}
+
+// RemoveLink tar bort en specifik generell länk (idempotent: 0 vid saknad).
+func (s *MemRelationStore) RemoveLink(tenant, name, fromID, toID string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	removed := 0
+	for key, rec := range s.byID {
+		if rec.Tenant == tenant && rec.Type == name && rec.FromID == fromID && rec.ToID == toID {
+			delete(s.byID, key)
+			removed++
+		}
 	}
 	return removed
 }
@@ -530,9 +595,7 @@ func (o *MemOutbox) Append(ev OutboxEvent) bool {
 	ev.Payload = append([]byte(nil), ev.Payload...)
 	if ev.TraceContext != nil {
 		cp := make(map[string]string, len(ev.TraceContext))
-		for k, v := range ev.TraceContext {
-			cp[k] = v
-		}
+		maps.Copy(cp, ev.TraceContext)
 		ev.TraceContext = cp
 	}
 	o.events = append(o.events, ev)
@@ -565,9 +628,7 @@ func (o *MemOutbox) PeekFor(tenant, thingID string) []OutboxEvent {
 		cp.Payload = append([]byte(nil), ev.Payload...)
 		if ev.TraceContext != nil {
 			tc := make(map[string]string, len(ev.TraceContext))
-			for k, v := range ev.TraceContext {
-				tc[k] = v
-			}
+			maps.Copy(tc, ev.TraceContext)
 			cp.TraceContext = tc
 		}
 		out = append(out, cp)
@@ -632,7 +693,7 @@ func (s *MemHistoryStore) PurgeOlderThan(cutoff time.Time) int {
 	s.recs = kept
 	seen := make(map[string]struct{}, len(kept))
 	for _, r := range kept {
-		seen[historyDedupKey(r.Tenant, r.ThingID, r.PropertyID, r.ObservedAt, r.Source, r.Quality, r.Value)] = struct{}{}
+		seen[historyDedupKey(r.Tenant, r.ThingID, r.PropertyID, r.ObservedAt, r.Source, r.Quality, r.Unit, r.Value)] = struct{}{}
 	}
 	s.seen = seen
 	return removed

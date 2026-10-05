@@ -25,22 +25,27 @@ package application
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application/catalog"
 	"github.com/diwise/iot-things-v2/internal/application/functions"
 	"github.com/diwise/iot-things-v2/internal/application/things"
+	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 )
 
 // HistoryWrite är en historikrad flödet ber anroparen persistera.
 // Late markerar sena observationer som sparas utan att bli aktuella (B13).
 // Anroparens lagring är idempotent per (mättid, källa, värde), så retry
-// konvergerar.
+// konvergerar. Unit är fryst per configRevision (migrering 008 persisterar
+// den i history_v2.unit): enhetsmismatch sparas som invalid utan att
+// current påverkas; noll/false bevaras (nil betyder saknat, inte noll).
 type HistoryWrite struct {
 	PropertyID string    `json:"propertyId"`
 	Value      *float64  `json:"value,omitempty"`
 	Quality    string    `json:"quality,omitempty"`
+	Unit       string    `json:"unit,omitempty"`
 	ObservedAt time.Time `json:"observedAt"`
 	ReceivedAt time.Time `json:"receivedAt"`
 	Source     string    `json:"source,omitempty"`
@@ -48,13 +53,23 @@ type HistoryWrite struct {
 	Late       bool      `json:"late,omitempty"`
 }
 
-// FlowEvent är en utgående logisk händelse per uppdaterad egenskap.
-// Stabilt ID bygger anroparen som messageID + egenskap, så återleverans
-// dedupliceras hos konsumenten.
+// FlowEvent är en utgående logisk händelse per egenskap i en batch: både
+// giltiga (blir current) och ogiltiga (delta invalid-post, snapshot behåller
+// tidigare giltigt - ersätter ALDRIG). Stabilt ID bygger anroparen som
+// messageID + egenskap, så återleverans dedupliceras hos konsumenten.
+//
+// Unit är fryst vid beräkning (aldrig berikad från aktuell config vid
+// drain): köade poster behåller fryst unit+descriptor+configRevision över
+// konfigurationsbyte och omstart. ValueNull markerar saknat värde (null,
+// inte noll): noll/false bevaras som Value=0 + ValueNull=false, saknat som
+// ValueNull=true (Value ignoreras). NaN/Inf normaliseras till
+// ValueNull+invalid (aldrig current, aldrig JSON-NaN).
 type FlowEvent struct {
 	PropertyID      string    `json:"propertyId"`
 	Value           float64   `json:"value"`
+	ValueNull       bool      `json:"valueNull,omitempty"`
 	Quality         string    `json:"quality,omitempty"`
+	Unit            string    `json:"unit,omitempty"`
 	ObservedAt      time.Time `json:"observedAt"`
 	ReceivedAt      time.Time `json:"receivedAt"`
 	Sources         []string  `json:"sources,omitempty"`
@@ -64,9 +79,33 @@ type FlowEvent struct {
 	OperatorVersion string    `json:"operatorVersion,omitempty"`
 	ConfigRevision  int64     `json:"configRevision,omitempty"`
 	MessageID       string    `json:"messageId,omitempty"`
+	// FrozenThingType/Version/Thing är fryst deskriptor + versionsreferenser
+	// vid beräkning/mutation (sätts av persistBatch, inte av flödet): köade
+	// poster behåller fryst unit+descriptor+configRevision över
+	// konfigurationsbyte och omstart - sluta berika från aktuell config vid
+	// drain. Tomma för legacy-rader (fallback till aktuell config).
+	FrozenThingType        string                      `json:"frozenThingType,omitempty"`
+	FrozenThingTypeVersion string                      `json:"frozenThingTypeVersion,omitempty"`
+	FrozenThing            *pkgtypes.ThingDescriptorV1 `json:"frozenThing,omitempty"`
+	// FrozenSnapshot är full current-state vid commit (alla current med
+	// frysta enheter), för delta+snapshot i samma event. Sätts av
+	// persistBatch; tom för legacy-rader.
+	FrozenSnapshot map[string]CurrentValue `json:"frozenSnapshot,omitempty"`
+	// FrozenRemoved bär borttagna prop-ID:n vid config-byte (prune).
+	FrozenRemoved []string `json:"frozenRemoved,omitempty"`
 	// TraceContext bär transportens W3C trace-context separat från
 	// domänpayloaden (TV-07, json:"-" → aldrig i broker-payload).
 	TraceContext map[string]string `json:"-"`
+}
+
+// ValuePtr returnerar nil vid saknat värde, annars pekare till Value.
+// Skiljer saknat (null) från noll/false (0.0 bevaras).
+func (e FlowEvent) ValuePtr() *float64 {
+	if e.ValueNull {
+		return nil
+	}
+	v := e.Value
+	return &v
 }
 
 // StoredProcessor är versionerat beständigt tillstånd för en tillstånds-
@@ -186,24 +225,43 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 			// digitalInput) flödar genom samma pipeline som trösklar
 			// rapporterar den. Booleska poster bär ingen enhet och
 			// unitMismatch accepterar tom enhet, så ingen särregel behövs
-			// där. Numeriskt värde vinner om båda är satta.
+			// där. Numeriskt värde vinner om båda är satta. Kvalitet/tider
+			// bevaras (1.0/0.0, aldrig null för bool).
 			num := o.Value
 			if num == nil && o.BoolValue != nil {
 				num = new(float64)
 				*num = functions.BoolToFloat(*o.BoolValue)
 			}
+			// NaN/Inf är Permanent valideringsfel, aldrig current (PLAN1050
+			// B): normalisera till nil+invalid så att varken current,
+			// snapshot eller JSON påverkas (JSON-NaN vore ogiltig payload).
+			// Historik sparar nil (skiljt från 0), delta bär invalid-post.
+			isNonFinite := num != nil && (math.IsNaN(*num) || math.IsInf(*num, 0))
+			if isNonFinite {
+				q = functions.QualityInvalid
+				num = nil
+			}
 			if unitMismatch(prop.Unit, o.Unit) {
 				q = functions.QualityInvalid
 			}
-			if num == nil {
+			if num == nil && !isNonFinite {
 				// Saknat värde får aldrig bli numeriskt noll (C6):
-				// behandla som invalid, spara i historik utan current/event.
+				// behandla som invalid (delta invalid-post, ingen current).
 				q = functions.QualityInvalid
+			}
+			// Enhet fryst per configRevision (aldrig ommärkt under
+			// oförenliga enheter): snapshot/current bär prop.Unit.
+			frozenUnit := prop.Unit
+			histVal := cloneFloatPtr(num)
+			// NaN/Inf ska aldrig persisteras som NaN (PG/JSON): nil+invalid.
+			if isNonFinite {
+				histVal = nil
 			}
 			hw := HistoryWrite{
 				PropertyID: input,
-				Value:      cloneFloatPtr(num),
+				Value:      histVal,
 				Quality:    q,
+				Unit:       frozenUnit,
 				ObservedAt: o.ObservedAt,
 				ReceivedAt: rx,
 				Source:     o.Signal.ID(),
@@ -215,26 +273,36 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 				cp := cur
 				curPtr = &cp
 			}
+			// Femläges-semantik: endast ok/uncertain kan bli current
+			// (ShouldBecomeCurrent); ogiltig ny observation ger delta
+			// invalid-post men ersätter ALDRIG giltigt current.
+			evalNum := num
+			if isNonFinite {
+				evalNum = nil
+			}
 			if ShouldBecomeCurrent(curPtr, ObservedInput{
-				Value:      num,
+				Value:      evalNum,
 				Quality:    q,
 				ObservedAt: o.ObservedAt,
 				ReceivedAt: rx,
 				Source:     o.Signal.ID(),
 			}) {
 				nv := CurrentValue{
-					Value:      cloneFloatPtr(num),
-					Quality:    q,
-					ObservedAt: o.ObservedAt,
-					ReceivedAt: rx,
-					Source:     o.Signal.ID(),
-					MessageID:  messageID,
+					Value:          cloneFloatPtr(evalNum),
+					Quality:        q,
+					Unit:           frozenUnit,
+					ObservedAt:     o.ObservedAt,
+					ReceivedAt:     rx,
+					Source:         o.Signal.ID(),
+					MessageID:      messageID,
+					ConfigRevision: configRevision,
 				}
 				working[input] = nv
 				out.Updated[input] = nv
-				out.Events = append(out.Events, FlowEvent{
+				fe := FlowEvent{
 					PropertyID:     input,
 					Quality:        q,
+					Unit:           frozenUnit,
 					ObservedAt:     o.ObservedAt,
 					ReceivedAt:     rx,
 					Sources:        []string{o.Signal.ID()},
@@ -242,16 +310,40 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 					Expected:       1,
 					ConfigRevision: configRevision,
 					MessageID:      messageID,
-				})
-				if num != nil {
-					out.Events[len(out.Events)-1].Value = *num
 				}
+				if evalNum != nil {
+					fe.Value = *evalNum
+				} else {
+					fe.ValueNull = true
+				}
+				out.Events = append(out.Events, fe)
 			} else {
 				// Late markerar endast tidsmässigt passerade giltiga
 				// observationer (B13). Ogiltiga (B12) sparas utan
 				// Late-flagg: de nekas av kvalitet, inte av tid.
+				// Ogiltig ny observation ger ändå delta invalid-post
+				// (snapshot behåller tidigare giltigt).
 				if q == functions.QualityOk || q == functions.QualityUncertain {
 					hw.Late = true
+				} else {
+					fe := FlowEvent{
+						PropertyID:     input,
+						Quality:        q,
+						Unit:           frozenUnit,
+						ObservedAt:     o.ObservedAt,
+						ReceivedAt:     rx,
+						Sources:        []string{o.Signal.ID()},
+						Available:      1,
+						Expected:       1,
+						ConfigRevision: configRevision,
+						MessageID:      messageID,
+					}
+					if evalNum != nil {
+						fe.Value = *evalNum
+					} else {
+						fe.ValueNull = true
+					}
+					out.Events = append(out.Events, fe)
 				}
 			}
 			out.History = append(out.History, hw)
@@ -296,13 +388,26 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 			continue // Saknad ingång: inget resultat och inget event (B4).
 		}
 		for _, output := range r.Outputs {
+			// Enhet fryst per configRevision för härledda egenskaper:
+			// output-egenskapens deklarerade enhet, aldrig omräknad.
+			outUnit := ""
+			if prop, ok := cfg.Properties[output]; ok {
+				outUnit = prop.Unit
+			}
+			// Härledda recept producerar alltid ändliga värden (validerade
+			// ingångar + ändliga operatorer); skydda ändå mot NaN/Inf.
+			if math.IsNaN(res.Value) || math.IsInf(res.Value, 0) {
+				return nil, fmt.Errorf("flow: recipe %q produced non-finite value (never current)", r.Name)
+			}
 			nv := CurrentValue{
-				Value:      cloneFloatPtr(&res.Value),
-				Quality:    res.Quality,
-				ObservedAt: res.ObservedAt,
-				ReceivedAt: receivedAt,
-				Source:     "recipe:" + r.Name,
-				MessageID:  messageID,
+				Value:          cloneFloatPtr(&res.Value),
+				Quality:        res.Quality,
+				Unit:           outUnit,
+				ObservedAt:     res.ObservedAt,
+				ReceivedAt:     receivedAt,
+				Source:         "recipe:" + r.Name,
+				MessageID:      messageID,
+				ConfigRevision: configRevision,
 			}
 			working[output] = nv
 			out.Updated[output] = nv
@@ -311,6 +416,7 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 				PropertyID: output,
 				Value:      cloneFloatPtr(&res.Value),
 				Quality:    res.Quality,
+				Unit:       outUnit,
 				ObservedAt: res.ObservedAt,
 				ReceivedAt: receivedAt,
 				Source:     "recipe:" + r.Name,
@@ -320,6 +426,7 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 				PropertyID:      output,
 				Value:           res.Value,
 				Quality:         res.Quality,
+				Unit:            outUnit,
 				ObservedAt:      res.ObservedAt,
 				ReceivedAt:      receivedAt,
 				Sources:         res.Sources,
@@ -340,7 +447,16 @@ func EvaluateBatchFlow(cfg *catalog.EffectiveConfig, current map[string]CurrentV
 		if !out.Events[i].ObservedAt.Equal(out.Events[j].ObservedAt) {
 			return out.Events[i].ObservedAt.Before(out.Events[j].ObservedAt)
 		}
-		return out.Events[i].Value < out.Events[j].Value
+		if out.Events[i].ValueNull != out.Events[j].ValueNull {
+			return !out.Events[i].ValueNull && out.Events[j].ValueNull
+		}
+		if out.Events[i].Value != out.Events[j].Value {
+			return out.Events[i].Value < out.Events[j].Value
+		}
+		if out.Events[i].Quality != out.Events[j].Quality {
+			return out.Events[i].Quality < out.Events[j].Quality
+		}
+		return out.Events[i].Unit < out.Events[j].Unit
 	})
 	return out, nil
 }

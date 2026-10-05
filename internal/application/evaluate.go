@@ -8,14 +8,22 @@ import (
 // Egna minimala typer används lokalt för att undvika importcykel mot
 // things; API kan anpassas mot things av integrator.
 
-// CurrentValue är det gällande värdet för en egenskap.
+// CurrentValue är det gällande värdet för en egenskap. Unit är fryst per
+// configRevision (konvertering endast via explicit convert-regel): gamla
+// värden märks aldrig om under oförenliga enheter/definitioner.
+// ConfigRevision är den låsta konfigurationsrevisionen vid beräkning.
+// Noll/false bevaras (nil betyder saknat, inte noll); subsekundprecision
+// (RFC3339Nano, mikrosekund-dedup); varje värde behåller egen tid, enhet,
+// kvalitet och proveniens över konfigurationsbyte och omstart.
 type CurrentValue struct {
-	Value      *float64  `json:"value,omitempty"`
-	Quality    string    `json:"quality,omitempty"`
-	ObservedAt time.Time `json:"observedAt"`
-	ReceivedAt time.Time `json:"receivedAt"`
-	Source     string    `json:"source,omitempty"`
-	MessageID  string    `json:"messageId,omitempty"`
+	Value          *float64  `json:"value,omitempty"`
+	Quality        string    `json:"quality,omitempty"`
+	Unit           string    `json:"unit,omitempty"`
+	ObservedAt     time.Time `json:"observedAt"`
+	ReceivedAt     time.Time `json:"receivedAt"`
+	Source         string    `json:"source,omitempty"`
+	MessageID      string    `json:"messageId,omitempty"`
+	ConfigRevision int64     `json:"configRevision,omitempty"`
 }
 
 // ObservedInput är en inkommande observation som ska prövas mot current.

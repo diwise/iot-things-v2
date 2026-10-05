@@ -920,9 +920,21 @@ func resolveRelations(t things.Template, obj ObjectSpec) ([]ResolvedRelation, er
 		}
 		return nil, nil
 	}
-	counts := make(map[string]int, len(obj.Relations))
-	out := make([]ResolvedRelation, 0, len(obj.Relations))
+	// Duplikat (samma namn+mål) är idempotent upsert, inte fel: deduplicera
+	// före max-räkning så att retry/dubbelpost inte spräcker max.
+	seenLink := make(map[string]struct{}, len(obj.Relations))
+	deduped := make([]RelationRef, 0, len(obj.Relations))
 	for _, rel := range obj.Relations {
+		key := rel.Name + "\x00" + rel.TargetThingID
+		if _, dup := seenLink[key]; dup {
+			continue
+		}
+		seenLink[key] = struct{}{}
+		deduped = append(deduped, rel)
+	}
+	counts := make(map[string]int, len(deduped))
+	out := make([]ResolvedRelation, 0, len(deduped))
+	for _, rel := range deduped {
 		slot, ok := slots[rel.Name]
 		if !ok {
 			return nil, fmt.Errorf("%w: object %q relation %q is not offered by template %s/%s",

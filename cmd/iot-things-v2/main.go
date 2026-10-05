@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -530,17 +532,18 @@ func seed(ctx context.Context, fp io.Reader, a application.ThingsApp) error {
 
 // seedCatalog publishes the start catalog (one template per iot-things
 // type) idempotently: already-published versions are skipped, so restarts
-// only fill gaps. A missing file warns and continues (publishing via API
+// only fill gaps. Path is a seed file or a directory of seed files
+// (*.json in lexical order, merged); e.g. a mounted test/things dir.
+// A missing path warns and continues (publishing via API
 // remains); corrupt or invalid content fails startup.
 func seedCatalog(ctx context.Context, path string, mgr *application.Manager) error {
-	raw, err := os.ReadFile(path)
+	seed, err := loadSeed(path)
 	if err != nil {
-		logging.GetFromContext(ctx).Warn("catalog seed file not loaded, starting with restorable catalog only",
-			"path", path, "err", err.Error())
-		return nil
-	}
-	seed, err := catalog.ParseSeed(raw)
-	if err != nil {
+		if os.IsNotExist(err) {
+			logging.GetFromContext(ctx).Warn("catalog seed file not loaded, starting with restorable catalog only",
+				"path", path, "err", err.Error())
+			return nil
+		}
 		return err
 	}
 	added, skipped, err := mgr.SeedCatalog(ctx, seed)
@@ -549,6 +552,53 @@ func seedCatalog(ctx context.Context, path string, mgr *application.Manager) err
 	}
 	logging.GetFromContext(ctx).Info("catalog seed applied", "added", added, "skipped", skipped)
 	return nil
+}
+
+// loadSeed reads one seed file or merges a directory of seed files.
+func loadSeed(path string) (catalog.SeedFile, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return catalog.SeedFile{}, err
+	}
+	if !info.IsDir() {
+		return parseSeedFile(path)
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return catalog.SeedFile{}, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if strings.ToLower(filepath.Ext(e.Name())) != ".json" {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	merged := catalog.SeedFile{}
+	for _, name := range names {
+		part, err := parseSeedFile(filepath.Join(path, name))
+		if err != nil {
+			return catalog.SeedFile{}, fmt.Errorf("%s: %w", name, err)
+		}
+		merged.Templates = append(merged.Templates, part.Templates...)
+		merged.Variants = append(merged.Variants, part.Variants...)
+		if merged.Description == "" {
+			merged.Description = part.Description
+		}
+	}
+	return merged, nil
+}
+
+func parseSeedFile(path string) (catalog.SeedFile, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return catalog.SeedFile{}, err
+	}
+	return catalog.ParseSeed(raw)
 }
 
 // importThings reads v1 things.csv and creates things from the seeded

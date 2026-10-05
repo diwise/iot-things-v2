@@ -144,47 +144,154 @@ func (v ThingValueV1) Validate() error {
 	return nil
 }
 
-// ThingValuesEventV1 groups property values (and related relation changes)
-// for one thing at one config revision. ThingType carries the template ID
-// (e.g. "wastebin") so consumers can route without a catalog join.
-type ThingValuesEventV1 struct {
-	Schema           string             `json:"schema,omitempty"`
-	EventID          string             `json:"eventId"`
-	Tenant           string             `json:"tenant"`
-	ThingID          string             `json:"thingId"`
-	ThingType        string             `json:"thingType,omitempty"`
-	ThingTypeVersion string             `json:"thingTypeVersion,omitempty"`
-	ConfigRevision   int64              `json:"configRevision"`
-	PublishedAt      time.Time          `json:"publishedAt"`
-	Thing            *ThingDescriptorV1 `json:"thing,omitempty"`
-	Values           []ThingValueV1     `json:"values"`
-	Relations        []RelationChangeV1 `json:"relations,omitempty"`
+// ThingSnapshotValueV1 is one current (snapshot) property value: the
+// producer's current-state for the property at the event's config revision,
+// not a merge of historical observations. Unit is frozen per configRevision
+// (conversion only via explicit convert rule); value is finite when present
+// (NaN/Inf never become current); quality is the strict enum;
+// observedAt/receivedAt/source/messageId/configRevision preserve the value's
+// own time, unit, quality and provenance across config changes and restarts.
+// Sub-second precision (RFC3339Nano, microsecond dedup) is preserved;
+// zero/false are preserved (nil means missing, not zero).
+type ThingSnapshotValueV1 struct {
+	PropertyID     string    `json:"propertyId"`
+	Value          *float64  `json:"value"`
+	Quality        string    `json:"quality"`
+	Unit           string    `json:"unit,omitempty"`
+	ObservedAt     time.Time `json:"observedAt"`
+	ReceivedAt     time.Time `json:"receivedAt"`
+	Source         string    `json:"source,omitempty"`
+	MessageID      string    `json:"messageId,omitempty"`
+	ConfigRevision int64     `json:"configRevision"`
 }
 
-// RelationChangeV1 describes a single directed relation change.
-// Removed marks a detached link; ToID then carries the last known target
-// (which link disappeared), otherwise the new one.
+// Validate checks the snapshot value: strict quality enum and finite value.
+func (v ThingSnapshotValueV1) Validate() error {
+	if v.PropertyID == "" {
+		return fmt.Errorf("types: missing propertyId")
+	}
+	switch v.Quality {
+	case "ok", "uncertain", "invalid":
+	default:
+		return fmt.Errorf("types: invalid quality %q (want ok/uncertain/invalid)", v.Quality)
+	}
+	if v.Value != nil && (math.IsNaN(*v.Value) || math.IsInf(*v.Value, 0)) {
+		return fmt.Errorf("types: invalid value (NaN/Inf not allowed)")
+	}
+	if v.ObservedAt.IsZero() {
+		return fmt.Errorf("types: missing observedAt")
+	}
+	return nil
+}
+
+// ThingValuesEventV1 groups delta (what updated now) and snapshot (all
+// current values) for one thing at one frozen config revision, plus the
+// frozen descriptor and version references. ThingType carries the template
+// ID (e.g. "wastebin") so consumers can route without a catalog join.
 //
-// FromThingType/From and ToThingType/To let consumers route and render
-// without a catalog join: typeName is SubType over thing type and nameOrID
-// is alternativeName over name over thing ID (same convention as the
-// thing's own rules). All four are additive and omitempty.
+// EventID is "v1/<tenant>/<thing>/<message>". ConfigRevision, Thing
+// descriptor, ThingType/Version and every snapshot unit are frozen at
+// mutation/computation: queued outbox entries are never re-enriched from
+// current config at drain, and restart republishes without recomputation,
+// including an old revision after the thing got a new config.
+//
+// Five-mode semantics (PLAN1050 A2):
+//   - missing current (snapshot lacks property; required -> error),
+//   - new invalid obs (invalid/null/NaN/Inf/unit mismatch -> delta carries
+//     an invalid entry, snapshot keeps the previous valid - never replaced),
+//   - previous-valid-after-invalid (preview shows current vs latest delta),
+//   - removed property at config change (pruned -> snapshot missing +
+//     removed[]),
+//   - explicit clearing (only via removeAttributes/lifecycle rule).
+//
+// Zero/false are preserved; sub-second precision (RFC3339Nano,
+// microsecond dedup); unit frozen per configRevision.
+//
+// Values is the deprecated alias for Delta, kept one release: producers set
+// both to the same slice; consumers read Delta with fallback to Values.
+type ThingValuesEventV1 struct {
+	Schema           string                 `json:"schema,omitempty"`
+	EventID          string                 `json:"eventId"`
+	Tenant           string                 `json:"tenant"`
+	ThingID          string                 `json:"thingId"`
+	ThingType        string                 `json:"thingType,omitempty"`
+	ThingTypeVersion string                 `json:"thingTypeVersion,omitempty"`
+	ConfigRevision   int64                  `json:"configRevision"`
+	PublishedAt      time.Time              `json:"publishedAt"`
+	Thing            *ThingDescriptorV1     `json:"thing,omitempty"`
+	Delta            []ThingValueV1         `json:"delta,omitempty"`
+	Snapshot         []ThingSnapshotValueV1 `json:"snapshot,omitempty"`
+	Removed          []string               `json:"removed,omitempty"`
+	Relations        []RelationChangeV1     `json:"relations,omitempty"`
+	// Values is the deprecated alias for Delta (one release): always equal
+	// to Delta when produced; consumed as fallback when Delta is absent.
+	Values []ThingValueV1 `json:"values"`
+}
+
+// RelationChangeV1 describes a single directed relation change for any
+// named slot (not only partOf). Removed marks a detached link; ToID then
+// carries the last known target (which link disappeared), otherwise the new
+// one. PreviousToId carries the previous target on move: a move is an
+// atomic remove+set at the same revision (same RelationID, set entry carries
+// previousToId, removed entry is not emitted separately for moves).
+//
+// RelationID is "v1/<tenant>/<from>/relations/<type>/<to>/<revision>/<set|removed>"
+// (To ingår för unicitet vid flera mål samma revision; paritet med F:s
+// BuildRelationID). Legacy "partof-<child>" IDs remain readable (opaque string,
+// no validation) but new events use the versioned form. F:s legacy v1 without
+// To (seven segments) remains readably parseable (To empty, no To check);
+// C1 tolerates all forms opaquely while F validates strict v1 on write.
+//
+// FromThingType/FromThingTypeVersion/From and
+// ToThingType/ToThingTypeVersion/To let consumers route and render without
+// a catalog join: typeName is SubType over thing type and nameOrID is
+// alternativeName over name over thing ID (same convention as the thing's
+// own rules). All are additive and omitempty. To (descriptor) is null when
+// the target side is unknown; readers tolerate null To (broken reference
+// stays visible as target:null instead of silently vanishing).
+//
+// Tenant boundary is strict intra-tenant; duplicates
+// (tenant,relation,from,to) are idempotent upserts. partOf keeps its
+// hierarchy rules (max one parent, CTE cycle check); generic names have no
+// cycle gate.
 type RelationChangeV1 struct {
-	RelationID string    `json:"relationId"`
-	Type       string    `json:"type"`
-	FromID     string    `json:"fromId"`
-	ToID       string    `json:"toId,omitempty"`
-	Removed    bool      `json:"removed,omitempty"`
-	Tenant     string    `json:"tenant"`
-	Revision   int64     `json:"revision"`
-	ChangedAt  time.Time `json:"changedAt"`
-	// FromThingType is the child's template ID; From is its descriptor.
-	FromThingType string             `json:"fromThingType,omitempty"`
-	From          *ThingDescriptorV1 `json:"from,omitempty"`
-	// ToThingType is the parent's template ID; To is its descriptor.
-	// Absent only when the parent side is unknown.
-	ToThingType string             `json:"toThingType,omitempty"`
-	To          *ThingDescriptorV1 `json:"to,omitempty"`
+	RelationID   string    `json:"relationId"`
+	Type         string    `json:"type"`
+	FromID       string    `json:"fromId"`
+	ToID         string    `json:"toId,omitempty"`
+	Removed      bool      `json:"removed,omitempty"`
+	PreviousToID string    `json:"previousToId,omitempty"`
+	Tenant       string    `json:"tenant"`
+	Revision     int64     `json:"revision"`
+	ChangedAt    time.Time `json:"changedAt"`
+	// FromThingType is the source's template ID; FromThingTypeVersion its
+	// version; From is its frozen descriptor at Revision.
+	FromThingType        string             `json:"fromThingType,omitempty"`
+	FromThingTypeVersion string             `json:"fromThingTypeVersion,omitempty"`
+	From                 *ThingDescriptorV1 `json:"from,omitempty"`
+	// ToThingType is the target's template ID; ToThingTypeVersion its
+	// version; To is its frozen descriptor at Revision.
+	// Absent (null) only when the target side is unknown.
+	ToThingType        string             `json:"toThingType,omitempty"`
+	ToThingTypeVersion string             `json:"toThingTypeVersion,omitempty"`
+	To                 *ThingDescriptorV1 `json:"to,omitempty"`
+}
+
+// Validate checks required identity fields for a relation change.
+func (e RelationChangeV1) Validate() error {
+	if e.RelationID == "" {
+		return fmt.Errorf("types: missing relationId")
+	}
+	if e.Type == "" {
+		return fmt.Errorf("types: missing type")
+	}
+	if e.FromID == "" {
+		return fmt.Errorf("types: missing fromId")
+	}
+	if e.Tenant == "" {
+		return fmt.Errorf("types: missing tenant")
+	}
+	return nil
 }
 
 // TopicName reports the publish topic (B20: isolated v1 topics).
@@ -210,8 +317,10 @@ const (
 
 // ThingLifecycleV1 announces thing creation, configuration change or
 // deletion. Consumers that materialize things subscribe to stay in sync,
-// including deletes. The snapshot carries the thing descriptor at
-// ConfigRevision.
+// including deletes. The snapshot carries the frozen thing descriptor at
+// ConfigRevision. Bootstrap marks bootstrap/resync emissions (complete
+// underlay without new measurements) so descriptive things without
+// measurements can be created/updated; it is additive and omitempty.
 type ThingLifecycleV1 struct {
 	Schema           string             `json:"schema,omitempty"`
 	EventID          string             `json:"eventId"`
@@ -223,6 +332,7 @@ type ThingLifecycleV1 struct {
 	ConfigRevision   int64              `json:"configRevision"`
 	ChangedAt        time.Time          `json:"changedAt"`
 	Thing            *ThingDescriptorV1 `json:"thing,omitempty"`
+	Bootstrap        bool               `json:"bootstrap,omitempty"`
 }
 
 // TopicName reports the publish topic (B20: isolated v1 topics).
@@ -254,11 +364,18 @@ func (e ThingLifecycleV1) Validate() error {
 }
 
 // EventTimestamp är konsumentens tid för ett värdesevent (K1.3):
-// max(values[].observedAt) — mättid, aldrig transporttid (B3).
+// max(delta[].observedAt) — mättid, aldrig transporttid (B3).
+// Faller tillbaka på values[] (deprecated alias) när delta saknas.
+// Snapshot-tid ersätter aldrig dessa tider: varje snapshotvärde bär egen
+// observationstid, enhet, kvalitet och proveniens.
 // Rekommendationen i INTEGRATION.md är därmed kontrakt.
 func (e ThingValuesEventV1) EventTimestamp() time.Time {
 	var latest time.Time
-	for _, v := range e.Values {
+	vals := e.Delta
+	if len(vals) == 0 {
+		vals = e.Values
+	}
+	for _, v := range vals {
 		if v.ObservedAt.After(latest) {
 			latest = v.ObservedAt
 		}
@@ -266,8 +383,17 @@ func (e ThingValuesEventV1) EventTimestamp() time.Time {
 	return latest
 }
 
-// ValueByProperty returnerar värdet för en egenskap eller nil när den
-// saknas i eventet. K1.4: konsumentregler adresserar egenskaper via
+// deltaValues returnerar delta med fallback på values (deprecated alias).
+func (e ThingValuesEventV1) deltaValues() []ThingValueV1 {
+	if len(e.Delta) > 0 {
+		return e.Delta
+	}
+	return e.Values
+}
+
+// ValueByProperty returnerar deltavärdet för en egenskap eller nil när den
+// saknas i eventet. Läser Delta med fallback på Values (deprecated alias).
+// K1.4: konsumentregler adresserar egenskaper via
 // values.<propertyId>.{value,observedAt,quality,unit,source} —
 // ersättaren för gamla field:-vägar (temperature.v, measured.level,
 // percent, refDevices[0].deviceID). Full proveniens (antal
@@ -275,9 +401,64 @@ func (e ThingValuesEventV1) EventTimestamp() time.Time {
 // kontraktet bär kommaseparerad source
 // (device/[channel]/object/resource, tom channel = alla).
 func (e ThingValuesEventV1) ValueByProperty(propertyID string) *ThingValueV1 {
+	for i := range e.Delta {
+		if e.Delta[i].PropertyID == propertyID {
+			return &e.Delta[i]
+		}
+	}
 	for i := range e.Values {
 		if e.Values[i].PropertyID == propertyID {
 			return &e.Values[i]
+		}
+	}
+	return nil
+}
+
+// SnapshotByProperty returnerar snapshotvärdet (current) för en egenskap
+// eller nil när snapshot saknar den (saknat current; required -> fel).
+// Skiljer saknat current från ny ogiltig observation (delta har
+// invalid-post, snapshot behåller tidigare giltigt) och från borttagen
+// egenskap (snapshot saknas + removed[]).
+func (e ThingValuesEventV1) SnapshotByProperty(propertyID string) *ThingSnapshotValueV1 {
+	for i := range e.Snapshot {
+		if e.Snapshot[i].PropertyID == propertyID {
+			return &e.Snapshot[i]
+		}
+	}
+	return nil
+}
+
+// DeltaOrValues returnerar delta (eller deprecated values-aliaset) för
+// konsumenter som ännu inte migrerat till delta-fältet. Snapshot läses via
+// SnapshotByProperty; removed via Removed.
+func (e ThingValuesEventV1) DeltaOrValues() []ThingValueV1 {
+	return e.deltaValues()
+}
+
+// Validate checks required identity fields and nested values.
+func (e ThingValuesEventV1) Validate() error {
+	if e.EventID == "" {
+		return fmt.Errorf("types: missing eventId")
+	}
+	if e.ThingID == "" {
+		return fmt.Errorf("types: missing thingId")
+	}
+	if e.Tenant == "" {
+		return fmt.Errorf("types: missing tenant")
+	}
+	for _, v := range e.Delta {
+		if err := v.Validate(); err != nil {
+			return err
+		}
+	}
+	for _, v := range e.Values {
+		if err := v.Validate(); err != nil {
+			return err
+		}
+	}
+	for _, v := range e.Snapshot {
+		if err := v.Validate(); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -295,7 +476,21 @@ func ShouldEmitProperty(quality string) bool {
 // egenskaper måste finnas med emitterbar kvalitet, annars hoppas hela
 // entiteten över (ingen icke-konform partiell entitet). Valfria
 // egenskaper utelämnas individuellt (when:present default).
+// När snapshot finns (delta+snapshot-kontraktet) prövas snapshot
+// (producentens current-state, inte senaste ogiltiga delta): saknat
+// current eller ogiltigt current för required hoppar entiteten, även om
+// delta bär en ogiltig post (ogiltig ersätter aldrig aktuellt). Utan
+// snapshot faller den tillbaka på delta/values (deprecated beteende).
 func (e ThingValuesEventV1) ShouldEmitEntity(required []string) bool {
+	if len(e.Snapshot) > 0 {
+		for _, id := range required {
+			v := e.SnapshotByProperty(id)
+			if v == nil || !ShouldEmitProperty(v.Quality) {
+				return false
+			}
+		}
+		return true
+	}
 	for _, id := range required {
 		v := e.ValueByProperty(id)
 		if v == nil || !ShouldEmitProperty(v.Quality) {

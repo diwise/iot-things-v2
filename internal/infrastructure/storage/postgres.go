@@ -361,17 +361,17 @@ func (s *PgStore) AppendHistory(ctx context.Context, tenant, thingID string, h a
 	// blir identisk mellan backendarna; databasen avrundar ändå.
 	h.ObservedAt = canonicalObserved(h.ObservedAt)
 	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO history_v2(tenant, thing_id, property_id, observed_at, received_at, value, quality, source, message_id, late)
-		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
+		`INSERT INTO history_v2(tenant, thing_id, property_id, observed_at, received_at, value, quality, unit, source, message_id, late)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
 		tenant, thingID, h.PropertyID, h.ObservedAt, orNow(h.ReceivedAt),
-		nullableFloat(h.Value), h.Quality, h.Source, h.MessageID, h.Late)
+		nullableFloat(h.Value), h.Quality, h.Unit, h.Source, h.MessageID, h.Late)
 	return err == nil && tag.RowsAffected() == 1
 }
 
 func (s *PgStore) History(ctx context.Context, tenant, thingID, prop string, from, to time.Time, limit, offset int) []application.HistoryWrite {
 	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
-	query := `SELECT property_id, observed_at, received_at, value, quality, source, message_id, late
+	query := `SELECT property_id, observed_at, received_at, value, quality, unit, source, message_id, late
 		FROM history_v2 WHERE tenant=$1 AND thing_id=$2`
 	args := []any{tenant, thingID}
 	if prop != "" {
@@ -402,7 +402,7 @@ func (s *PgStore) History(ctx context.Context, tenant, thingID, prop string, fro
 	for rows.Next() {
 		var h application.HistoryWrite
 		var value *float64
-		if err := rows.Scan(&h.PropertyID, &h.ObservedAt, &h.ReceivedAt, &value, &h.Quality, &h.Source, &h.MessageID, &h.Late); err != nil {
+		if err := rows.Scan(&h.PropertyID, &h.ObservedAt, &h.ReceivedAt, &value, &h.Quality, &h.Unit, &h.Source, &h.MessageID, &h.Late); err != nil {
 			return out
 		}
 		h.Value = value
@@ -572,10 +572,10 @@ func (s *PgStore) CommitBatch(ctx context.Context, tenant, thingID, messageID st
 	for _, h := range hist {
 		h.ObservedAt = canonicalObserved(h.ObservedAt)
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO history_v2(tenant, thing_id, property_id, observed_at, received_at, value, quality, source, message_id, late)
-			 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT DO NOTHING`,
+			`INSERT INTO history_v2(tenant, thing_id, property_id, observed_at, received_at, value, quality, unit, source, message_id, late)
+			 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT DO NOTHING`,
 			tenant, thingID, h.PropertyID, h.ObservedAt, orNow(h.ReceivedAt),
-			nullableFloat(h.Value), h.Quality, h.Source, h.MessageID, h.Late); err != nil {
+			nullableFloat(h.Value), h.Quality, h.Unit, h.Source, h.MessageID, h.Late); err != nil {
 			return false
 		}
 	}
@@ -626,11 +626,13 @@ func (s *PgStore) DedupMark(ctx context.Context, tenant, messageID, thingID stri
 		tenant, messageID, thingID)
 }
 
+// Children returnerar partOf-barn (hierarki). Generella platser är ingen
+// hierarki och ingår ej (läses via blobens Relations).
 func (s *PgStore) Children(ctx context.Context, tenant, parentID string) []string {
 	ctx, cancel := s.ctxWith(ctx)
 	defer cancel()
 	rows, err := s.pool.Query(ctx,
-		`SELECT from_id FROM relations_v2 WHERE tenant=$1 AND to_id=$2 ORDER BY from_id`,
+		`SELECT from_id FROM relations_v2 WHERE tenant=$1 AND to_id=$2 AND type='partOf' ORDER BY from_id`,
 		tenant, parentID)
 	if err != nil {
 		return nil
@@ -767,20 +769,53 @@ func thingExistsQ(ctx context.Context, q rowQuerier, tenant, thingID string) boo
 	return exists
 }
 
+// targetTemplateQ läser målets verkliga malltyp i tx (samma tenant).
+// Saknat mål ger ErrNotFound; korrupt blob ger fel (aldrig tyst typlös).
+func targetTemplateQ(ctx context.Context, q rowQuerier, tenant, thingID string) (string, error) {
+	var raw []byte
+	if err := q.QueryRow(ctx, `SELECT data FROM things_v2 WHERE tenant=$1 AND id=$2`, tenant, thingID).Scan(&raw); err != nil {
+		// Saknad rad -> ErrNotFound (samma som thingExistsQ, men med typ).
+		return "", fmt.Errorf("%w: relation target %q", things.ErrNotFound, thingID)
+	}
+	var st application.StoredThingState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return "", fmt.Errorf("relation target %q has undecodable data: %w", thingID, err)
+	}
+	var cfg catalog.EffectiveConfig
+	if err := json.Unmarshal(st.ConfigJSON, &cfg); err != nil {
+		return "", fmt.Errorf("relation target %q has undecodable config: %w", thingID, err)
+	}
+	return cfg.TemplateID, nil
+}
+
+// checkDeclaredType nekar falsk deklarerad måltyp i tx (atomär återvalidering
+// mot verklig typ; samtidiga typbyten via uppgradering kan inte smita emellan).
+func checkDeclaredType(realType, declaredType, relName, targetID string) error {
+	if declaredType != "" && declaredType != realType {
+		return fmt.Errorf("%w: relation %q target %q has type %q, declared %q",
+			things.ErrValidation, relName, targetID, realType, declaredType)
+	}
+	return nil
+}
+
 // attachChildTx är AttachChild-logiken i transaktion (samma fel och
-// idempotens, men validering mot tx-snapshot).
-func attachChildTx(ctx context.Context, tx pgx.Tx, tenant, childID, parentID string) error {
+// idempotens, men validering mot tx-snapshot + verklig typ).
+func attachChildTx(ctx context.Context, tx pgx.Tx, tenant, childID, parentID, declaredType string) error {
 	if childID == parentID {
 		return fmt.Errorf("relation: self-reference denied (%q)", childID)
 	}
-	if !thingExistsQ(ctx, tx, tenant, parentID) {
-		return fmt.Errorf("%w: relation target %q", things.ErrNotFound, parentID)
+	realType, err := targetTemplateQ(ctx, tx, tenant, parentID)
+	if err != nil {
+		return err
+	}
+	if err := checkDeclaredType(realType, declaredType, "partOf", parentID); err != nil {
+		return err
 	}
 	var cur string
-	err := tx.QueryRow(ctx,
+	cerr := tx.QueryRow(ctx,
 		`SELECT to_id FROM relations_v2 WHERE tenant=$1 AND from_id=$2 AND type='partOf'`,
 		tenant, childID).Scan(&cur)
-	if err == nil {
+	if cerr == nil {
 		if cur == parentID {
 			return nil
 		}
@@ -812,22 +847,25 @@ func attachChildTx(ctx context.Context, tx pgx.Tx, tenant, childID, parentID str
 	return nil
 }
 
-// moveChildTx är MoveChild-logiken i transaktion.
-func moveChildTx(ctx context.Context, tx pgx.Tx, tenant, childID, newParentID string) error {
+// moveChildTx är MoveChild-logiken i transaktion (med verklig typ-kontroll).
+func moveChildTx(ctx context.Context, tx pgx.Tx, tenant, childID, newParentID, declaredType string) error {
 	if childID == "" || newParentID == "" {
 		return fmt.Errorf("relation: missing child/new parent")
 	}
 	if childID == newParentID {
 		return fmt.Errorf("relation: self-reference denied (%q)", childID)
 	}
-	if !thingExistsQ(ctx, tx, tenant, newParentID) {
-		return fmt.Errorf("%w: relation target %q", things.ErrNotFound, newParentID)
+	realType, err := targetTemplateQ(ctx, tx, tenant, newParentID)
+	if err != nil {
+		return err
+	}
+	if err := checkDeclaredType(realType, declaredType, "partOf", newParentID); err != nil {
+		return err
 	}
 	var cur string
-	err := tx.QueryRow(ctx,
+	if cerr := tx.QueryRow(ctx,
 		`SELECT to_id FROM relations_v2 WHERE tenant=$1 AND from_id=$2 AND type='partOf'`,
-		tenant, childID).Scan(&cur)
-	if err != nil {
+		tenant, childID).Scan(&cur); cerr != nil {
 		return fmt.Errorf("relation: no partOf parent for child %q", childID)
 	}
 	if cur != newParentID && partOfCreatesCycleQ(ctx, tx, tenant, childID, newParentID) {
@@ -839,10 +877,91 @@ func moveChildTx(ctx context.Context, tx pgx.Tx, tenant, childID, newParentID st
 	return err
 }
 
-// detachChildTx tar bort utgående relationer (alla typer, som RemoveOutgoing).
+// detachChildTx tar bort alla utgående relationer (alla typer, som
+// RemoveOutgoing). Används vid delete (thing borta, alla utgående borta).
 func detachChildTx(ctx context.Context, tx pgx.Tx, tenant, childID string) error {
 	_, err := tx.Exec(ctx,
 		`DELETE FROM relations_v2 WHERE tenant=$1 AND from_id=$2`, tenant, childID)
+	return err
+}
+
+// detachPartOfTx tar bort endast partOf-länken (ej generella platser).
+// Används vid relOps detach (borttagen partOf i ny config ska koppla loss
+// utan att radera generella länkar).
+func detachPartOfTx(ctx context.Context, tx pgx.Tx, tenant, childID string) error {
+	_, err := tx.Exec(ctx,
+		`DELETE FROM relations_v2 WHERE tenant=$1 AND from_id=$2 AND type='partOf'`, tenant, childID)
+	return err
+}
+
+// generalLinkID är deterministiskt lagrings-ID per länk för idempotent
+// upsert (duplikat (tenant,relation,from,to) = idempotent, inte fel).
+// Skilt prefix från partOf ("partof-<barn>") för att undvika kollision.
+func generalLinkID(name, fromID, toID string) string {
+	return "rel-" + name + "--" + fromID + "--" + toID
+}
+
+// addLinkTx persisterar en generell namngiven plats atomärt i tx
+// (set-semantik, idempotent upsert, max i tx, ingen cykelgrind för generella
+// namn). Duplikat (samma namn+mål) är idempotent nil; max överskridande nekas.
+func addLinkTx(ctx context.Context, tx pgx.Tx, tenant, fromID, name, toID, declaredType string, max int) error {
+	if fromID == "" || name == "" || toID == "" {
+		return fmt.Errorf("relation: missing from/name/to for addLink")
+	}
+	if fromID == toID {
+		return fmt.Errorf("relation: self-reference denied (%q)", fromID)
+	}
+	realType, err := targetTemplateQ(ctx, tx, tenant, toID)
+	if err != nil {
+		return err
+	}
+	if err := checkDeclaredType(realType, declaredType, name, toID); err != nil {
+		return err
+	}
+	// Idempotent: samma länk redan lagrad -> nil (ingen max-prövning).
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT true FROM relations_v2 WHERE tenant=$1 AND from_id=$2 AND type=$3 AND to_id=$4`,
+		tenant, fromID, name, toID).Scan(&exists); err == nil && exists {
+		return nil
+	}
+	// Kardinalitet: räkna befintliga för from+namn i tx-snapshot (lockTenant
+	// serialiserar per tenant, så samtidiga writers kan inte smita emellan).
+	if max > 0 {
+		var n int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM relations_v2 WHERE tenant=$1 AND from_id=$2 AND type=$3`,
+			tenant, fromID, name).Scan(&n); err != nil {
+			return err
+		}
+		if n+1 > max {
+			return fmt.Errorf("%w: relation %q exceeds max %d", things.ErrValidation, name, max)
+		}
+	}
+	tag, err := tx.Exec(ctx,
+		`INSERT INTO relations_v2(tenant, id, type, from_id, to_id) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+		tenant, generalLinkID(name, fromID, toID), name, fromID, toID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Kapplöpning (samma länk via annan tx, trots lockTenant? Bevara
+		// idempotens): läs om - samma länk -> nil, annan konflikt -> fel?
+		// Med deterministiskt ID kan 0 rader endast betyda samma länk redan
+		// fanns (idempotent) - returnera nil.
+		return nil
+	}
+	return nil
+}
+
+// removeLinkTx tar bort en specifik generell länk (idempotent: 0 rader = nil).
+func removeLinkTx(ctx context.Context, tx pgx.Tx, tenant, fromID, name, toID string) error {
+	if fromID == "" || name == "" || toID == "" {
+		return fmt.Errorf("relation: missing from/name/to for removeLink")
+	}
+	_, err := tx.Exec(ctx,
+		`DELETE FROM relations_v2 WHERE tenant=$1 AND from_id=$2 AND type=$3 AND to_id=$4`,
+		tenant, fromID, name, toID)
 	return err
 }
 
@@ -919,13 +1038,22 @@ func (s *PgStore) SaveThingWithRelations(ctx context.Context, tenant, thingID st
 	}
 	for _, op := range relOps {
 		var err error
+		name := op.Name
+		if name == "" {
+			name = "partOf"
+		}
 		switch op.Op {
 		case "attach":
-			err = attachChildTx(ctx, tx, tenant, thingID, op.Target)
+			err = attachChildTx(ctx, tx, tenant, thingID, op.Target, op.DeclaredTargetType)
 		case "move":
-			err = moveChildTx(ctx, tx, tenant, thingID, op.Target)
+			err = moveChildTx(ctx, tx, tenant, thingID, op.Target, op.DeclaredTargetType)
 		case "detach":
-			err = detachChildTx(ctx, tx, tenant, thingID)
+			// PartOf-detach tar endast partOf (ej generella platser).
+			err = detachPartOfTx(ctx, tx, tenant, thingID)
+		case "addLink":
+			err = addLinkTx(ctx, tx, tenant, thingID, name, op.Target, op.DeclaredTargetType, op.Max)
+		case "removeLink":
+			err = removeLinkTx(ctx, tx, tenant, thingID, name, op.Target)
 		default:
 			err = fmt.Errorf("relation: unknown op %q", op.Op)
 		}
@@ -957,8 +1085,10 @@ func (s *PgStore) DeleteThingWithRelations(ctx context.Context, tenant, thingID 
 	if err := tx.QueryRow(ctx, `SELECT true FROM things_v2 WHERE tenant=$1 AND id=$2`, tenant, thingID).Scan(&exists); err != nil {
 		return fmt.Errorf("%w: thing %q", things.ErrNotFound, thingID)
 	}
+	// Endast partOf-barn blockerar (ingen kaskad, B17). Generella inkommande
+	// lämnas som brutna referenser (target:null vid läsning).
 	var nChildren int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM relations_v2 WHERE tenant=$1 AND to_id=$2`, tenant, thingID).Scan(&nChildren); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM relations_v2 WHERE tenant=$1 AND to_id=$2 AND type='partOf'`, tenant, thingID).Scan(&nChildren); err != nil {
 		return err
 	}
 	if nChildren > 0 {

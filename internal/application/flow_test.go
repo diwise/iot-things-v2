@@ -977,7 +977,9 @@ func TestMissingOperatorParamsRejected(t *testing.T) {
 	}
 }
 
-// C6: saknat värde får aldrig bli numeriskt noll.
+// C6: saknat värde får aldrig bli numeriskt noll (PLAN1050 femläges-semantik:
+// ny ogiltig obs -> delta har invalid-post, snapshot behåller tidigare
+// giltigt - ersätter ALDRIG; nil betyder saknat, inte noll).
 func TestNilValueNeverBecomesCurrent(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -990,17 +992,29 @@ func TestNilValueNeverBecomesCurrent(t *testing.T) {
 	if _, ok := out.Updated["temperature.window"]; ok {
 		t.Fatalf("nil value must not become current: %+v", out.Updated)
 	}
+	// Delta ska bära invalid-post med null (inte noll).
+	found := false
 	for _, e := range out.Events {
 		if e.PropertyID == "temperature.window" {
-			t.Fatalf("nil value must not emit event: %+v", e)
+			found = true
+			if e.Quality != "invalid" || !e.ValueNull {
+				t.Fatalf("nil delta must be invalid+null: %+v", e)
+			}
 		}
+	}
+	if !found {
+		t.Fatalf("nil value must emit delta invalid-post: %+v", out.Events)
 	}
 	if len(out.History) != 1 || out.History[0].Quality != "invalid" {
 		t.Fatalf("nil value must be recorded invalid: %+v", out.History)
 	}
+	if out.History[0].Value != nil {
+		t.Fatalf("nil history must stay null (not 0): %+v", out.History[0])
+	}
 }
 
-// B12/B13: ogiltig nekas av kvalitet och markeras inte som Late.
+// B12/B13: ogiltig nekas av kvalitet och markeras inte som Late (PLAN1050:
+// delta har invalid-post, snapshot behåller tidigare giltigt).
 func TestInvalidHistoryNotMarkedLate(t *testing.T) {
 	_, cfg := flowRooms(t)
 	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -1016,8 +1030,12 @@ func TestInvalidHistoryNotMarkedLate(t *testing.T) {
 	if out.History[0].Late {
 		t.Fatalf("invalid must not be marked Late: %+v", out.History[0])
 	}
-	if len(out.Updated) != 0 || len(out.Events) != 0 {
-		t.Fatalf("invalid must give no current/event: %+v %+v", out.Updated, out.Events)
+	if len(out.Updated) != 0 {
+		t.Fatalf("invalid must give no current: %+v", out.Updated)
+	}
+	// Ogiltig ger delta invalid-post (snapshot orörd).
+	if len(out.Events) != 1 || out.Events[0].Quality != "invalid" {
+		t.Fatalf("invalid must give delta invalid-post: %+v", out.Events)
 	}
 }
 

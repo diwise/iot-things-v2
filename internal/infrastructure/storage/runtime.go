@@ -8,13 +8,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"sort"
 	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application"
+	"github.com/diwise/iot-things-v2/internal/application/catalog"
 	"github.com/diwise/iot-things-v2/internal/application/things"
 	pkgtypes "github.com/diwise/iot-things-v2/pkg/types"
 )
+
+// targetTemplateLocked läser målets verkliga malltyp i samma tenant.
+// Anroparen håller a.S.mu (via SaveThingWithRelations).
+func (a *RuntimeAdapter) targetTemplateLocked(tenant, thingID string) (string, error) {
+	raw, _, ok := a.S.Things.Get(tenant, thingID)
+	if !ok {
+		return "", fmt.Errorf("%w: relation target %q", things.ErrNotFound, thingID)
+	}
+	var st application.StoredThingState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return "", fmt.Errorf("relation target %q has undecodable data: %w", thingID, err)
+	}
+	var cfg catalog.EffectiveConfig
+	if err := json.Unmarshal(st.ConfigJSON, &cfg); err != nil {
+		return "", fmt.Errorf("relation target %q has undecodable config: %w", thingID, err)
+	}
+	return cfg.TemplateID, nil
+}
 
 // copyTraceContext kopierar W3C trace-carrier (TV-07) för outbox-isolering.
 func copyTraceContext(m map[string]string) map[string]string {
@@ -22,9 +42,7 @@ func copyTraceContext(m map[string]string) map[string]string {
 		return nil
 	}
 	cp := make(map[string]string, len(m))
-	for k, v := range m {
-		cp[k] = v
-	}
+	maps.Copy(cp, m)
 	return cp
 }
 
@@ -93,6 +111,7 @@ func (a *RuntimeAdapter) CommitBatch(ctx context.Context, tenant, thingID, messa
 			ReceivedAt: h.ReceivedAt,
 			Value:      h.Value,
 			Quality:    h.Quality,
+			Unit:       h.Unit,
 			Source:     h.Source,
 			MessageID:  h.MessageID,
 			Late:       h.Late,
@@ -154,13 +173,9 @@ func (a *RuntimeAdapter) SaveThingWithRelations(ctx context.Context, tenant, thi
 	// Relations-låset (samma paket, ingen datarace).
 	a.S.Relations.mu.Lock()
 	byIDSnap := make(map[string]RelationRecord, len(a.S.Relations.byID))
-	for k, v := range a.S.Relations.byID {
-		byIDSnap[k] = v
-	}
+	maps.Copy(byIDSnap, a.S.Relations.byID)
 	childParentSnap := make(map[string]string, len(a.S.Relations.childParent))
-	for k, v := range a.S.Relations.childParent {
-		childParentSnap[k] = v
-	}
+	maps.Copy(childParentSnap, a.S.Relations.childParent)
 	a.S.Relations.mu.Unlock()
 	restoreRelations := func() {
 		a.S.Relations.mu.Lock()
@@ -170,13 +185,22 @@ func (a *RuntimeAdapter) SaveThingWithRelations(ctx context.Context, tenant, thi
 	}
 	for _, op := range relOps {
 		var err error
+		name := op.Name
+		if name == "" {
+			name = "partOf"
+		}
 		switch op.Op {
 		case "attach":
-			err = a.attachChildLocked(tenant, thingID, op.Target)
+			err = a.attachChildLocked(tenant, thingID, op.Target, op.DeclaredTargetType)
 		case "move":
-			err = a.moveChildLocked(tenant, thingID, op.Target)
+			err = a.moveChildLocked(tenant, thingID, op.Target, op.DeclaredTargetType)
 		case "detach":
-			a.S.Relations.RemoveOutgoing(tenant, thingID)
+			// PartOf-detach tar endast partOf (ej generella platser).
+			a.S.Relations.RemovePartOf(tenant, thingID)
+		case "addLink":
+			err = a.addLinkLocked(tenant, thingID, name, op.Target, op.DeclaredTargetType, op.Max)
+		case "removeLink":
+			a.S.Relations.RemoveLink(tenant, name, thingID, op.Target)
 		default:
 			err = fmt.Errorf("relation: unknown op %q", op.Op)
 		}
@@ -218,11 +242,17 @@ func (a *RuntimeAdapter) SaveThingWithRelations(ctx context.Context, tenant, thi
 	return nil
 }
 
-// attachChildLocked validerar mål + länkar partOf (samma regler och
-// felmeddelanden som AttachChild). Anroparen håller a.S.mu.
-func (a *RuntimeAdapter) attachChildLocked(tenant, childID, parentID string) error {
-	if _, _, ok := a.S.Things.Get(tenant, parentID); !ok {
-		return fmt.Errorf("%w: relation target %q", things.ErrNotFound, parentID)
+// attachChildLocked validerar mål (existens + verklig typ i samma tenant) +
+// länkar partOf (samma regler och felmeddelanden som AttachChild).
+// Anroparen håller a.S.mu.
+func (a *RuntimeAdapter) attachChildLocked(tenant, childID, parentID, declaredType string) error {
+	realType, err := a.targetTemplateLocked(tenant, parentID)
+	if err != nil {
+		return err
+	}
+	if declaredType != "" && declaredType != realType {
+		return fmt.Errorf("%w: relation %q target %q has type %q, declared %q",
+			things.ErrValidation, "partOf", parentID, realType, declaredType)
 	}
 	if cur, ok := a.S.Relations.Parent(tenant, childID); ok && cur.ToID == parentID {
 		return nil // Redan kopplad: idempotent.
@@ -236,13 +266,50 @@ func (a *RuntimeAdapter) attachChildLocked(tenant, childID, parentID string) err
 	})
 }
 
-// moveChildLocked validerar mål + flyttar partOf-länk (samma regler och
-// felmeddelanden som MoveChild). Anroparen håller a.S.mu.
-func (a *RuntimeAdapter) moveChildLocked(tenant, childID, newParentID string) error {
-	if _, _, ok := a.S.Things.Get(tenant, newParentID); !ok {
-		return fmt.Errorf("%w: relation target %q", things.ErrNotFound, newParentID)
+// moveChildLocked validerar mål (existens + verklig typ) + flyttar partOf-länk
+// (samma regler och felmeddelanden som MoveChild). Anroparen håller a.S.mu.
+func (a *RuntimeAdapter) moveChildLocked(tenant, childID, newParentID, declaredType string) error {
+	realType, err := a.targetTemplateLocked(tenant, newParentID)
+	if err != nil {
+		return err
+	}
+	if declaredType != "" && declaredType != realType {
+		return fmt.Errorf("%w: relation %q target %q has type %q, declared %q",
+			things.ErrValidation, "partOf", newParentID, realType, declaredType)
 	}
 	return a.S.Relations.Move(tenant, childID, newParentID)
+}
+
+// addLinkLocked persisterar en generell namngiven plats (set-semantik,
+// idempotent upsert, max i tx, ingen cykelgrind). Anroparen håller a.S.mu.
+func (a *RuntimeAdapter) addLinkLocked(tenant, fromID, name, toID, declaredType string, max int) error {
+	if fromID == "" || name == "" || toID == "" {
+		return fmt.Errorf("relation: missing from/name/to for addLink")
+	}
+	if fromID == toID {
+		return fmt.Errorf("relation: self-reference denied (%q)", fromID)
+	}
+	realType, err := a.targetTemplateLocked(tenant, toID)
+	if err != nil {
+		return err
+	}
+	if declaredType != "" && declaredType != realType {
+		return fmt.Errorf("%w: relation %q target %q has type %q, declared %q",
+			things.ErrValidation, name, toID, realType, declaredType)
+	}
+	if a.S.Relations.HasLink(tenant, name, fromID, toID) {
+		return nil // Idempotent: samma länk redan lagrad.
+	}
+	if max > 0 && a.S.Relations.CountLinks(tenant, fromID, name)+1 > max {
+		return fmt.Errorf("%w: relation %q exceeds max %d", things.ErrValidation, name, max)
+	}
+	return a.S.Relations.Add(RelationRecord{
+		ID:     "rel-" + name + "--" + fromID + "--" + toID,
+		Tenant: tenant,
+		Type:   name,
+		FromID: fromID,
+		ToID:   toID,
+	})
 }
 
 // DeleteThingWithRelations kontrollerar barnlöst tillstånd, kopplar loss,
@@ -319,6 +386,7 @@ func (a *RuntimeAdapter) AppendHistory(ctx context.Context, tenant, thingID stri
 		ReceivedAt: h.ReceivedAt,
 		Value:      h.Value,
 		Quality:    h.Quality,
+		Unit:       h.Unit,
 		Source:     h.Source,
 		MessageID:  h.MessageID,
 		Late:       h.Late,
@@ -333,6 +401,7 @@ func (a *RuntimeAdapter) History(ctx context.Context, tenant, thingID, prop stri
 			PropertyID: r.PropertyID,
 			Value:      r.Value,
 			Quality:    r.Quality,
+			Unit:       r.Unit,
 			ObservedAt: r.ObservedAt,
 			ReceivedAt: r.ReceivedAt,
 			Source:     r.Source,

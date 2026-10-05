@@ -16,15 +16,36 @@ info:
     efter lyckad validering kan betyda att tillståndet sparats men
     publiceringen väntar i outbox (levereras vid omstart); läs aktuellt
     tillstånd via GET i stället för blindt återförsök.
-    Utgående topics (isoleraade v1-kontrakt): things.v1.values (mätvärden med
-    sakdeskriptor), things.v1.lifecycle (created/updated/deleted),
-    things.v1.relations (partOf set/removed).
+    Utgående topics (isolerade v1-kontrakt, oförändrade): things.v1.values
+    (delta+snapshot med fryst deskriptor), things.v1.lifecycle
+    (created/updated/deleted med fryst thing + bootstrap-flagga),
+    things.v1.relations (alla namngivna platser, set/removed, flytt med
+    previousToId). Schema v1, contentType
+    application/vnd.diwise.things.v1+json; nya fält omitempty-additiva;
+    values[] behålls EN release som deprecated alias == delta[].
     K1-låst (2026-09-22): deskriptorn bär additivt alternativeName/subType
     (NameOrID = alternativeName > name > thingId; TypeName = subType >
-    thingType); konsumenttid EventTimestamp = max(values[].observedAt);
+    thingType); konsumenttid EventTimestamp = max(delta[].observedAt);
     field-vägar values.<property>.{value,observedAt,quality,unit,source};
     kvalitet ok/uncertain emitteras, invalid hoppar property, required
     saknad/invalid hoppar entitet; trace endast headers/OTel.
+    PLAN1050 B-förslag till A (things-sidan, ej slutlig merge): värdeevent
+    bär delta (denna messageId-grupp, inkl invalid-poster) + snapshot
+    (samtliga current med fryst enhet, aldrig ommärkta) + removed[]
+    (borttagna prop-ID:n vid config-byte) + fryst descriptor +
+    thingType/version + configRevision; varje värde behåller egen tid, enhet,
+    kvalitet och proveniens över konfigurationsbyte/omstart (noll/false
+    bevaras, subsekundprecision RFC3339Nano, enhet fryst per revision);
+    relationer för alla namngivna platser med målversioner + frysta
+    from/to-descriptors (to null tolereras), tenantgräns strikt intra-tenant,
+    duplikat idempotent, partOf max-en-förälder + CTE-cykelcheck (generella
+    utan cykelgrind); move = atomärt remove+set samma revision; delete
+    detachar utgående + publicerar removed per länk + lifecycle(deleted);
+    bootstrap via GET /things/export (ObjectSpec-JSON) + GET
+    /things/{id}/relations (RelationResolve) utan FIWARE-ID:n i källa.
+    RelationID-förslag: v1/<tenant>/<from>/relations/<type>/<to>/<revision>/
+    <set|removed> (To ingår för unicitet vid flera mål; A-baslinjens form
+    utan To + legacy partof-<barn> förblir läsbara som opaka strängar).
     Exempel: docs/CONSUMER-BINDING.md. HTTP-scheman nedan är läsytan (/api/v1),
     inte eventkontraktet (se pkg/types + docs/CONSUMER-BINDING.md).
 servers:

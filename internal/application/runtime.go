@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -115,6 +116,10 @@ func traceLinkForRaw(re RawOutboxEvent) []trace.Link {
 // konfigurationsversionen (API-ytan, If-Match); DataRevision är
 // skrivstaketet för CAS (bumpas vid varje blob-skrivning, även batchar
 // utan configändring) så att samtidiga skribenter upptäcks.
+// PendingRemoved bär borttagna prop-ID:n vid config-byte (prune) för nästa
+// värdesevents removed[] (snapshot saknas + removed[]); rensas efter första
+// publicering. Explicit rensning endast via removeAttributes/lifecycle-regel
+// (ogiltig obs rensar aldrig).
 type StoredThingState struct {
 	// ConfigJSON är den effektiva konfigurationen som läsbar JSON
 	// (json.RawMessage bäddas in utan base64).
@@ -125,6 +130,7 @@ type StoredThingState struct {
 	ProcessorStates map[string]StoredProcessor `json:"processors,omitempty"`
 	LastMessageID   string                     `json:"lastMessageId,omitempty"`
 	LastEvents      []FlowEvent                `json:"lastEvents,omitempty"`
+	PendingRemoved  []string                   `json:"pendingRemoved,omitempty"`
 }
 
 // RuntimeStore är persistensgränsen för Runtime. Minnesimplementation:
@@ -248,12 +254,23 @@ func NewRuntime(store RuntimeStore) *Runtime {
 	return &Runtime{store: store}
 }
 
-// RelationOp is one hierarchy mutation applied atomically with a blob
-// save. Only partOf is persisted (other named slots stay views derived
-// at read); attach/move carry the parent, detach clears it.
+// RelationOp is one relation mutation applied atomically with a blob save.
+// partOf uses attach/move/detach (single parent, cycle-checked); general
+// names use addLink/removeLink (set semantics, idempotent upsert, max
+// enforced, no cycle gate). attach/move carry the parent, detach clears
+// partOf; addLink/removeLink carry Name+Target for general places. Name
+// carries the relation name ("partOf" for hierarchy); DeclaredTargetType
+// carries the declared target template for real-type verification in tx
+// (false declared type denied); PreviousToID carries the previous target on
+// move (atomic remove+set same revision); Max carries the slot max for
+// general adds (cardinality enforced in tx against concurrent writers).
 type RelationOp struct {
-	Op     string // "attach", "move" or "detach"
-	Target string // parent for attach/move; "" for detach
+	Op                 string // "attach", "move", "detach", "addLink" or "removeLink"
+	Target             string // parent/target for attach/move/addLink/removeLink; "" for detach
+	Name               string // relation name (empty = partOf legacy)
+	DeclaredTargetType string // declared target template (for tx recheck)
+	PreviousToID       string // previous target on move (for previousToId event)
+	Max                int    // slot max for general adds (0 = unbounded)
 }
 
 // RegisterThing kompilerar obj via cat och lagrar konfiguration + revision.
@@ -263,6 +280,9 @@ type RelationOp struct {
 // Vid lyckad uppdatering inkrementeras revisionen (If-Match-semantik);
 // nyskapad sak får den begärda revisionen (kräver revision > 0).
 func (rt *Runtime) RegisterThing(ctx context.Context, tenant string, cat *catalog.Catalog, obj catalog.ObjectSpec, revision int64) (*catalog.EffectiveConfig, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if tenant == "" {
 		return nil, fmt.Errorf("%w: tenant must be provided", things.ErrValidation)
 	}
@@ -293,39 +313,123 @@ func (rt *Runtime) RegisterThing(ctx context.Context, tenant string, cat *catalo
 		newRevision = revision + 1
 		st.DataRevision++
 	}
-	// Relationsplanering (endast läsning här): validera mål och beräkna
-	// planerade länkändringar. Lagringen återvaliderar atomärt före
-	// skrivning, så samtidiga ändringar inte kan smita emellan (TV-03).
+	// Relationsplanering (endast läsning här): validera alla namngivna måls
+	// existens + verklig typ i samma tenant (falsk deklarerad måltyp nekas),
+	// beräkna planerade partOf-länkändringar. Lagringen återvaliderar atomärt
+	// före skrivning, så samtidiga ändringar inte kan smita emellan (TV-03).
+	// Tenantgräns är strikt intra-tenant: mål löses alltid i samma tenant.
 	var relOps []RelationOp
 	hasPartOf := false
+	// Mallens relationsslots för AllowedTargets-kontroll mot verklig typ
+	// (inte endast deklarerad sträng).
+	tmplSpec, tmplOK := cat.GetTemplate(cfg.TemplateID, cfg.TemplateVersion)
+	slotByName := make(map[string]things.RelationSpec)
+	if tmplOK {
+		for _, s := range tmplSpec.Template.Relations {
+			slotByName[s.Name] = s
+		}
+	}
 	for _, rel := range cfg.Relations {
+		// Verklig typ i samma tenant (aldrig cross-tenant, aldrig deklarerad
+		// sträng som bevis): saknat mål -> ErrNotFound (target:null hos läsare
+		// endast för redan lagrade brutna referenser, aldrig vid skrivning).
+		targetState, err := rt.store.LoadThingErr(ctx, tenant, rel.TargetThingID)
+		if err != nil {
+			if errors.Is(err, things.ErrNotFound) {
+				return nil, fmt.Errorf("%w: relation target %q", things.ErrNotFound, rel.TargetThingID)
+			}
+			return nil, err
+		}
+		targetCfg, err := decodeConfig(targetState.ConfigJSON)
+		if err != nil {
+			return nil, err
+		}
+		realType := targetCfg.TemplateID
+		// Falsk deklarerad måltyp nekas: deklarerad sträng är ingen bevis.
+		if rel.TargetTemplateID != "" && rel.TargetTemplateID != realType {
+			return nil, fmt.Errorf("%w: relation %q target %q has type %q, declared %q",
+				things.ErrValidation, rel.Name, rel.TargetThingID, realType, rel.TargetTemplateID)
+		}
+		// Tillåtna mål kontrolleras mot verklig typ (inte deklarerad).
+		if slot, ok := slotByName[rel.Name]; ok && len(slot.AllowedTargets) > 0 {
+			allowed := slices.Contains(slot.AllowedTargets, realType)
+			if !allowed {
+				return nil, fmt.Errorf("%w: relation %q target type %q not allowed",
+					things.ErrValidation, rel.Name, realType)
+			}
+		}
 		// Hierarkimedlemskap (partOf) persisteras som barn->förälder;
-		// övriga namngivna platser är vyer som härleds vid läsning.
+		// övriga namngivna platser valideras här men förblir vyer vid läsning
+		// tills B3 general persistence (samma validering, ingen cykelgrind
+		// för generella namn).
 		if rel.Name != "partOf" {
 			continue
 		}
 		hasPartOf = true
-		if _, ok := rt.store.LoadThing(ctx, tenant, rel.TargetThingID); !ok {
-			return nil, fmt.Errorf("%w: relation target %q", things.ErrNotFound, rel.TargetThingID)
-		}
 		if cur, ok := rt.store.ParentOf(ctx, tenant, obj.ThingID); ok {
 			if cur == rel.TargetThingID {
 				continue
 			}
-			relOps = append(relOps, RelationOp{Op: "move", Target: rel.TargetThingID})
+			// Move = atomärt remove+set samma revision (previousToId i event).
+			relOps = append(relOps, RelationOp{Op: "move", Target: rel.TargetThingID, Name: rel.Name, DeclaredTargetType: rel.TargetTemplateID, PreviousToID: cur})
 			continue
 		}
-		relOps = append(relOps, RelationOp{Op: "attach", Target: rel.TargetThingID})
+		relOps = append(relOps, RelationOp{Op: "attach", Target: rel.TargetThingID, Name: rel.Name, DeclaredTargetType: rel.TargetTemplateID})
 	}
 	// detachedFrom bär den borttagna förälderns ID till removed-händelsen
 	// (ToID = sista kända mål enligt kontraktet). Op:et i sig förblir
-	// mållöst — lagringen tar bort utgående länk oavsett mål.
+	// mållöst — lagringen tar bort utgående partOf-länk (ej generell).
 	var detachedFrom string
 	if !hasPartOf {
 		// Borttagen partOf i ny config ska koppla loss (lämna ej kvar gammal länk).
 		if old, ok := rt.store.ParentOf(ctx, tenant, obj.ThingID); ok {
-			relOps = append(relOps, RelationOp{Op: "detach"})
+			relOps = append(relOps, RelationOp{Op: "detach", Name: "partOf"})
 			detachedFrom = old
+		}
+	}
+	// Generella namngivna platser (alla namn utom partOf): diff gammal blob vs
+	// ny config ger addLink/removeLink (set-semantik, idempotent upsert,
+	// max i tx, ingen cykelgrind). Validering (existens+verklig typ+tenant)
+	// redan gjord ovan för alla relationer. st.ConfigJSON bär ännu gammal
+	// config (sätts till raw först nedan), så oldRels läses från st.
+	{
+		var oldRels []catalog.ResolvedRelation
+		if exists {
+			if oldCfg, err := decodeConfig(st.ConfigJSON); err == nil {
+				for _, r := range oldCfg.Relations {
+					if r.Name != "partOf" {
+						oldRels = append(oldRels, r)
+					}
+				}
+			}
+		}
+		newRels := make([]catalog.ResolvedRelation, 0)
+		for _, r := range cfg.Relations {
+			if r.Name != "partOf" {
+				newRels = append(newRels, r)
+			}
+		}
+		oldSet := make(map[string]catalog.ResolvedRelation)
+		for _, r := range oldRels {
+			oldSet[r.Name+"\x00"+r.TargetThingID] = r
+		}
+		newSet := make(map[string]catalog.ResolvedRelation)
+		for _, r := range newRels {
+			newSet[r.Name+"\x00"+r.TargetThingID] = r
+		}
+		for key, nr := range newSet {
+			if _, ok := oldSet[key]; !ok {
+				max := 0
+				if slot, ok := slotByName[nr.Name]; ok {
+					max = slot.Max
+				}
+				relOps = append(relOps, RelationOp{Op: "addLink", Target: nr.TargetThingID, Name: nr.Name, DeclaredTargetType: nr.TargetTemplateID, Max: max})
+			}
+		}
+		for key, or := range oldSet {
+			if _, ok := newSet[key]; !ok {
+				relOps = append(relOps, RelationOp{Op: "removeLink", Target: or.TargetThingID, Name: or.Name, DeclaredTargetType: or.TargetTemplateID})
+			}
 		}
 	}
 	st.Revision = newRevision
@@ -337,9 +441,24 @@ func (rt *Runtime) RegisterThing(ctx context.Context, tenant string, cat *catalo
 	// för egenskaper utanför nya configen samt processortillstånd för
 	// borttagna receptutgångar rensas vid omregistrering (historik bevaras).
 	// Återinförd egenskap börjar fräscht i stället för att återuppliva
-	// gammalt tillstånd.
+	// gammalt tillstånd. Borttagna ID:n sparas i PendingRemoved för nästa
+	// värdesevents removed[] (snapshot saknas + removed[]).
 	if exists {
-		pruneRemovedState(cfg, &st)
+		if removed := pruneRemovedState(cfg, &st); len(removed) > 0 {
+			// Ackumulera (ej ersätt): flera config-byten före nästa mätning
+			// ska alla rapporteras. Deduplicera via mängd.
+			seen := make(map[string]struct{}, len(st.PendingRemoved)+len(removed))
+			for _, id := range st.PendingRemoved {
+				seen[id] = struct{}{}
+			}
+			for _, id := range removed {
+				if _, ok := seen[id]; !ok {
+					seen[id] = struct{}{}
+					st.PendingRemoved = append(st.PendingRemoved, id)
+				}
+			}
+			sort.Strings(st.PendingRemoved)
+		}
 	}
 	// Livscykel- och relationshändelser byggs här men persisteras i samma
 	// atomära lagringsoperation som blob + länkar (P10/P11, TV-03):
@@ -349,21 +468,32 @@ func (rt *Runtime) RegisterThing(ctx context.Context, tenant string, cat *catalo
 	if exists {
 		kind = pkgtypes.ThingUpdated
 	}
+	// Fånga publiceringsmetadata (trace) vid mutation för lifecycle/relationer.
+	tcRaw := traceContextFrom(ctx)
 	rawEvents := []RawOutboxEvent{buildLifecycleEvent(tenant, cfg, kind, newRevision, now)}
+	rawEvents[0].TraceContext = tcRaw
 	for _, op := range relOps {
 		target := op.Target
+		relName := op.Name
+		if relName == "" {
+			relName = "partOf"
+		}
+		removed := op.Op == "detach" || op.Op == "removeLink"
+		previous := op.PreviousToID
 		if op.Op == "detach" {
 			target = detachedFrom
 		}
-		var parentCfg *catalog.EffectiveConfig
+		var targetCfg *catalog.EffectiveConfig
 		if target != "" {
 			var err error
-			parentCfg, err = rt.loadParentCfg(ctx, tenant, target)
+			targetCfg, err = rt.loadParentCfg(ctx, tenant, target)
 			if err != nil {
 				return nil, err
 			}
 		}
-		rawEvents = append(rawEvents, buildRelationEvent(tenant, cfg, parentCfg, obj.ThingID, target, op.Op == "detach", newRevision, now))
+		re := buildRelationEvent(tenant, cfg, targetCfg, obj.ThingID, target, relName, removed, previous, newRevision, now)
+		re.TraceContext = tcRaw
+		rawEvents = append(rawEvents, re)
 	}
 	// Ett atomärt anrop: blob-CAS/insert + relationsvalidering med
 	// länkändringar + outbox. Misslyckas något (cykel, saknat mål,
@@ -385,10 +515,19 @@ func (rt *Runtime) RegisterThing(ctx context.Context, tenant string, cat *catalo
 // pruneRemovedState rensar aktuella värden och processortillstånd vars
 // egenskap/utgång inte längre finns i den kompilerade konfigurationen
 // (K6 livscykel för borttagna mätpunkter). Historik påverkas inte.
-func pruneRemovedState(cfg *catalog.EffectiveConfig, st *StoredThingState) {
+// pruneRemovedState rensar aktuella värden och processortillstånd vars
+// egenskap/utgång inte längre finns i den kompilerade konfigurationen
+// (K6 livscykel för borttagna mätpunkter). Historik påverkas inte.
+// Returnerar borttagna prop-ID:n (sorterade) för removed[] (snapshot saknas +
+// removed[]); anroparen lagrar dem i PendingRemoved för nästa värdesevent.
+// Explicit rensning endast via removeAttributes/lifecycle-regel - ogiltig obs
+// rensar aldrig (snapshot behåller tidigare giltigt).
+func pruneRemovedState(cfg *catalog.EffectiveConfig, st *StoredThingState) []string {
+	var removed []string
 	for id := range st.Current {
 		if _, ok := cfg.Properties[id]; !ok {
 			delete(st.Current, id)
+			removed = append(removed, id)
 		}
 	}
 	outputs := make(map[string]struct{}, len(cfg.Recipes))
@@ -402,6 +541,8 @@ func pruneRemovedState(cfg *catalog.EffectiveConfig, st *StoredThingState) {
 			delete(st.ProcessorStates, key)
 		}
 	}
+	sort.Strings(removed)
+	return removed
 }
 
 // EncodeEventSegment gör ett ID-segment brokersäkert för event-ID:n.
@@ -482,45 +623,62 @@ func buildLifecycleEvent(tenant string, cfg *catalog.EffectiveConfig, kind pkgty
 	}
 }
 
-// buildRelationEvent bygger en relationsändring för ett barns partOf-länk
-// utan sidoeffekter. Anroparen persisterar den atomärt med mutationen.
-// Relations-ID:t delas med lagringen ("partof-<barn>"). Event-ID:t bär
-// åtgärd: set och removed på samma revision (t.ex. skapa-med-förälder
-// följt av delete utan uppdatering emellan) är olika händelser och får
-// inte dedupliceras mot varandra.
+// buildRelationEvent bygger en relationsändring för valfri namngiven plats
+// (generella namn + partOf) utan sidoeffekter. Anroparen persisterar den
+// atomärt med mutationen. RelationID är
+// "v1/<tenant>/<from>/relations/<type>/<to>/<revision>/<set|removed>"
+// (To ingår för unicitet vid flera mål; legacy "partof-<barn>" och
+// A-baslinjens form utan To förblir läsbara som opaka strängar, men nya
+// event inkluderar To så att duplikat (tenant,relation,from,to) = idempotent
+// upsert medan olika To ger distinkta ID:n - annars skulle andra länken
+// dedupliceras bort vid flera mål samma revision).
+// Move är atomärt remove+set vid samma revision: set-posten bär previousToId
+// (ingen separat removed-post för flytt). Event-ID:t bär åtgärd: set och
+// removed på samma revision är olika händelser och får inte dedupliceras.
 //
-// fromCfg är alltid barnets effektiva config; toCfg är förälderns (nil
-// ⇔ okänd föräldersida — undviks i praktiken genom att anroparen läser
-// föräldern före bygget). Båda serialiseras via describeThing så att
-// konsumenter kan routa och rendera utan kataloguppslag.
-func buildRelationEvent(tenant string, fromCfg, toCfg *catalog.EffectiveConfig, childID, parentID string, removed bool, revision int64, at time.Time) RawOutboxEvent {
+// fromCfg är alltid källans effektiva config (fryst vid mutation); toCfg är
+// målets (nil ⇔ okänd målsida - tolereras vid läsning som target:null, men
+// undviks vid skrivning genom att anroparen läser målet före bygget).
+// Båda serialiseras via describeThing + versioner så att konsumenter kan
+// routa och rendera utan kataloguppslag. Tenantgräns är strikt intra-tenant.
+func buildRelationEvent(tenant string, fromCfg, toCfg *catalog.EffectiveConfig, fromID, toID, relType string, removed bool, previousToID string, revision int64, at time.Time) RawOutboxEvent {
 	action := "set"
 	if removed {
 		action = "removed"
 	}
+	relID := "v1/" + sanitizeEventID(tenant) + "/" + sanitizeEventID(fromID) + "/relations/" + sanitizeEventID(relType) + "/" + sanitizeEventID(toID) + "/" + strconv.FormatInt(revision, 10) + "/" + action
 	ev := pkgtypes.RelationChangeV1{
-		RelationID: "partof-" + childID,
-		Type:       "partOf",
-		FromID:     childID,
-		ToID:       parentID,
-		Removed:    removed,
-		Tenant:     tenant,
-		Revision:   revision,
-		ChangedAt:  at,
+		RelationID:   relID,
+		Type:         relType,
+		FromID:       fromID,
+		ToID:         toID,
+		Removed:      removed,
+		PreviousToID: previousToID,
+		Tenant:       tenant,
+		Revision:     revision,
+		ChangedAt:    at,
 	}
 	if fromCfg != nil {
 		ev.FromThingType = fromCfg.TemplateID
+		ev.FromThingTypeVersion = fromCfg.TemplateVersion
 		ev.From = describeThing(fromCfg)
 	}
 	if toCfg != nil {
 		ev.ToThingType = toCfg.TemplateID
+		ev.ToThingTypeVersion = toCfg.TemplateVersion
 		ev.To = describeThing(toCfg)
 	}
 	body, _ := json.Marshal(ev)
 	return RawOutboxEvent{
-		ID:    "v1/" + sanitizeEventID(tenant) + "/" + sanitizeEventID(childID) + "/relations/partof/" + strconv.FormatInt(revision, 10) + "/" + action,
+		ID:    relID,
 		Topic: ev.TopicName(), Payload: body, ObservedAt: at, Revision: revision,
 	}
+}
+
+// buildPartOfRelationEvent är bakåtkompatibel wrapper för partOf (används av
+// äldre anropare; nya anropare använder buildRelationEvent direkt med typ).
+func buildPartOfRelationEvent(tenant string, fromCfg, toCfg *catalog.EffectiveConfig, childID, parentID string, removed bool, revision int64, at time.Time) RawOutboxEvent {
+	return buildRelationEvent(tenant, fromCfg, toCfg, childID, parentID, "partOf", removed, "", revision, at)
 }
 
 // loadParentCfg läser och avkodar en förälders config för
@@ -548,6 +706,9 @@ type BatchOutcome struct {
 // (tenant, messageID, sak) twice -> ingen omberäkning; lagrade händelser
 // returneras för återpublicering.
 func (rt *Runtime) HandleBatch(ctx context.Context, tenant, messageID string, obs []things.Observation, receivedAt time.Time) (outcomes []BatchOutcome, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if tenant == "" {
 		return nil, fmt.Errorf("%w: tenant must be provided", things.ErrValidation)
 	}
@@ -670,19 +831,79 @@ func (rt *Runtime) persistBatch(ctx context.Context, tenant, messageID, id strin
 			v.StateJSON = cloneBytes(v.StateJSON)
 			sd.state.ProcessorStates[k] = v
 		}
+		sd.state.LastMessageID = messageID
+		fence := sd.state.DataRevision
+		sd.state.DataRevision++
+		// Frys deskriptor + versionsreferenser + snapshot vid beräkning
+		// (PLAN1050 B2): köade poster behåller fryst unit+descriptor+
+		// configRevision över konfigurationsbyte och omstart - sluta berika
+		// från aktuell config vid drain. Snapshot är full current-state
+		// efter uppdatering (alla current med frysta enheter), inte en
+		// sammanfogning av historiska observationer.
+		frozenThing := describeThing(sd.config)
+		frozenSnapshot := make(map[string]CurrentValue, len(sd.state.Current))
+		for k, v := range sd.state.Current {
+			cp := v
+			if v.Value != nil {
+				c := *v.Value
+				cp.Value = &c
+			}
+			// Backfill för legacy-current utan frysta fält (pre-PLAN1050):
+			// enhet från aktuell (frysta) config, revision från låst revision.
+			// Nya skrivningar sätter alltid Unit+ConfigRevision i flödet.
+			if cp.Unit == "" {
+				if prop, ok := sd.config.Properties[k]; ok {
+					cp.Unit = prop.Unit
+				}
+			}
+			if cp.ConfigRevision == 0 {
+				cp.ConfigRevision = sd.state.Revision
+			}
+			frozenSnapshot[k] = cp
+		}
+		// PendingRemoved (prune vid config-byte) publiceras med nästa
+		// värdesevent som removed[] (snapshot saknas + removed[]); rensas
+		// efter första publicering (ss. explicit rensning endast via
+		// removeAttributes/lifecycle-regel - ogiltig obs rensar aldrig).
+		// Tomma batchar (late-only, inga events) konsumerar ej PendingRemoved
+		// (ingen bärare för removed[]).
+		pendingRemoved := append([]string(nil), sd.state.PendingRemoved...)
+		for i := range outcome.Events {
+			outcome.Events[i].FrozenThingType = sd.config.TemplateID
+			outcome.Events[i].FrozenThingTypeVersion = sd.config.TemplateVersion
+			outcome.Events[i].FrozenThing = frozenThing
+			// Djupkopiera snapshot per event (ingen aliasing mellan events).
+			cpSnap := make(map[string]CurrentValue, len(frozenSnapshot))
+			for k, v := range frozenSnapshot {
+				cv := v
+				if v.Value != nil {
+					c := *v.Value
+					cv.Value = &c
+				}
+				cpSnap[k] = cv
+			}
+			outcome.Events[i].FrozenSnapshot = cpSnap
+			outcome.Events[i].FrozenRemoved = append([]string(nil), pendingRemoved...)
+		}
+		if len(outcome.Events) > 0 && len(pendingRemoved) > 0 {
+			sd.state.PendingRemoved = nil
+		}
+		// LastEvents med frysta fält (dubblett-replay återpublicerar samma
+		// frysta händelser utan omberäkning).
 		if len(outcome.Events) > 0 {
 			sd.state.LastEvents = append([]FlowEvent(nil), outcome.Events...)
 		} else {
 			sd.state.LastEvents = nil
 		}
-		sd.state.LastMessageID = messageID
-		fence := sd.state.DataRevision
-		sd.state.DataRevision++
 		// Spara transportens trace-context separat från domänpayload i
 		// outbox (TV-07): omstart dränerar med länk till ursprunget.
 		if tc := traceContextFrom(ctx); tc != nil {
 			for i := range outcome.Events {
 				outcome.Events[i].TraceContext = tc
+			}
+			// LastEvents delar inte TraceContext-pekare (kopiera).
+			for i := range sd.state.LastEvents {
+				sd.state.LastEvents[i].TraceContext = tc
 			}
 		}
 		if rt.store.CommitBatch(ctx, tenant, id, messageID, fence, sd.state, outcome.History, outcome.Events) {
@@ -746,6 +967,9 @@ func decodeConfig(raw []byte) (*catalog.EffectiveConfig, error) {
 // partOf-länk köas för konsumenter före lagringens rensning (som tömmer
 // väntande händelser för saken).
 func (rt *Runtime) DeleteThing(ctx context.Context, tenant, thingID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if tenant == "" || thingID == "" {
 		return fmt.Errorf("%w: tenant and thing ID must be provided", things.ErrValidation)
 	}
@@ -770,36 +994,59 @@ func (rt *Runtime) DeleteThing(ctx context.Context, tenant, thingID string) erro
 		return fmt.Errorf("runtime: thing %q has undecodable config: %w", thingID, err)
 	}
 	// Ett atomärt anrop: barnkontroll (igen, mot samtidig attach),
-	// detach, state-delete och events. Misslyckas något är ingenting
-	// ändrat — till skillnad från tidigare uppdelad sekvens (TV-03).
+	// detach (alla utgående, alla namn), state-delete och events.
+	// Misslyckas något är ingenting ändrat - till skillnad från tidigare
+	// uppdelad sekvens (TV-03). Inkommande icke-partOf-referenser från andra
+	// saker behålls som brutna (target:null vid läsning); barn blockerar.
+	// Varje utgående länk publicerar removed:true med sista to-descriptor.
 	now := time.Now().UTC()
-	raw := []RawOutboxEvent{buildLifecycleEvent(tenant, cfg, pkgtypes.ThingDeleted, st.Revision, now)}
+	tcDel := traceContextFrom(ctx)
+	lc := buildLifecycleEvent(tenant, cfg, pkgtypes.ThingDeleted, st.Revision, now)
+	lc.TraceContext = tcDel
+	raw := []RawOutboxEvent{lc}
 	if hasParent {
 		parentCfg, err := rt.loadParentCfg(ctx, tenant, parent)
 		if err != nil {
 			return err
 		}
-		raw = append(raw, buildRelationEvent(tenant, cfg, parentCfg, thingID, parent, true, st.Revision, now))
+		re := buildRelationEvent(tenant, cfg, parentCfg, thingID, parent, "partOf", true, "", st.Revision, now)
+		re.TraceContext = tcDel
+		raw = append(raw, re)
+	}
+	// Utgående generella länkar (alla namn utom partOf, från blob): varje
+	// länk detachas (tabell) + removed:true med sista to-descriptor.
+	// Inkommande lämnas som brutna (target:null), partOf-barn blockerar.
+	for _, rel := range cfg.Relations {
+		if rel.Name == "partOf" {
+			continue
+		}
+		toCfg, err := rt.loadParentCfg(ctx, tenant, rel.TargetThingID)
+		if err != nil {
+			// Saknat mål vid delete-tid? cfg listar länken men målet redan
+			// borta (tidigare delete utan detach av inkommande) - publicera
+			// ändå removed med null To (bruten redan).
+			if errors.Is(err, things.ErrNotFound) {
+				re := buildRelationEvent(tenant, cfg, nil, thingID, rel.TargetThingID, rel.Name, true, "", st.Revision, now)
+				re.TraceContext = tcDel
+				raw = append(raw, re)
+				continue
+			}
+			return err
+		}
+		re := buildRelationEvent(tenant, cfg, toCfg, thingID, rel.TargetThingID, rel.Name, true, "", st.Revision, now)
+		re.TraceContext = tcDel
+		raw = append(raw, re)
 	}
 	return rt.store.DeleteThingWithRelations(ctx, tenant, thingID, raw)
 }
 
-// MoveThing flyttar ett barns partOf-förälder atomärt under låset.
-// Barnets ID, bindningar, konfiguration och historik påverkas inte.
-func (rt *Runtime) MoveThing(ctx context.Context, tenant, childID, newParentID string) error {
-	if tenant == "" || childID == "" || newParentID == "" {
-		return fmt.Errorf("%w: tenant, child and parent must be provided", things.ErrValidation)
-	}
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if _, ok := rt.store.LoadThing(ctx, tenant, childID); !ok {
-		return fmt.Errorf("%w: thing %q", things.ErrNotFound, childID)
-	}
-	if _, ok := rt.store.LoadThing(ctx, tenant, newParentID); !ok {
-		return fmt.Errorf("%w: thing %q", things.ErrNotFound, newParentID)
-	}
-	return rt.store.MoveChild(ctx, tenant, childID, newParentID)
-}
+// MoveThing är borttagen (PLAN1050 B1): direkt flytt via store.MoveChild utan
+// revision/event är inte revisionsriktig (ingen If-Match, ingen
+// RegisterThing, ingen outbox-händelse, blobens Relations divergerar från
+// hierarkin så att efterföljande SwapBindings/Upgrade återställer gammal
+// förälder). Enda revisionsriktiga vägen är Manager.MoveObject via
+// RegisterThing+drain (omkompilering+atomär SaveThingWithRelations, revision
+// bumpas, relationsevent publiceras). Anropare migrerar till Manager.
 
 // StableEventID är det stabila deduplicerings-ID:t per (sak, meddelande,
 // egenskap): återleverans ger samma ID så att konsumenter deduplicerar.
@@ -808,36 +1055,120 @@ func StableEventID(tenant, thingID, messageID, property string) string {
 }
 
 // buildThingValuesEvent mappar en batchs FlowEvents till ett versionerat
-// kontraktsevent. Sources (ström-ID:n) slås ihop kommaseparerat: full
-// proveniens (antal tillgängliga/förväntade per ingång) stannar i
-// historik/outbox-lagren; kontraktsutökning är K1-arbete.
+// delta+snapshot-kontraktsevent. Sources (ström-ID:n) slås ihop
+// kommaseparerat: full proveniens (antal tillgängliga/förväntade per ingång)
+// stannar i historik/outbox-lagren; kontraktsutökning är K1-arbete.
+//
+// Delta är denna messageId-grupp (inklusive invalid-poster, ValueNull för
+// saknat - aldrig 0 för null); snapshot är samtliga current vid commit med
+// frysta enheter (aldrig ommärkta under oförenliga enheter); removed bär
+// borttagna prop-ID:n vid config-byte. Values är deprecated alias == delta
+// (en release). Unit, deskriptor, thingType/version och revision är frysta
+// vid beräkning/mutation (group[0].Frozen*), aldrig berikade från aktuell
+// config vid drain - köade poster överlever konfigurationsbyte och omstart
+// utan omberäkning. Legacy-rader utan frysta fält faller tillbaka på
+// anroparens current-värden (units/descriptor/thingType) för wire-kompat.
 func buildThingValuesEvent(tenant, thingID, thingType, thingTypeVersion string, units map[string]string, events []FlowEvent, revision int64, publishedAt time.Time) pkgtypes.ThingValuesEventV1 {
-	values := make([]pkgtypes.ThingValueV1, 0, len(events))
+	delta := make([]pkgtypes.ThingValueV1, 0, len(events))
 	var messageID string
+	// Frysta fält från group[0] (samma för hela gruppen vid commit).
+	var frozenThing *pkgtypes.ThingDescriptorV1
+	var frozenType, frozenTypeVersion string
+	var frozenSnapshot map[string]CurrentValue
+	var frozenRemoved []string
+	useFrozen := false
+	if len(events) > 0 && (events[0].FrozenThing != nil || events[0].FrozenSnapshot != nil || events[0].FrozenThingType != "") {
+		useFrozen = true
+		frozenThing = events[0].FrozenThing
+		frozenType = events[0].FrozenThingType
+		frozenTypeVersion = events[0].FrozenThingTypeVersion
+		frozenSnapshot = events[0].FrozenSnapshot
+		frozenRemoved = events[0].FrozenRemoved
+	}
+	if useFrozen {
+		if frozenType != "" {
+			thingType = frozenType
+		}
+		if frozenTypeVersion != "" {
+			thingTypeVersion = frozenTypeVersion
+		}
+	}
 	for _, e := range events {
 		if messageID == "" {
 			messageID = e.MessageID
 		}
-		v := e.Value
-		values = append(values, pkgtypes.ThingValueV1{
+		// Enhet fryst vid beräkning; fallback till current-units för legacy.
+		unit := e.Unit
+		if unit == "" {
+			unit = units[e.PropertyID]
+		}
+		// Revision fryst per grupp (låst vid beräkning); e.ConfigRevision
+		// är samma för hela gruppen, revision-parametern är group[0]-värdet.
+		rev := revision
+		if e.ConfigRevision != 0 {
+			rev = e.ConfigRevision
+		}
+		delta = append(delta, pkgtypes.ThingValueV1{
 			Schema:         pkgtypes.SchemaV1,
 			ThingID:        thingID,
 			Tenant:         tenant,
 			PropertyID:     e.PropertyID,
-			Value:          &v,
+			Value:          e.ValuePtr(),
 			Quality:        e.Quality,
-			Unit:           units[e.PropertyID],
+			Unit:           unit,
 			Source:         strings.Join(e.Sources, ","),
 			MessageID:      e.MessageID,
 			ObservedAt:     e.ObservedAt,
 			ReceivedAt:     e.ReceivedAt,
 			ComputedAt:     publishedAt,
 			PublishedAt:    publishedAt,
-			ConfigRevision: revision,
+			ConfigRevision: rev,
 			EventID:        StableEventID(tenant, thingID, e.MessageID, e.PropertyID),
 		})
 	}
-	return pkgtypes.ThingValuesEventV1{
+	// Snapshot: fryst current-state vid commit (alla current med frysta
+	// enheter), sorterat på propertyId för determinism. Legacy-rader utan
+	// fryst snapshot ger tom snapshot (deprecated beteende: endast delta).
+	var snapshot []pkgtypes.ThingSnapshotValueV1
+	if useFrozen && len(frozenSnapshot) > 0 {
+		snapshot = make([]pkgtypes.ThingSnapshotValueV1, 0, len(frozenSnapshot))
+		for propID, cur := range frozenSnapshot {
+			unit := cur.Unit
+			if unit == "" {
+				unit = units[propID]
+			}
+			rev := revision
+			if cur.ConfigRevision != 0 {
+				rev = cur.ConfigRevision
+			}
+			snapshot = append(snapshot, pkgtypes.ThingSnapshotValueV1{
+				PropertyID:     propID,
+				Value:          cloneFloatPtr(cur.Value),
+				Quality:        cur.Quality,
+				Unit:           unit,
+				ObservedAt:     cur.ObservedAt,
+				ReceivedAt:     cur.ReceivedAt,
+				Source:         cur.Source,
+				MessageID:      cur.MessageID,
+				ConfigRevision: rev,
+			})
+		}
+		sort.Slice(snapshot, func(i, j int) bool { return snapshot[i].PropertyID < snapshot[j].PropertyID })
+	}
+	// Deterministisk delta-ordning (samma som flödets events-ordning).
+	sort.Slice(delta, func(i, j int) bool {
+		if delta[i].PropertyID != delta[j].PropertyID {
+			return delta[i].PropertyID < delta[j].PropertyID
+		}
+		if !delta[i].ObservedAt.Equal(delta[j].ObservedAt) {
+			return delta[i].ObservedAt.Before(delta[j].ObservedAt)
+		}
+		return delta[i].EventID < delta[j].EventID
+	})
+	// Values är deprecated alias == delta (en release): samma innehåll.
+	values := make([]pkgtypes.ThingValueV1, len(delta))
+	copy(values, delta)
+	ev := pkgtypes.ThingValuesEventV1{
 		Schema: pkgtypes.SchemaV1,
 		EventID: "v1/" + EncodeEventSegment(tenant) + "/" +
 			EncodeEventSegment(thingID) + "/" + EncodeEventSegment(messageID),
@@ -847,8 +1178,13 @@ func buildThingValuesEvent(tenant, thingID, thingType, thingTypeVersion string, 
 		ThingTypeVersion: thingTypeVersion,
 		ConfigRevision:   revision,
 		PublishedAt:      publishedAt,
+		Thing:            frozenThing,
+		Delta:            delta,
+		Snapshot:         snapshot,
+		Removed:          frozenRemoved,
 		Values:           values,
 	}
+	return ev
 }
 
 // DrainAndPublish levererar väntande händelser för en sak: först råa
@@ -908,16 +1244,20 @@ func (rt *Runtime) DrainAndPublish(ctx context.Context, pub EventPublisher, tena
 	published = 0
 	for _, group := range groups {
 		rev := st.Revision
-		if len(group) > 0 {
+		if len(group) > 0 && group[0].ConfigRevision != 0 {
 			rev = group[0].ConfigRevision
 		}
+		// Frysta unit+descriptor+revision från group[0] (satta vid
+		// beräkning/mutation) vinner över aktuell config; current cfg är
+		// endast fallback för legacy-rader utan frysta fält. Sluta berika
+		// gamla poster från aktuell config vid drain (känd lucka RÄTTAD).
 		ev := buildThingValuesEvent(tenant, thingID, cfg.TemplateID, cfg.TemplateVersion, units, group, rev, now)
-		ev.Thing = describeThing(cfg)
-		for _, v := range ev.Values {
-			if verr := v.Validate(); verr != nil {
-				err = fmt.Errorf("runtime: invalid value event: %w", verr)
-				return published, err
-			}
+		if ev.Thing == nil {
+			ev.Thing = describeThing(cfg)
+		}
+		if verr := ev.Validate(); verr != nil {
+			err = fmt.Errorf("runtime: invalid value event: %w", verr)
+			return published, err
 		}
 		// Länka till ursprungsobservationen (TV-07): outbox bevarar
 		// trace-context över omstart; dränering publicerar med länk så att
