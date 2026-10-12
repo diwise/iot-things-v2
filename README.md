@@ -12,4 +12,4 @@ docker build -f deployments/Dockerfile .
 
 ### TODO
 
-this will replace iot-things.
+this will replace iot-things...
