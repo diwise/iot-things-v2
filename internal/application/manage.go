@@ -265,6 +265,20 @@ func (m *Manager) SwapBindings(ctx context.Context, tenant, thingID string, bind
 		return nil, err
 	}
 	obj.Bindings = bindings
+	// Kopplad ingång utan aktiverad egenskap ignoreras tyst av flödet
+	// (cfg.Properties saknar input -> skip, inga värden). GUI:t skapar
+	// saker med bara required-egenskaper och lägger bindningar via
+	// SwapBindings, så optional-egenskaper (t.ex. greenhouse v2) fastnade
+	// tomma för alltid. Aktivera bundna ingångar automatiskt; bortkopplade
+	// lämnas kvar (historik/current behålls).
+	if obj.Properties == nil {
+		obj.Properties = map[string]things.Property{}
+	}
+	for _, b := range bindings {
+		if _, ok := obj.Properties[b.Input]; !ok {
+			obj.Properties[b.Input] = things.Property{}
+		}
+	}
 	cfg, err := m.rt.RegisterThing(ctx, tenant, m.cat, obj, revision)
 	if err != nil {
 		return nil, err
@@ -633,7 +647,7 @@ func (m *Manager) ListTags(ctx context.Context, tenant string) []string {
 		if err != nil {
 			continue
 		}
-		for _, tag := range strings.Split(cfg.Metadata["tags"], ",") {
+		for tag := range strings.SplitSeq(cfg.Metadata["tags"], ",") {
 			if tag = strings.TrimSpace(tag); tag != "" {
 				seen[tag] = struct{}{}
 			}
@@ -707,7 +721,7 @@ func (m *Manager) ExportObjects(ctx context.Context, tenant string) []catalog.Ob
 // metadata-tags (importformatet): exakt match per tagg efter trimning,
 // så "park" matchar "park, centrum" men inte "parker".
 func hasTag(raw, tag string) bool {
-	for _, part := range strings.Split(raw, ",") {
+	for part := range strings.SplitSeq(raw, ",") {
 		if strings.TrimSpace(part) == tag {
 			return true
 		}

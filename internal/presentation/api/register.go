@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -181,10 +182,8 @@ func tenants(r *http.Request, scope auth.Scope) ([]string, error) {
 		return nil, errUnauthorized
 	}
 	if selected := r.URL.Query().Get("tenant"); selected != "" {
-		for _, t := range authorized {
-			if t == selected {
-				return []string{selected}, nil
-			}
+		if slices.Contains(authorized, selected) {
+			return []string{selected}, nil
 		}
 		return nil, errUnauthorized
 	}

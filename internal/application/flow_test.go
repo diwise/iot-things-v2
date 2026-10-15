@@ -1236,10 +1236,10 @@ func TestPerRecipeLinearConversions(t *testing.T) {
 	}
 }
 
-// Seed-backed SI-parity: building/v3 och sink/v3 ur catalog-seed.json
-// kompilerar och konverterar v1-råvärden (J->kWh, W->kW) med låsta
-// faktorer. Låser att seed-innehållet faktiskt sluter konverteringsgapet,
-// inte bara att motorn kan linear (se TestPerRecipeLinearConversions).
+// Seed-backed SI-parity: building/v3 ur catalog-seed.json kompilerar och
+// konverterar v1-råvärden (J->kWh, W->kW) med låsta faktorer. Låser att
+// seed-innehållet faktiskt sluter konverteringsgapet, inte bara att motorn
+// kan linear (se TestPerRecipeLinearConversions). Sink är borttagen.
 func TestSeedV3SIConversions(t *testing.T) {
 	raw, err := os.ReadFile("../../assets/config/catalog-seed.json")
 	if err != nil {
@@ -1258,14 +1258,8 @@ func TestSeedV3SIConversions(t *testing.T) {
 
 	compile := func(thingID, templateID string) catalog.EffectiveConfig {
 		t.Helper()
-		props := map[string]things.Property{"energy": {}, "power": {}, "energyKwh": {}, "powerKw": {}}
-		if templateID == "sink" {
-			for _, id := range []string{"temperature", "presence", "distance", "digitalInput", "illuminance", "humidity"} {
-				props[id] = things.Property{}
-			}
-		} else {
-			props["temperature"] = things.Property{}
-		}
+		props := map[string]things.Property{"energy": {}, "power": {}, "energyKwh": {}, "powerKw": {},
+			"temperature": {}}
 		cfg, err := c.Compile(catalog.ObjectSpec{
 			ThingID: thingID, Tenant: "t", Name: thingID,
 			Location: rtLoc(), Metadata: rtMeta(),
@@ -1291,7 +1285,7 @@ func TestSeedV3SIConversions(t *testing.T) {
 			Quality: things.QualityOK, ObservedAt: base, ReceivedAt: base},
 	}
 
-	for _, templateID := range []string{"building", "sink"} {
+	for _, templateID := range []string{"building"} {
 		cfg := compile("si-"+templateID, templateID)
 		out, err := EvaluateBatchFlow(&cfg, nil, nil, obs, base, "m1", 1)
 		if err != nil {

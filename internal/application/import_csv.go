@@ -33,6 +33,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -63,10 +64,6 @@ var csvTypeInputs = map[string][]csvInput{
 	"container": {
 		{"distance", "urn:oma:lwm2m:ext:3330", "5700"},
 	},
-	"desk": {
-		{"presence", "urn:oma:lwm2m:ext:3200", "5500"},
-		{"presence", "urn:oma:lwm2m:ext:3302", "5500"},
-	},
 	"lifebuoy": {
 		{"presence", "urn:oma:lwm2m:ext:3200", "5500"},
 		{"presence", "urn:oma:lwm2m:ext:3302", "5500"},
@@ -90,16 +87,6 @@ var csvTypeInputs = map[string][]csvInput{
 		{"distance", "urn:oma:lwm2m:ext:3330", "5700"},
 		{"digitalInput", "urn:oma:lwm2m:ext:3200", "5500"},
 	},
-	"sink": {
-		{"temperature", "urn:oma:lwm2m:ext:3303", "5700"},
-		{"presence", "urn:oma:lwm2m:ext:3302", "5500"},
-		{"power", "urn:oma:lwm2m:ext:3328", "5700"},
-		{"energy", "urn:oma:lwm2m:ext:3331", "5700"},
-		{"distance", "urn:oma:lwm2m:ext:3330", "5700"},
-		{"digitalInput", "urn:oma:lwm2m:ext:3200", "5500"},
-		{"illuminance", "urn:oma:lwm2m:ext:3301", "5700"},
-		{"humidity", "urn:oma:lwm2m:ext:3304", "5700"},
-	},
 	"watermeter": {
 		{"volume", "urn:oma:lwm2m:ext:3424", "1"},
 		{"leakage", "urn:oma:lwm2m:ext:3424", "10"},
@@ -118,6 +105,34 @@ func csvTemplate(v1type string) (string, bool) {
 		return v1type, true
 	}
 	return "", false
+}
+
+// latestSeedTemplate returnerar senaste publicerade version av en mall
+// (seed-filen innehåller efter rensning bara senaste version per mall:
+// wastebin/room/lifebuoy/passage/pumpingstation/sewer/watermeter v2,
+// building/pointofinterest v3, greenhouse v2, tank v6; desk/sink borttagna).
+func latestSeedTemplate(cat *catalog.Catalog, templateID string) (catalog.TemplateSpec, string, bool) {
+	var best catalog.TemplateSpec
+	bestVer := ""
+	bestNum := -1
+	for _, spec := range cat.ListTemplates() {
+		if spec.Template.ID != templateID {
+			continue
+		}
+		n := 0
+		if _, err := fmt.Sscanf(spec.Template.Version, "v%d", &n); err != nil {
+			continue
+		}
+		if n > bestNum {
+			bestNum = n
+			best = spec
+			bestVer = spec.Template.Version
+		}
+	}
+	if bestNum < 0 {
+		return catalog.TemplateSpec{}, "", false
+	}
+	return best, bestVer, true
 }
 
 // csvProperty maps a v1 input name to the v2 property for templates where
@@ -200,9 +215,9 @@ func (m *Manager) csvRow(record []string) (catalog.ObjectSpec, string) {
 	if !ok {
 		return fail("unknown type %q", record[1])
 	}
-	tmpl, ok := m.cat.GetTemplate(templateID, "v1")
+	tmpl, tmplVersion, ok := latestSeedTemplate(m.cat, templateID)
 	if !ok {
-		return fail("template %s/v1 not published (seed catalog first)", templateID)
+		return fail("template %s not published (seed catalog first)", templateID)
 	}
 	tenant := strings.TrimSpace(record[6])
 	if tenant == "" {
@@ -214,7 +229,7 @@ func (m *Manager) csvRow(record []string) (catalog.ObjectSpec, string) {
 		Tenant:          tenant,
 		Name:            strings.TrimSpace(record[3]),
 		TemplateID:      templateID,
-		TemplateVersion: "v1",
+		TemplateVersion: tmplVersion,
 		Properties:      map[string]things.Property{},
 	}
 
@@ -255,9 +270,7 @@ func (m *Manager) csvRow(record []string) (catalog.ObjectSpec, string) {
 	}
 
 	md := map[string]string{}
-	for k, v := range meta {
-		md[k] = v
-	}
+	maps.Copy(md, meta)
 	// K1: subType och alternativeName befordras till förstklassiga fält
 	// (bakåtkompatibelt: de stannar även i metadata för äldre konsumenter).
 	if sub := strings.TrimSpace(record[2]); sub != "" {
@@ -286,7 +299,7 @@ func (m *Manager) csvRow(record []string) (catalog.ObjectSpec, string) {
 // a missing binding would create a thing without its intended signal).
 func csvBindings(col string, inputs []csvInput) ([]things.Binding, string) {
 	var out []things.Binding
-	for _, seg := range strings.Split(col, ",") {
+	for seg := range strings.SplitSeq(col, ",") {
 		seg = strings.TrimSpace(seg)
 		if seg == "" {
 			continue

@@ -51,17 +51,17 @@ func TestImportCSV(t *testing.T) {
 	for _, f := range failures {
 		t.Logf("row %d (%s): %s", f.Row, f.ID, f.Error)
 	}
-	if added != 5 || skipped != 0 {
-		t.Fatalf("added=%d skipped=%d, want 5/0", added, skipped)
+	if added != 4 || skipped != 0 {
+		t.Fatalf("added=%d skipped=%d, want 4/0", added, skipped)
 	}
-	if len(failures) != 5 {
-		t.Fatalf("failures=%+v, want 5", failures)
+	if len(failures) != 6 {
+		t.Fatalf("failures=%+v, want 6", failures)
 	}
 	rows := map[int]bool{}
 	for _, f := range failures {
 		rows[f.Row] = true
 	}
-	for _, want := range []int{6, 7, 8, 9, 10} {
+	for _, want := range []int{4, 6, 7, 8, 9, 10} {
 		if !rows[want] {
 			t.Fatalf("failures=%+v, want row %d rejected", failures, want)
 		}
@@ -72,8 +72,8 @@ func TestImportCSV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reimport: %v", err)
 	}
-	if added != 0 || skipped != 5 || len(failures) != 5 {
-		t.Fatalf("reimport added=%d skipped=%d failures=%d, want 0/5/5", added, skipped, len(failures))
+	if added != 0 || skipped != 4 || len(failures) != 6 {
+		t.Fatalf("reimport added=%d skipped=%d failures=%d, want 0/4/6", added, skipped, len(failures))
 	}
 
 	// Tunnan bär subtyp/taggar i metadata och får mått som overrides.

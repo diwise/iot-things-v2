@@ -1556,16 +1556,16 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if added != 44 || skipped != 0 {
-		t.Fatalf("seed added=%d skipped=%d, want 44/0", added, skipped)
+	if added != 17 || skipped != 0 {
+		t.Fatalf("seed added=%d skipped=%d, want 17/0", added, skipped)
 	}
 	// Idempotent: andra seedningen skippar allt.
 	added, skipped, err = mgr.SeedCatalog(ctx, seed)
 	if err != nil {
 		t.Fatalf("reseed: %v", err)
 	}
-	if added != 0 || skipped != 44 {
-		t.Fatalf("reseed added=%d skipped=%d, want 0/42", added, skipped)
+	if added != 0 || skipped != 17 {
+		t.Fatalf("reseed added=%d skipped=%d, want 0/17", added, skipped)
 	}
 
 	bind := func(device, object, resource, input string) things.Binding {
@@ -1580,14 +1580,14 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 	}
 	objects := []catalog.ObjectSpec{
 		{
-			ThingID: "bin-1", TemplateID: "wastebin", TemplateVersion: "v1",
-			VariantID: "wastebin-B", VariantVersion: "v1",
+			ThingID: "bin-1", TemplateID: "wastebin", TemplateVersion: "v2",
+			VariantID: "wastebin-B", VariantVersion: "v2",
 			Properties:     props("distance", "level", "fillRate"),
 			Bindings:       []things.Binding{bind("s-bin", seedDistURN, "5700", "distance")},
 			ParamOverrides: map[string]float64{"sensorToBottom": 1.5},
 		},
 		{
-			ThingID: "room-1", TemplateID: "room", TemplateVersion: "v1",
+			ThingID: "room-1", TemplateID: "room", TemplateVersion: "v2",
 			Properties: props("temperature.window", "temperature.center", "temperature.door", "temperature.average"),
 			Bindings: []things.Binding{
 				bind("s-r1", seedTempURN, "5700", "temperature.window"),
@@ -1596,39 +1596,34 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 			},
 		},
 		{
-			ThingID: "building-1", TemplateID: "building", TemplateVersion: "v1",
+			ThingID: "building-1", TemplateID: "building", TemplateVersion: "v3",
 			Properties: props("energy", "power", "temperature"),
 			Bindings: []things.Binding{
 				bind("s-b", seedTempURN, "5700", "temperature"),
 			},
 		},
 		{
-			ThingID: "poi-1", TemplateID: "pointofinterest", TemplateVersion: "v1",
+			ThingID: "poi-1", TemplateID: "pointofinterest", TemplateVersion: "v3",
 			Properties: props("temperature"),
 			Bindings:   []things.Binding{bind("s-poi", seedTempURN, "5700", "temperature")},
 		},
 		{
-			ThingID: "desk-1", TemplateID: "desk", TemplateVersion: "v1",
-			Properties: props("presence"),
-			Bindings:   []things.Binding{bind("s-desk", seedDinURN, "5500", "presence")},
-		},
-		{
-			ThingID: "lifebuoy-1", TemplateID: "lifebuoy", TemplateVersion: "v1",
+			ThingID: "lifebuoy-1", TemplateID: "lifebuoy", TemplateVersion: "v2",
 			Properties: props("presence"),
 			Bindings:   []things.Binding{bind("s-life", seedDinURN, "5500", "presence")},
 		},
 		{
-			ThingID: "passage-1", TemplateID: "passage", TemplateVersion: "v1",
+			ThingID: "passage-1", TemplateID: "passage", TemplateVersion: "v2",
 			Properties: props("door", "passages"),
 			Bindings:   []things.Binding{bind("s-pass", seedDinURN, "5500", "door")},
 		},
 		{
-			ThingID: "pump-1", TemplateID: "pumpingstation", TemplateVersion: "v1",
+			ThingID: "pump-1", TemplateID: "pumpingstation", TemplateVersion: "v2",
 			Properties: props("run", "runTime"),
 			Bindings:   []things.Binding{bind("s-pump", seedDinURN, "5500", "run")},
 		},
 		{
-			ThingID: "sewer-1", TemplateID: "sewer", TemplateVersion: "v1",
+			ThingID: "sewer-1", TemplateID: "sewer", TemplateVersion: "v2",
 			Properties: props("distance", "level", "fillRate", "overflow", "overflowTime"),
 			Bindings: []things.Binding{
 				bind("s-sewer", seedDistURN, "5700", "distance"),
@@ -1637,21 +1632,13 @@ func TestManageSeedCatalogEndToEnd(t *testing.T) {
 			ParamOverrides: map[string]float64{"usableHeight": 2.0, "sensorToBottom": 2.5},
 		},
 		{
-			ThingID: "water-1", TemplateID: "watermeter", TemplateVersion: "v1",
+			ThingID: "water-1", TemplateID: "watermeter", TemplateVersion: "v2",
 			Properties: props("volume", "leakage", "backflow", "fraud"),
 			Bindings: []things.Binding{
 				bind("s-wm", "urn:oma:lwm2m:ext:3424", "1", "volume"),
 				bind("s-wm", "urn:oma:lwm2m:ext:3424", "10", "leakage"),
 				bind("s-wm", "urn:oma:lwm2m:ext:3424", "11", "backflow"),
 				bind("s-wm", "urn:oma:lwm2m:ext:3424", "13", "fraud"),
-			},
-		},
-		{
-			ThingID: "sink-1", TemplateID: "sink", TemplateVersion: "v1",
-			Properties: props("temperature", "presence"),
-			Bindings: []things.Binding{
-				bind("s-sink", seedTempURN, "5700", "temperature"),
-				bind("s-sink", seedDinURN, "5500", "presence"),
 			},
 		},
 	}
@@ -1747,8 +1734,8 @@ func TestManageMigrate160LBins(t *testing.T) {
 		loc, _ := json.Marshal([]float64{lon, lat})
 		obj := catalog.ObjectSpec{
 			ThingID: b.id, Tenant: "default", Name: b.name,
-			TemplateID: "wastebin", TemplateVersion: "v1",
-			VariantID: "wastebin-160L", VariantVersion: "v1",
+			TemplateID: "wastebin", TemplateVersion: "v2",
+			VariantID: "wastebin-160L", VariantVersion: "v2",
 			Location: &things.Location{Type: "Point", Coordinates: loc},
 			Metadata: map[string]string{"capacity": "160L"},
 			Properties: map[string]things.Property{
@@ -2067,7 +2054,7 @@ func TestManageGreenhouseTanks(t *testing.T) {
 		ThingID: "greenhouse-a", Tenant: "t", Name: "Växthus A",
 		Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
 		Metadata:   map[string]string{"site": "campus"},
-		TemplateID: "greenhouse", TemplateVersion: "v1",
+		TemplateID: "greenhouse", TemplateVersion: "v2",
 		Properties: map[string]things.Property{
 			"temperature": {}, "humidity": {}, "co2": {}, "illuminance": {},
 		},
@@ -2086,7 +2073,7 @@ func TestManageGreenhouseTanks(t *testing.T) {
 			ThingID: id, Tenant: "t", Name: "Tank " + id,
 			Location:   &things.Location{Type: "Point", Coordinates: json.RawMessage(`[18.06,59.33]`)},
 			Metadata:   map[string]string{"site": "campus"},
-			TemplateID: "tank", TemplateVersion: "v1",
+			TemplateID: "tank", TemplateVersion: "v6",
 			Properties: map[string]things.Property{
 				"ph": {}, "co2": {}, "temperature": {}, "waterLevel": {},
 			},

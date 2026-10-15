@@ -789,8 +789,8 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse seed: %v", err)
 	}
-	if len(seed.Templates) != 32 {
-		t.Fatalf("templates=%d, want 32 (14 publicerade + 18 nya versioner; tank/v4+ låst till greenhouse)", len(seed.Templates))
+	if len(seed.Templates) != 11 {
+		t.Fatalf("templates=%d, want 11 (rensad: bara senaste per mall; desk/sink borttagna)", len(seed.Templates))
 	}
 	c := New()
 	for _, spec := range seed.Templates {
@@ -839,11 +839,11 @@ func TestSeedFileParsesAndPublishes(t *testing.T) {
 			t.Fatalf("publish variant %s/%s: %v", spec.Variant.ID, spec.Variant.Version, err)
 		}
 	}
-	if got := c.ListTemplates(); len(got) != 32 {
-		t.Fatalf("listed=%d, want 32", len(got))
+	if got := c.ListTemplates(); len(got) != 11 {
+		t.Fatalf("listed=%d, want 11", len(got))
 	}
-	if got := c.ListVariants(); len(got) != 12 {
-		t.Fatalf("variants=%d, want 12 (6 v1 + 6 v2)", len(got))
+	if got := c.ListVariants(); len(got) != 6 {
+		t.Fatalf("variants=%d, want 6 (bara v2 wastebin-varianter)", len(got))
 	}
 }
 
@@ -907,7 +907,8 @@ func TestCompileRequiresDescriptiveFields(t *testing.T) {
 	}
 }
 
-func ptr(v float64) *float64 { return &v }
+//go:fix inline
+func ptr(v float64) *float64 { return new(v) }
 
 // Geometripolicy: default tillåter punkt + polygon men kräver plats;
 // mallen kan låsa till punkt och/eller tillåta saknad plats.
@@ -1023,8 +1024,8 @@ func TestParamInfoRanges(t *testing.T) {
 		tmpl := wastebinTemplate()
 		tmpl.Overridable = []string{"usableHeight", "sensorToBottom"}
 		tmpl.ParamInfo = map[string]ParamDef{
-			"usableHeight":   {Unit: "m", Description: "Användbar höjd", Min: ptr(0.05), Max: ptr(10)},
-			"sensorToBottom": {Unit: "m", Description: "Avstånd givare–tom botten", Min: ptr(0.05), Max: ptr(10)},
+			"usableHeight":   {Unit: "m", Description: "Användbar höjd", Min: new(0.05), Max: ptr(10)},
+			"sensorToBottom": {Unit: "m", Description: "Avstånd givare–tom botten", Min: new(0.05), Max: ptr(10)},
 		}
 		return tmpl
 	}

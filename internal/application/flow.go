@@ -10,8 +10,8 @@
 //   - Direktfasen uppdaterar aktuellt per tidsreglerna i evaluate.go
 //     (senaste mättid vinner, tie-break mottagningstid/källa). Ogiltig
 //     ersätter aldrig aktuellt. Sen observation sparas i historik (B13).
-//   - Enheter måste matcha exakt i v1; avvikande enhet ger historikskrivning
-//     med kvalitet invalid utan current-uppdatering (B12 strikt).
+//   - Enheter måste matcha (case-okänsligt) i v1; avvikande enhet ger
+//     historikskrivning med kvalitet invalid utan current-uppdatering (B12).
 //   - Härledda egenskaper utvärderas efter direktfasen i beroendeordning,
 //     en omgång per rapport: godtycklig ordning inom rapporten ger samma
 //     resultat (B14). Ett resultat/event per härledd egenskap.
@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/diwise/iot-things-v2/internal/application/catalog"
@@ -533,11 +534,13 @@ func matchingInputs(bindings []things.Binding, s things.Signal) []string {
 	return out
 }
 
-// unitMismatch rapporterar strikt enhetsavvikelse i v1: båda angivna och
-// olika nekas; tom enhet på någondera sidan accepteras (äldre källor anger
-// inte alltid enhet).
+// unitMismatch rapporterar enhetsavvikelse i v1: båda angivna och olika
+// nekas; tom enhet på någondera sidan accepteras (äldre källor anger inte
+// alltid enhet). Jämförelsen är case-okänslig så att t.ex. mallens "PPM"
+// matchar trådens "ppm" (iot-agent LWM2M 3428/17 sänder gemener, se
+// compat_test.go:200); äkta byten som Cel mot °F nekas fortfarande.
 func unitMismatch(propUnit, obsUnit string) bool {
-	return propUnit != "" && obsUnit != "" && propUnit != obsUnit
+	return propUnit != "" && obsUnit != "" && !strings.EqualFold(propUnit, obsUnit)
 }
 
 type recipeResult struct {

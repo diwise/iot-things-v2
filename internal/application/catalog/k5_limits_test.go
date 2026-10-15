@@ -44,7 +44,7 @@ func TestCompileRejectsOversizeGeometryAndName(t *testing.T) {
 func TestCompileRejectsLegacyOverCapTemplate(t *testing.T) {
 	c := New()
 	recipes := make([]Recipe, 0, 33)
-	for i := 0; i < 33; i++ {
+	for i := range 33 {
 		recipes = append(recipes, Recipe{
 			Name:     "r" + strings.Repeat("x", 3) + string(rune('a'+i%26)),
 			Operator: "noop", Inputs: []string{"p"}, Outputs: []string{"q"},
