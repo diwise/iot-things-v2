@@ -1024,8 +1024,8 @@ func TestParamInfoRanges(t *testing.T) {
 		tmpl := wastebinTemplate()
 		tmpl.Overridable = []string{"usableHeight", "sensorToBottom"}
 		tmpl.ParamInfo = map[string]ParamDef{
-			"usableHeight":   {Unit: "m", Description: "Användbar höjd", Min: new(0.05), Max: ptr(10)},
-			"sensorToBottom": {Unit: "m", Description: "Avstånd givare–tom botten", Min: new(0.05), Max: ptr(10)},
+			"usableHeight":   {Unit: "m", Description: "Användbar höjd", Min: new(0.05), Max: new(float64(10))},
+			"sensorToBottom": {Unit: "m", Description: "Avstånd givare–tom botten", Min: new(0.05), Max: new(float64(10))},
 		}
 		return tmpl
 	}
@@ -1036,7 +1036,7 @@ func TestParamInfoRanges(t *testing.T) {
 		t.Fatal("info for unknown param must fail")
 	}
 	bad = mk()
-	bad.ParamInfo["usableHeight"] = ParamDef{Min: ptr(5), Max: ptr(1)}
+	bad.ParamInfo["usableHeight"] = ParamDef{Min: new(float64(5)), Max: new(float64(1))}
 	if err := c.PutTemplate(bad); err == nil {
 		t.Fatal("min>max must fail")
 	}
